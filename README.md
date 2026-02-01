@@ -333,3 +333,6 @@ You will need to change the external port for one of the services to something n
       - 8081:8080
 ```
 <br />
+
+For sabnzbd you can use folder structure shown [HERE](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Docker/) <br />
+and then assign categories (similar to what we did in qbittorrent) following [THIS GUIDE](https://trash-guides.info/Downloaders/SABnzbd/Basic-Setup/) <br />
