@@ -164,9 +164,9 @@ services:
       - /docker/appdata/jellyfin:/config
       - /data/media:/data/media:ro
 
-###############################################
-# SEERR - Request Server
-###############################################
+  ###############################################
+  # SEERR - Request Server
+  ###############################################
   seerr:
     <<: *common-keys
     container_name: seerr
@@ -178,11 +178,9 @@ services:
       PUID: 1000
       PGID: 1000
       TZ: America/New_York
-      LOG_LEVEL: debug
-      PORT: 5055
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/seerr:/config
+      - /docker/appdata/seerr:/app/config
 
   ###############################################
   # FLARESOLVERR - Cloudflare Bypass
