@@ -3,21 +3,21 @@
 ###############################################
 
 x-common-keys: &common-keys
-    restart: unless-stopped
-    logging:
-      driver: json-file
-    environment:
-      PUID: 1000
-      PGID: 1000
-      TZ: Europe/London
-    dns:
-      - 1.1.1.1
-      - 1.0.0.1
+  restart: unless-stopped
+  logging:
+    driver: json-file
+  environment:
+    PUID: 1000
+    PGID: 1000
+    TZ: America/New_York
+  dns:
+    - 1.1.1.1
+    - 1.0.0.1
 
 services:
-###############################################
-# RADARR - Movies
-###############################################
+  ###############################################
+  # RADARR - Movies
+  ###############################################
   radarr:
     <<: *common-keys
     container_name: radarr
@@ -29,10 +29,9 @@ services:
       - /docker/appdata/radarr:/config
       - /data:/data
 
-###############################################
-# SONARR - TV Shows
-###############################################
-
+  ###############################################
+  # SONARR - TV Shows
+  ###############################################
   sonarr:
     <<: *common-keys
     container_name: sonarr
@@ -44,10 +43,9 @@ services:
       - /docker/appdata/sonarr:/config
       - /data:/data
 
-###############################################
-# LIDARR - Music
-###############################################
-
+  ###############################################
+  # LIDARR - Music
+  ###############################################
   lidarr:
     <<: *common-keys
     container_name: lidarr
@@ -59,10 +57,23 @@ services:
       - /docker/appdata/lidarr:/config
       - /data:/data
 
-###############################################
-# BAZARR - Subtitles
-###############################################
+  ###############################################
+  # WHISPARR - XXX
+  ###############################################
+  whisparr:
+    <<: *common-keys
+    container_name: whisparr
+    image: ghcr.io/hotio/whisparr:latest
+    ports:
+      - 6969:6969
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/whisparr:/config
+      - /data:/data
 
+  ###############################################
+  # BAZARR - Subtitles
+  ###############################################
   bazarr:
     <<: *common-keys
     container_name: bazarr
@@ -74,10 +85,9 @@ services:
       - /docker/appdata/bazarr:/config
       - /data/media:/data/media
 
-###############################################
-# PROWLARR - Indexer Manager
-###############################################
-
+  ###############################################
+  # PROWLARR - Indexer Manager
+  ###############################################
   prowlarr:
     <<: *common-keys
     container_name: prowlarr
@@ -88,26 +98,23 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/prowlarr:/config
 
-###############################################
-# HOMARR - Indexer Manager
-###############################################
-
+  ###############################################
+  # HOMARR - Dashboard
+  ###############################################
   homarr:
     <<: *common-keys
     container_name: homarr
     image: ghcr.io/ajnart/homarr:latest
     ports:
       - 7575:7575
-    restart: unless-stopped
     volumes:
       - /docker/appdata/homarr/configs:/app/data/configs
       - /docker/appdata/homarr/icons:/app/public/icons
       - /docker/appdata/homarr/data:/data
 
-###############################################
-# QBITTORRENT - Downloader
-###############################################
-
+  ###############################################
+  # QBITTORRENT - Downloader
+  ###############################################
   qbittorrent:
     <<: *common-keys
     container_name: qbittorrent
@@ -117,15 +124,22 @@ services:
       - 6881:6881
       - 6881:6881/udp
     environment:
-      - QBT_LEGAL_NOTICE=confirm
-      - WEBUI_PORT=8080
-      - TORRENTING_PORT=6881
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      QBT_LEGAL_NOTICE: confirm
+      WEBUI_PORT: 8080
+      TORRENTING_PORT: 6881
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/qbittorrent:/config
       - /data:/data
 
+  ###############################################
+  # SABNZBD - Usenet Downloader
+  ###############################################
   sabnzbd:
+    <<: *common-keys
     container_name: sabnzbd
     image: ghcr.io/hotio/sabnzbd:latest
     ports:
@@ -136,25 +150,23 @@ services:
       - /docker/appdata/sabnzbd:/config
       - /data:/data
 
-###############################################
-# JELLYFIN - Media Server
-###############################################
-
+  ###############################################
+  # JELLYFIN - Media Server
+  ###############################################
   jellyfin:
     <<: *common-keys
     container_name: jellyfin
     image: ghcr.io/hotio/jellyfin:latest
+    ports:
+      - 8096:8096
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/jellyfin:/config
-      - /data/media:/data/media:ro #read-only
-    ports:
-      - 8096:8096
+      - /data/media:/data/media:ro
 
-###################################
-# FLARESOLVERR - Cloudflare Bypass
-###################################
-
+  ###############################################
+  # FLARESOLVERR - Cloudflare Bypass
+  ###############################################
   flaresolverr:
     <<: *common-keys
     container_name: flaresolverr
@@ -162,7 +174,10 @@ services:
     ports:
       - 8191:8191
     environment:
-      - LOG_LEVEL=info
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      LOG_LEVEL: info
 
 ###############################################
 # ARR Stack Dedicated Network
@@ -171,6 +186,3 @@ services:
 networks:
   default:
     name: arr_network
-
-###############################################
-###############################################
