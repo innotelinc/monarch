@@ -182,13 +182,7 @@ services:
       PORT: 5055
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/seerr:/app/config
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5055/api/v1/settings/public"]
-      start_period: 20s
-      timeout: 3s
-      interval: 15s
-      retries: 3
+      - /docker/appdata/seerr:/config
 
   ###############################################
   # FLARESOLVERR - Cloudflare Bypass
