@@ -89,23 +89,51 @@ services:
       - /docker/appdata/prowlarr:/config
 
 ###############################################
+# HOMARR - Indexer Manager
+###############################################
+
+  homarr:
+    <<: *common-keys
+    container_name: homarr
+    image: ghcr.io/ajnart/homarr:latest
+    ports:
+      - 7575:7575
+    restart: unless-stopped
+    volumes:
+      - /docker/appdata/homarr/configs:/app/data/configs
+      - /docker/appdata/homarr/icons:/app/public/icons
+      - /docker/appdata/homarr/data:/data
+
+###############################################
 # QBITTORRENT - Downloader
 ###############################################
 
   qbittorrent:
     <<: *common-keys
     container_name: qbittorrent
-    image: ghcr.io/hotio/qbittorrent:latest
+    image: ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
     ports:
       - 8080:8080
       - 6881:6881
       - 6881:6881/udp
     environment:
+      - QBT_LEGAL_NOTICE=confirm
       - WEBUI_PORT=8080
       - TORRENTING_PORT=6881
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/qbittorrent:/config
+      - /data:/data
+
+  sabnzbd:
+    container_name: sabnzbd
+    image: ghcr.io/hotio/sabnzbd:latest
+    ports:
+      - 8081:8080
+      - 9090:9090
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/sabnzbd:/config
       - /data:/data
 
 ###############################################
@@ -122,6 +150,19 @@ services:
       - /data/media:/data/media:ro #read-only
     ports:
       - 8096:8096
+
+###################################
+# FLARESOLVERR - Cloudflare Bypass
+###################################
+
+  flaresolverr:
+    <<: *common-keys
+    container_name: flaresolverr
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    ports:
+      - 8191:8191
+    environment:
+      - LOG_LEVEL=info
 
 ###############################################
 # ARR Stack Dedicated Network
