@@ -1,0 +1,473 @@
+###############################################
+# Common Keys for all apps
+###############################################
+
+x-common-keys: &common-keys
+  restart: unless-stopped
+  logging:
+    driver: json-file
+  environment:
+    PUID: 1000
+    PGID: 1000
+    TZ: America/New_York
+  dns:
+    - 1.1.1.1
+    - 1.0.0.1
+
+services:
+  ###############################################
+  # JELLYFIN - Media Server
+  ###############################################
+  jellyfin:
+    <<: *common-keys
+    container_name: jellyfin
+    image: ghcr.io/hotio/jellyfin:latest
+    ports:
+      - 8096:8096
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/jellyfin:/config
+      - /data/media:/data/media:ro
+
+  ###############################################
+  # SEERR - Request Manager
+  ###############################################
+  seerr:
+    <<: *common-keys
+    container_name: seerr
+    image: ghcr.io/seerr-team/seerr:latest
+    init: true
+    ports:
+      - 5055:5055
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      PORT: 5055
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/seerr:/app/config
+
+  ###############################################
+  # SONARR - TV Shows
+  ###############################################
+  sonarr:
+    <<: *common-keys
+    container_name: sonarr
+    image: ghcr.io/hotio/sonarr:latest
+    ports:
+      - 8989:8989
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/sonarr:/config
+      - /data:/data
+
+  ###############################################
+  # RADARR - Movies
+  ###############################################
+  radarr:
+    <<: *common-keys
+    container_name: radarr
+    image: ghcr.io/hotio/radarr:latest
+    ports:
+      - 7878:7878
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/radarr:/config
+      - /data:/data
+
+  ###############################################
+  # LIDARR - Music
+  ###############################################
+  lidarr:
+    <<: *common-keys
+    container_name: lidarr
+    image: ghcr.io/hotio/lidarr:latest
+    ports:
+      - 8686:8686
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/lidarr:/config
+      - /data:/data
+
+  ###############################################
+  # WHISPARR - Adult
+  ###############################################
+  whisparr:
+    <<: *common-keys
+    container_name: whisparr
+    image: ghcr.io/hotio/whisparr:latest
+    ports:
+      - 6969:6969
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/whisparr:/config
+      - /data:/data
+
+  ###############################################
+  # PROWLARR - Indexer Manager
+  ###############################################
+  prowlarr:
+    <<: *common-keys
+    container_name: prowlarr
+    image: ghcr.io/hotio/prowlarr:latest
+    ports:
+      - 9696:9696
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/prowlarr:/config
+
+  ###############################################
+  # BAZARR - Subtitles
+  ###############################################
+  bazarr:
+    <<: *common-keys
+    container_name: bazarr
+    image: ghcr.io/hotio/bazarr:latest
+    ports:
+      - 6767:6767
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/bazarr:/config
+      - /data:/data
+
+  ###############################################
+  # HOMARR - Dashboard
+  ###############################################
+  homarr:
+    <<: *common-keys
+    container_name: homarr
+    image: ghcr.io/ajnart/homarr:latest
+    ports:
+      - 7575:7575
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/homarr/configs:/app/data/configs
+      - /docker/appdata/homarr/icons:/app/public/icons
+      - /docker/appdata/homarr/data:/data
+
+  ###############################################
+  # QBITTORRENT - Downloader
+  ###############################################
+  qbittorrent:
+    <<: *common-keys
+    container_name: qbittorrent
+    image: ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
+    ports:
+      - 8080:8080
+      - 6881:6881
+      - 6881:6881/udp
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      QBT_LEGAL_NOTICE: confirm
+      WEBUI_PORT: 8080
+      TORRENTING_PORT: 6881
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/qbittorrent:/config
+      - /data:/data
+
+  ###############################################
+  # SABNZBD - Usenet Downloader
+  ###############################################
+  sabnzbd:
+    <<: *common-keys
+    container_name: sabnzbd
+    image: ghcr.io/hotio/sabnzbd:latest
+    ports:
+      - 8081:8080
+      - 9090:9090
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/sabnzbd:/config
+      - /data:/data
+
+  ###############################################
+  # TRANSMISSION - BitTorrent
+  ###############################################
+  transmission:
+    <<: *common-keys
+    container_name: transmission
+    image: lscr.io/linuxserver/transmission:latest
+    ports:
+      - 9091:9091
+      - 51413:51413
+      - 51413:51413/udp
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      USER: admin
+      PASS: Tx!2026
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/transmission:/config
+      - /data/downloads:/downloads
+      - /data/watch:/watch
+
+  ###############################################
+  # DELUGE - BitTorrent
+  ###############################################
+  deluge:
+    <<: *common-keys
+    container_name: deluge
+    image: lscr.io/linuxserver/deluge:latest
+    ports:
+      - 8112:8112
+      - 58846:58846
+      - 58946:58946
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/deluge:/config
+      - /data/downloads:/downloads
+
+  ###############################################
+  # REQUESTRR - Discord Bot
+  ###############################################
+  requestrr:
+    <<: *common-keys
+    container_name: requestrr
+    image: thomst08/requestrr:latest
+    ports:
+      - 4545:4545
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/requestrr:/root/config
+
+  ###############################################
+  # FLARESOLVERR - Cloudflare Bypass
+  ###############################################
+  flaresolverr:
+    <<: *common-keys
+    container_name: flaresolverr
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    ports:
+      - 8191:8191
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      LOG_LEVEL: info
+
+  ###############################################
+  # AUTOBRR - Indexer Automation
+  ###############################################
+  autobrr:
+    <<: *common-keys
+    container_name: autobrr
+    image: ghcr.io/autobrr/autobrr:latest
+    ports:
+      - 7474:7474
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/autobrr:/config
+
+  ###############################################
+  # JFA-GO - Account Management
+  ###############################################
+  jfago:
+    <<: *common-keys
+    container_name: jfago
+    image: hrfee/jfa-go:latest
+    ports:
+      - 8056:8056
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/jfago:/data
+
+  ###############################################
+  # TVHEADEND - IPTV / Live TV
+  ###############################################
+  tvheadend:
+    <<: *common-keys
+    container_name: tvheadend
+    image: lscr.io/linuxserver/tvheadend:latest
+    ports:
+      - 9981:9981
+      - 9982:9982
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/tvheadend:/config
+      - /data/tv/recordings:/recordings
+
+  ###############################################
+  # NEXTPVR - Live TV Backend
+  ###############################################
+  nextpvr:
+    <<: *common-keys
+    container_name: nextpvr
+    image: nextpvr/nextpvr_amd64:latest
+    ports:
+      - 8866:8866
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/nextpvr:/config
+
+  ###############################################
+  # CLIPBUCKET - Video Platform
+  ###############################################
+  clipbucket:
+    <<: *common-keys
+    container_name: clipbucket
+    image: oxygenz/clipbucket-v5:latest
+    pull_policy: always
+    ports:
+      - 8088:80
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      DOMAIN_NAME: clip.innotel.us
+      MYSQL_PASSWORD: ClipDB!2026
+      UID: 1000
+      GID: 1000
+    volumes:
+      - clipbucket_db:/var/lib/mysql
+      - clipbucket_files:/srv/http/clipbucket
+
+  ###############################################
+  # AUTHENTIK - Identity Provider
+  ###############################################
+  authentik-postgresql:
+    restart: unless-stopped
+    container_name: authentik-postgresql
+    image: postgres:17
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: AuthentikDB!2026
+    volumes:
+      - /docker/appdata/authentik/postgresql:/var/lib/postgresql/data
+
+  authentik-server:
+    restart: unless-stopped
+    container_name: authentik-server
+    image: ghcr.io/goauthentik/server:latest
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ReplaceThisWithALongRandomSecretKey123456
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: AuthentikDB!2026
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+    depends_on:
+      - authentik-postgresql
+    ports:
+      - 9000:9000
+    volumes:
+      - /docker/appdata/authentik/media:/media
+      - /docker/appdata/authentik/templates:/templates
+
+  authentik-worker:
+    restart: unless-stopped
+    container_name: authentik-worker
+    image: ghcr.io/goauthentik/server:latest
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ReplaceThisWithALongRandomSecretKey123456
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: AuthentikDB!2026
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      AUTHENTIK_BOOTSTRAP_PASSWORD: InnotelAuth!2026
+      AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
+      AUTHENTIK_BOOTSTRAP_EMAIL: admin@innotel.us
+    depends_on:
+      - authentik-postgresql
+    volumes:
+      - /docker/appdata/authentik/media:/media
+      - /docker/appdata/authentik/templates:/templates
+
+  ###############################################
+  # BILLING API - Stripe Webhooks
+  ###############################################
+  billing-postgres:
+    restart: unless-stopped
+    container_name: billing-postgres
+    image: postgres:17
+    environment:
+      POSTGRES_DB: billing
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: BillingDB!2026
+    volumes:
+      - /docker/appdata/billing/postgres:/var/lib/postgresql/data
+
+  billing-api:
+    restart: unless-stopped
+    container_name: billing-api
+    image: python:3.12-slim
+    working_dir: /app
+    command: >
+      sh -c "pip install --no-cache-dir fastapi uvicorn stripe psycopg[binary] httpx &&
+             uvicorn main:app --host 0.0.0.0 --port 8000"
+    environment:
+      STRIPE_SECRET_KEY: sk_live_replace_me
+      STRIPE_WEBHOOK_SECRET: whsec_replace_me
+      STRIPE_PRICE_ID: price_replace_me
+      BILLING_BASE_URL: https://billing.innotel.us
+      BILLING_API_KEY: innotel-billing-api-key
+      AUTHENTIK_BASE_URL: http://authentik-server:9000
+      AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
+      AUTHENTIK_DEFAULT_GROUP: paid_users
+      DATABASE_URL: postgresql://billing:BillingDB!2026@billing-postgres:5432/billing
+    depends_on:
+      - billing-postgres
+      - authentik-server
+    ports:
+      - 8000:8000
+    volumes:
+      - ./billing-api:/app
+
+  ###############################################
+  # MEDIA INIT - Auto Link ARR Stack
+  ###############################################
+  media-init:
+    container_name: media-init
+    image: alpine:3.20
+    restart: "no"
+    depends_on:
+      - prowlarr
+      - radarr
+      - sonarr
+      - lidarr
+      - whisparr
+      - qbittorrent
+      - sabnzbd
+    environment:
+      QBT_USERNAME: admin
+      QBT_PASSWORD: Qbit!2026
+    command: ["/bin/sh", "/init/init.sh"]
+    volumes:
+      - ./init:/init
+      - /docker/appdata:/docker/appdata
+
+  ###############################################
+  # WATCHTOWER - Auto Updates
+  ###############################################
+  watchtower:
+    container_name: watchtower
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    command: --cleanup --interval 21600
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+###############################################
+# Named Volumes
+###############################################
+
+volumes:
+  clipbucket_db:
+  clipbucket_files:
+
+###############################################
+# ARR Stack Dedicated Network
+###############################################
+
+networks:
+  default:
+    name: arr_network
