@@ -197,9 +197,35 @@ services:
       TZ: America/New_York
       LOG_LEVEL: info
 
-###############################################
-# ARR Stack Dedicated Network
-###############################################
+  ###############################################
+  # CLIPBUCKET - Video Platform
+  ###############################################
+  clipbucket:
+    <<: *common-keys
+    container_name: clipbucket
+    image: oxygenz/clipbucket-v5:latest
+    pull_policy: always
+    ports:
+      - 80:80
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: America/New_York
+      DOMAIN_NAME: clipbucket.local
+      MYSQL_PASSWORD: clipbucket_password
+      UID: 1000
+      GID: 1000
+    volumes:
+      - clipbucket_db:/var/lib/mysql
+      - clipbucket_files:/srv/http/clipbucket
+
+volumes:
+  clipbucket_db:
+  clipbucket_files:
+
+  ###############################################
+  # ARR Stack Dedicated Network
+  ###############################################
 
 networks:
   default:
