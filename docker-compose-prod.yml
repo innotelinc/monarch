@@ -319,7 +319,7 @@ services:
       PUID: 1000
       PGID: 1000
       TZ: America/New_York
-      DOMAIN_NAME: clip.innotel.us
+      DOMAIN_NAME: tube.innotel.us
       MYSQL_PASSWORD: ClipDB!2026
       UID: 1000
       GID: 1000
