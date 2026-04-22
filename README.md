@@ -51,14 +51,14 @@ docker run -d -p 8000:8000 -p 9443:9443 --name portainer --restart=always -v /va
 
 ```
 
-To test if docker compose has been installed, run : <br />
-`docker-compose` <br />
+To test if docker compose has been installed, run :
+`docker-compose`
 
-You should get a lot of command arguments including 'version' one, so run again: <br />
-`docker-compose version` <br />
+You should get a lot of command arguments including 'version' one, so run again:
+`docker-compose version`
 
 That will show all works as expected. <br />
-Create folder structure as per this [TRASH GUIDE](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Docker/) now: <br />
+Create folder structure as per this [TRASH GUIDE](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Docker/) now:
 
 ```
 cd /opt <br />
@@ -78,7 +78,7 @@ Note that hostnames are not needed here as we have dedicated network for our con
 
 # First run: <br />
 
-You should be able to run all services now with simple `sudo docker-compose up -d` :) <br />
+You should be able to run all services now with simple `sudo docker-compose up -d`<br />
 
 ***************************
 
