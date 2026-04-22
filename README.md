@@ -2,67 +2,75 @@
 Below are instructions for Debian / Ubuntu operating system, but docker can be natively run on any linux distro <br />
 and if you have Windows or Mac - you can use for tools like [Docker Desktop](https://docs.docker.com/desktop/) to run docker containers. <br />
 
-### Install docker compose and prepare environment <br />
+#Install Docker <br />
+apt update && apt -y upgrade <br />
+apt -y remove apparmor <br />
+apt -y install ca-certificates curl gnupg build-essential perl curl wget <br />
+mkdir -m 0755 -p /etc/apt/keyrings <br />
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg <br />
 
-We will install docker and docker compose using this: [LINK](https://docs.docker.com/compose/) <br />
+echo \ <br />
+  "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \ <br />
+  "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \ <br />
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null <br />
 
-So - go to `Install` (on the left) to `Plugin` - scroll down to `Install using the Repository` – `Ubuntu` (unless you install on other OS): <br />
-You should be in [THIS LOCATION](https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository) <br /> <br />
+apt update <br />
 
-Copy ALL those commands that are listed there, sth like: <br />
-```
-# Add Docker's official GPG key:
-sudo apt update
-sudo apt install ca-certificates curl
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
+apt -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-compose-plugin docker-ce-rootless-extras docker-buildx-plugin <br />
 
-# Add the repository to Apt sources:
-sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
-Components: stable
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF
+systemctl start docker <br />
+systemctl enable docker <br />
 
-sudo apt update
-```
-<br />
+#Install GoLang <br />
+cd /usr/src <br />
+wget https://go.dev/dl/go1.26.0.linux-amd64.tar.gz <br />
+tar -C /usr/local -xvf go1.26.0.linux-amd64.tar.gz <br />
 
-Then run:
-```
-sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-sudo systemctl status docker
-sudo docker run hello-world
+tee -a ~/.profile<<EOF <br />
+export PATH=$PATH:/usr/local/go/bin <br />
+EOF <br />
+
+source ~/.profile <br />
+
+go version <br />
+
+cd /usr/src <br />
+git clone https://github.com/docker/compose.git <br />
+cd compose <br />
+make <br />
+mv ./bin/build/docker-compose /usr/local/bin/ <br />
+chmod +x /usr/local/bin/docker-compose <br />
+sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose <br />
+
+#Portainer <br />
+docker volume create portainer_data <br />
+
+docker run -d -p 8000:8000 -p 9443:9443 --name portainer --restart=always -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer-ce:latest <br />
+
+#Accesible http://localhost:9443 <br />
+
 ```
 
 To test if docker compose has been installed, run : <br />
-`docker compose` <br />
+`docker-compose` <br />
 
 You should get a lot of command arguments including 'version' one, so run again: <br />
-`docker compose version` <br />
+`docker-compose version` <br />
 
 That will show all works as expected. <br />
 Create folder structure as per this [TRASH GUIDE](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Docker/) now: <br />
 
 ```
-sudo mkdir -p /data/{torrents/{tv,movies,music},media/{tv,movies,music}}
-sudo apt install tree
-tree /data
-sudo chown -R 1000:1000 /data
-sudo chmod -R a=,a+rX,u+w,g+w /data
-ls -ln /data
-```
-*(If you use torrents + Usenet client like NZBGet or SABnzbd then you need to use 
-`mkdir -p /data/{usenet/{incomplete,complete}/{tv,movies,music},media/{tv,movies,music}}` instead in that 1st first line)*  <br /> <br />
+cd /opt <br />
+sudo mkdir -p /data/{usenet/{incomplete,complete}/{tv,movies,music,xxx},media/{tv,movies,music,xxx},torrents/{tv,movies,music,xxx}} <br />
+sudo apt install tree <br />
+tree /data <br />
+sudo chown -R 1000:1000 /data <br />
+sudo chmod -R a=,a+rX,u+w,g+w /data <br />
+ls -ln /data <br />
 
-Trash guide docker-compose configuration can be found [HERE](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Docker/) (scroll down a bit) <br />
-You can find more information on [SERVARR](https://wiki.servarr.com/radarr/installation/docker) <br />
-My docker-compose.yml file can be found [HERE](https://github.com/automation-avenue/arr-new/blob/main/docker-compose.yml) <br />
-You can use command like `git clone https://github.com/automation-avenue/arr-new.git` or simply copy that docker-compose file from that repo: <br />
-`sudo nano docker-compose.yml` - and paste it <br /> <br />
+git clone https://github.com/innotelinc/arr.git <br />
+cd arr <br />
 
 Note that hostnames are not needed here as we have dedicated network for our containers <br />
 
@@ -70,73 +78,44 @@ Note that hostnames are not needed here as we have dedicated network for our con
 
 # First run: <br />
 
-You should be able to run all services now with simple `sudo docker compose up -d` :) <br />
+You should be able to run all services now with simple `sudo docker-compose up -d` :) <br />
 
 ***************************
 
-# Configure services: <br />
+### INITIAL SETUP ###
 
-Now you need to ensure your internal application settings match, for example: <br />
- - Radarr: Inside the web UI, your "Root Folder" for your library should be `/data/media/movies` (`/data/media/tv` for Sonarr and `/data/media/music` for Lidarr). <br />
- - qBittorrent: Your download path should be set to `/data/torrents` <br />
- - because both paths are on the same mount (`/data`), the OS treats them as the same file system, enabling instant hard links (also known as atomic moves) <br />
- 
-Let's configure that all: <br />
+Radarr: /data/media/movies <br />
+Sonarr /data/media/tv <br />
+Lidarr /data/media/music <br />
+Whisparr /data/media/xxx <br />
+qBittorrent /data/torrents <br />
 
-   
-## qBittorrent: <br />
-Check logs for qbittorrent container: <br />
-`sudo docker logs qbittorrent` <br />
-You will see in the logs something like: <br />
-*The WebUI administrator username is: admin <br />
-The WebUI administrator password was not set. A temporary password is provided for this session: <your-password-will-be-here>*  <br /><br />
-Now you can go to URL: <br />
-If you are on the host: `http://localhost:8080` <br />
-From other device on your network: `http://<host ip address>:8080` <br />
-and log on using details provided in container logs. <br />
-Go to `Tools - Options - WebUI` - you can change the user and password here but remember to scroll down and save it. <br /><br />
+sudo docker logs qbittorrent <br />
 
-In left panel go to Categories - All - right click and 'add category': <br />
+The WebUI administrator username is: admin <br />
+The WebUI administrator password was not set. A temporary password is provided for this session: GD84tBRja <br />
 
-For Radarr: `Category: movies` <br />
-`Save Path: movies` (this will be appended to '/data/torrents/ Default Save Path you set above) <br /> 
-For Sonarr: `Category: tv` <br />
-`Save Path: tv` <br />
-For Lidarr: `Category: music` <br />
-`Save Path: music` <br />
+http://localhost:8080 <br />
 
-Create categories first and only then configure the steps below, as doing it opposite way round caused the Categories to disappear :) <br />
+For Radarr: Category: movies <br />
+Save Path: movies <br />
+For Sonarr: Category: tv <br />
+Save Path: tv <br />
+For Lidarr: Category: music <br />
+Save Path: music <br />
+For Whisparr: Category: xxx <br />
+Save Path: xxx <br />
 
-With categories created - go to -  `Tools - Options - Downloads` and in `Saving Management` make sure your settings match [THIS](https://trash-guides.info/Downloaders/qBittorrent/How-to-add-categories/) <br />
-So `Default Torrent Management Mode - Automatic`<br />
-`When Torrent Category changed - Relocate torrent`  <br />
-`When Default Save Path Changed - Switch affected torrents to Manual Mode`  <br />
-`When Category Save Path Changed - Switch affected torrents to Manual Mode`  <br />
-Tick BOTH BOXES for `Use Subcategories` and `Use Category paths in Manual Mode` (NOT shown on Trash Guides) <br />
-Default Save Path: - set to `/data/torrents` (so it matches your folder structure) - then scroll down and `Save`. <br />
-On Trash Guides it shows `Copy .torrent files to` but its optional, you can leave it blank <br /> <br />
 
-If you still have problems with adding categories, you can use different image like the one below:
-```
-  qbittorrent:
-    <<: *common-keys
-    container_name: qbittorrent
-    image: ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
-    ports:
-      - 8080:8080
-      - 6881:6881
-      - 6881:6881/udp
-    environment:
-      - QBT_LEGAL_NOTICE=confirm
-      - WEBUI_PORT=8080
-      - TORRENTING_PORT=6881
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/qbittorrent:/config
-      - /data:/data
-```
+Tools - Options - Downloads and in Saving Management <br />
 
-Thats it for qBittorrent.<br /><br />
+So Default Torrent Management Mode - Automatic <br />
+When Torrent Category changed - Relocate torrent <br />
+When Default Save Path Changed - Switch affected torrents to Manual Mode <br />
+When Category Save Path Changed - Switch affected torrents to Manual Mode <br />
+Tick BOTH BOXES for Use Subcategories and Use Category paths in Manual Mode <br />
+Default Save Path: - set to /data/torrents <br />
+
 
 Now configure Prowlarr service (each of these services will require to set up user/pass): <br />
 Use 'Form (login page) authentication and set your user and pass for all. <br />
@@ -202,6 +181,20 @@ Then change `Prowlarr Server` to `http://prowlarr:9696` and `Lidarr Server` to `
 Click `Test` and if Green - `Save` <br />
 
 
+
+## Whisparr>
+`http://<host_ip>:6969` <br />
+Go to Settings - Media Management - Add Root Folder - set path to /data/media/xxx as your root folder, set name to Root or whatever and save <br />
+Then Settings- Download clients - click 'plus' symbol, choose qBittorrent etc - basically same steps as for previous services<br />
+Host 'qbittorrent', port 8080, ,make sure SSL is unticked, username admin and password - one you configured for qBittorrent <br /> 
+and change the Category to 'xxx' (by default its 'whisparr', but you need to match qbittorrent Category) <br />
+Now click the 'Test' and if you have green 'tick' - Save.
+Now go to Settings - General - scroll down to API key - Copy API key - go back to Prowlarr - Settings - Apps -click '+' - Whisparr - paste  API key. <br />
+Then change `Prowlarr Server` to `http://prowlarr:9696` and `Whisparr Server` to `http://whisparr:6969` <br />
+Click `Test` and if Green - `Save` <br />
+
+
+
 ## Bazarr: <br />
 `http://host_ip>:6767` <br />
 Languages: Go to Settings > Languages and create a "Language Profile" (e.g., "English" or "Any"). <br />
@@ -214,8 +207,8 @@ Sync: After connecting Radarr/Sonarr, go to the Series or Movies tab and click "
 It might be a good idea to restart all services and see if they come up as expected: <br /> 
 
 ```
-sudo docker compose down
-sudo docker compose up -d
+sudo docker-compose down
+sudo docker-compose up -d
 ```
  <br />
 If the first line that says : <br />
