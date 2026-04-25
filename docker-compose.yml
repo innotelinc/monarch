@@ -281,7 +281,7 @@ services:
   # DISPATCHARR - IPTV / Live TV
   ###############################################
   dispatcharr:
-      <<: *common-keys
+    <<: *common-keys
     container_name: dispatcharr
     image: ghcr.io/dispatcharr/dispatcharr:latest
     ports:
