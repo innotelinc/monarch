@@ -182,7 +182,7 @@ Click `Test` and if Green - `Save` <br />
 
 
 
-## Whisparr>
+## Whisparr: <br />
 `http://<host_ip>:6969` <br />
 Go to Settings - Media Management - Add Root Folder - set path to /data/media/xxx as your root folder, set name to Root or whatever and save <br />
 Then Settings- Download clients - click 'plus' symbol, choose qBittorrent etc - basically same steps as for previous services<br />
