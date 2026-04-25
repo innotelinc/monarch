@@ -278,6 +278,19 @@ services:
       - /docker/appdata/jfago:/data
 
   ###############################################
+  # DISPATCHARR - IPTV / Live TV
+  ###############################################
+  dispatcharr:
+      <<: *common-keys
+    container_name: dispatcharr
+    image: ghcr.io/dispatcharr/dispatcharr:latest
+    ports:
+      - 9191:9191
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/dispatcharr:/data
+
+  ###############################################
   # TVHEADEND - IPTV / Live TV
   ###############################################
   tvheadend:
