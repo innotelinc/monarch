@@ -5,7 +5,7 @@ and if you have Windows or Mac - you can use for tools like [Docker Desktop](htt
 #Install Docker <br />
 apt update && apt -y upgrade <br />
 apt -y remove apparmor <br />
-apt -y install ca-certificates curl gnupg build-essential perl curl wget <br />
+apt -y install ca-certificates curl gnupg build-essential perl curl wget xsel <br />
 mkdir -m 0755 -p /etc/apt/keyrings <br />
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg <br />
 
