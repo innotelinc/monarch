@@ -319,6 +319,19 @@ services:
       - /docker/appdata/nextpvr:/config
 
   ###############################################
+  # IPTV - TV Guide
+  ###############################################
+  iptv:
+    <<: *common-keys
+    container_name: iptv
+    image: ghcr.io/iptv-org/epg:master
+    ports:
+      - 3000:3000
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /opt/epg:/epg/public/guide.xml
+
+  ###############################################
   # CLIPBUCKET - Video Platform
   ###############################################
   clipbucket:
