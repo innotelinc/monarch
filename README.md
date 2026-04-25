@@ -106,6 +106,7 @@ Save Path: music <br />
 For Whisparr: Category: xxx <br />
 Save Path: xxx <br />
 
+For live TV use this m3u: https://iptv-org.github.io/iptv/index.m3u <br />
 
 Tools - Options - Downloads and in Saving Management <br />
 
