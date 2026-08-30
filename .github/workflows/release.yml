@@ -63,11 +63,19 @@ jobs:
         env:
           BUMP: ${{ github.event.inputs.bump || 'minor' }}
         run: |
-          LAST="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo v1.0.0)"
+          LAST="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
           LAST="${LAST#v}"
+          # No prior release: start numbered releases at v1.0.0.
+          if [ -z "$LAST" ]; then
+            echo "no prior release; starting at v1.0.0"
+            echo "version=v1.0.0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           MAJOR="${LAST%%.*}"
           REST="${LAST#*.}"
           MINOR="${REST%%.*}"
+          # Guard against a parse that left either component empty.
+          [ -n "$MAJOR" ] && [ -n "$MINOR" ] || { echo "could not parse last release '$LAST'" >&2; exit 1; }
           if [ "$BUMP" = "major" ]; then
             MAJOR=$((MAJOR + 1)); MINOR=0
           else
