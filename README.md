@@ -2,6 +2,8 @@
 Below are instructions for Debian / Ubuntu operating system, but docker can be natively run on any linux distro <br />
 and if you have Windows or Mac - you can use for tools like [Docker Desktop](https://docs.docker.com/desktop/) to run docker containers. <br />
 
+Besides the manual setup below, this repo ships an **installer**, an **offline bundle**, and a **bootable live/install ISO** (the same packaging approach as the [Capstone](https://github.com/innotelinc/capstone) project). See the [Installer & Live USB](#installer--live-usb) section further down, and for building releases see the [Building a release](#building-a-release) section. <br />
+
 #Install Docker <br />
 apt update && apt -y upgrade <br />
 apt -y remove apparmor <br />
@@ -234,6 +236,77 @@ They host thousands of public domain movies. <br />
 To watch your movies, just log on to Jellyfin, create user and password and you can `Add Media Library`. <br />
 For Content Type - choose `Movies` and find folder `/data/media/movies`. <br />
 Add more content types like TV or Music accordingly, binding them to correct media folder. <br />
+
+**************************
+
+**************************
+
+# Installer & Live USB <br /> <br />
+
+This repo mirrors the packaging approach of the [Capstone](https://github.com/innotelinc/capstone) project: a single **installer** that runs both as a live-USB→disk installer and as an in-place installer on an already-running Linux box, plus a **live/install ISO** you can boot and run the installer from. <br />
+
+## Installer <br />
+
+`scripts/install-arr.sh` installs the whole ARR Media Stack. It has two modes: <br />
+- **In-place** (already-installed Linux): installs Docker (if missing), creates the `/data` folder layout, loads any offline Docker image archives it finds, installs the `arr.service` systemd unit, and starts the stack via `docker compose up -d`. <br />
+- **Live USB → disk** (booted from the ARR ISO): partitions the selected disk, copies the live system, installs GRUB (BIOS + UEFI), creates an `arr` login user, enables DHCP networking, and runs the in-place install inside the new system. <br />
+
+From a checked-out repo on any Debian/Ubuntu box: <br />
+`./scripts/install-arr.sh` <br />
+
+By default it installs to `/opt/arr` and creates a login user `arr` (password `arr`) for disk installs. Override with `ARR_TARGET`, `ARR_USER`, `ARR_PASSWORD`, `ARR_DISK`, `ARR_YES=1` (skip the destructive-disk confirmation). <br />
+
+The installer is idempotent and non-destructive in in-place mode (it excludes `.env` from the payload copy). <br />
+
+## Live / install USB <br />
+
+Build the ISO locally (Ubuntu 24.04 "noble" host recommended): <br />
+```
+sudo apt install -y live-build xorriso mtools genisoimage grub-efi-amd64-bin grub-pc-bin isolinux syslinux-common
+./scripts/build-live-usb.sh
+```
+Output: `dist/live-usb/arr-media-live-amd64.iso` plus its `.sha256`. <br />
+
+Write it to a USB stick (replace `/dev/sdX` with the whole device, not a partition): <br />
+```
+sudo dd if=dist/live-usb/arr-media-live-amd64.iso of=/dev/sdX bs=4M status=progress
+```
+
+Boot the target computer from the USB, wait for the Xfce desktop, and launch **Install ARR Media**. For a fully **offline** install, also copy the offline bundle (`arr-deployment.tar.gz`, `docker-images-part*.tar.gz`, `SHA256SUMS`) to a FAT32 partition of the USB stick — the installer detects and stages it automatically. <br />
+
+The ISO is BIOS + UEFI hybrid (Secure Boot must be disabled). The **installed system** boots straight into the stack: the `arr.service` systemd unit starts Docker and runs `docker compose up -d` on first boot, and ethernet comes up with DHCP on every interface. Login user is `arr` (password `arr` — change it after first login, or pre-set `ARR_USER`/`ARR_PASSWORD`). <br />
+
+## Offline bundle <br />
+
+The deployment payload + docker image archives are built by: <br />
+```
+./scripts/build-offline-bundle.sh            # payload + image bundle + checksums
+./scripts/build-offline-bundle.sh --deployment-only   # payload + checksums only
+```
+Output: `dist/offline-bundle/`. The docker image archives are split into <2 GB parts for GitHub release uploads. <br />
+
+To fetch and unpack a published release's offline bundle: <br />
+```
+./scripts/fetch-offline-bundle.sh          # -> ~/arr-offline-bundle
+```
+This verifies `SHA256SUMS`, unpacks the deployment payload, and reassembles the per-image archives into `dist/docker-images/`. Point `install-arr.sh` at the result (`ARR_ASSET_DIR=~/arr-offline-bundle`) and it loads images locally instead of pulling from the network. <br />
+
+**************************
+
+# Building a release <br /> <br />
+
+Releases are cut automatically by `.github/workflows/release.yml`. The workflow: <br />
+1. Computes the next version (minor/major bump from the last release). <br />
+2. Builds the source bundle and the deployment payload. <br />
+3. Cuts a GitHub release with those artifacts. <br />
+4. Two parallel CI jobs build & upload the **docker image bundle** and the **live ISO**. <br />
+
+To trigger it: **Actions → Release ARR Media Stack → Run workflow** (optionally pick a `major` bump or `lightweight` to skip the heavy ISO/image builds for a quick test release). Each release publishes: <br />
+- `arr-media-live-amd64.iso` + `.sha256` (bootable live/install ISO) <br />
+- `docker-images-part*.tar.gz` (offline docker image bundle) <br />
+- `arr-deployment.tar.gz` (source + compose + systemd installer payload) <br />
+- `arr-source-bundle.tar.gz` + checksum <br />
+- `SHA256SUMS` <br />
 
 **************************
 

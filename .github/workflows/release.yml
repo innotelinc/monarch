@@ -1,0 +1,189 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# release.yml — cut a new numbered ARR Media Stack release with the installer
+# assets: deployment payload, source bundle, Docker image bundle, and the
+# BIOS+UEFI live/install ISO.
+#
+# Trigger: manual via "Run workflow" (recommended), or on a schedule below.
+# Inputs:
+#   minor | major   - version bump from the last release (default: minor)
+#   lightweight     - skip the docker image bundle + live ISO (quick test only)
+#
+# Asset policy (hosted runners):
+#   • Every release (scheduled + default manual) is FULL: the release job cuts
+#     the release with the lightweight deployment payload + source bundle,
+#     then two parallel jobs build+upload each heavy artifact on their own VM:
+#       - release-images → docker image bundle (~burn GW+ on a full pull)
+#       - release-iso    → live ISO (~7 GB live-build chroot + ISO)
+#   Each separate VM comfortably fits its artifact, which is why the two heavy
+#   builds are split rather than combined in one job.
+#   • Set the `lightweight` input to skip the two heavy builds for a quick
+#     manual test release.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Release ARR Media Stack
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (minor | major)"
+        type: choice
+        options:
+          - minor
+          - major
+        default: minor
+      lightweight:
+        description: "Skip the docker image bundle + live ISO (quick test release only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: arr-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Bump version & cut release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_url: ${{ steps.cut.outputs.release_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute next release version
+        id: version
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'minor' }}
+        run: |
+          LAST="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo v1.0.0)"
+          LAST="${LAST#v}"
+          MAJOR="${LAST%%.*}"
+          REST="${LAST#*.}"
+          MINOR="${REST%%.*}"
+          if [ "$BUMP" = "major" ]; then
+            MAJOR=$((MAJOR + 1)); MINOR=0
+          else
+            MINOR=$((MINOR + 1))
+          fi
+          echo "last release: v$LAST → next: v${MAJOR}.${MINOR}"
+          echo "version=v${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
+
+      - name: Build source bundle
+        run: ./scripts/build-source-bundle.sh
+
+      - name: Build deployment payload
+        run: ./scripts/build-offline-bundle.sh --deployment-only
+
+      - name: Cut release
+        id: cut
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          LITE: ${{ github.event.inputs.lightweight }}
+        run: |
+          if [ "$LITE" = "true" ]; then
+            EXTRA="**Lightweight release**: deployment payload + source bundle only."
+          else
+            EXTRA="**Full release**: includes the docker image bundle and live ISO, built and uploaded by parallel jobs in this run."
+          fi
+          NOTES=$(cat <<NOTESEOF
+          ARR Media Stack **$VERSION** — the \`arr\` deployment with installer, offline bundle, and live/install ISO.
+
+          **This release was generated automatically** by the release workflow (or dispatched manually).
+
+          **What's included:**
+          - \`arr-deployment.tar.gz\` — full source + \`docker-compose.yml\` + systemd payload
+          - \`arr-source-bundle.tar.gz\` — full uncompiled repo for offline rebuilds
+          - $EXTRA
+
+          **How to use it:**
+          - **Live install** — write \`arr-media-live-amd64.iso\` to a USB stick (\`dd\`), boot it, and launch **Install ARR Media** from the desktop to install the whole stack onto an internal disk.
+          - **In-place install** on an already-installed Linux box — run \`scripts/install-arr.sh\` from the deployment payload.
+          - **Offline** — \`scripts/fetch-offline-bundle.sh\` pulls the deployment bundle + docker image parts for a fully offline install.
+          NOTESEOF
+          )
+          gh release create "$VERSION" \
+            dist/offline-bundle/arr-deployment.tar.gz \
+            dist/offline-bundle/SHA256SUMS \
+            dist/source-bundle/arr-source-bundle.tar.gz \
+            dist/source-bundle/arr-source-bundle.tar.gz.sha256 \
+            --title "ARR Media Stack $VERSION" \
+            --notes "$NOTES"
+          echo "release_url=$(gh release view "$VERSION" --json url -q .url)" >> "$GITHUB_OUTPUT"
+
+  # ── Docker image bundle (separate VM so its large peak doesn't crowd the
+  # ISO build). Runs on every full release; uploads the image parts plus the
+  # deployment tarball and SHA256SUMS (keeping payload + checksums consistent).
+  release-images:
+    name: Build & upload docker image bundle
+    needs: release
+    if: github.event.inputs.lightweight != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker system prune -af 2>/dev/null || true
+          df -h / | tail -1
+      - name: Build docker image bundle
+        run: ./scripts/build-offline-bundle.sh
+      - name: Upload image bundle + refreshed checksums
+        run: |
+          shopt -s nullglob
+          gh release upload "$VERSION" \
+            dist/offline-bundle/docker-images-part*.tar.gz \
+            dist/offline-bundle/arr-deployment.tar.gz \
+            dist/offline-bundle/SHA256SUMS --clobber
+
+  # ── Live ISO (separate VM: ~7 GB live-build chroot + ~2 GB ISO).
+  release-iso:
+    name: Build & upload live ISO
+    needs: release
+    if: github.event.inputs.lightweight != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h / | tail -1
+      - name: Install live-build ISO toolchain
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y live-build xorriso mtools genisoimage \
+            grub-efi-amd64-bin grub-pc-bin isolinux syslinux-common
+      # The ISO bakes the deployment payload, so produce it first.
+      - name: Build deployment payload
+        run: ./scripts/build-offline-bundle.sh --deployment-only
+      - name: Build live ISO
+        run: sudo ./scripts/build-live-usb.sh
+      - name: Upload live ISO
+        run: |
+          gh release upload "$VERSION" \
+            dist/live-usb/arr-media-live-amd64.iso \
+            dist/live-usb/arr-media-live-amd64.iso.sha256 --clobber
+
+  summarize:
+    name: Summarize release
+    needs: [release, release-images, release-iso]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::notice::Release: ${{ needs.release.outputs.version }} — ${{ needs.release.outputs.release_url }}"
+          echo "::notice::Image bundle: ${{ needs.release-images.result }} | Live ISO: ${{ needs.release-iso.result }}"
+          exit 0

@@ -1,0 +1,19 @@
+# Env / secrets
+.env
+*.env
+.env.local
+.env.*.local
+
+# Live USB / release build output
+.live-build/
+dist/live-usb/
+dist/source-bundle/
+dist/offline-bundle/
+
+# Docker
+*.log
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

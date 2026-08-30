@@ -1,0 +1,39 @@
+[Unit]
+Description=ARR Media Stack (Jellyfin, *arr, downloaders, IPTV)
+Documentation=https://github.com/innotelinc/arr
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/arr
+
+# Bring up the whole stack with one compose file. --wait holds until every
+# service with a healthcheck reports healthy and all depends_on conditions
+# are met. Timeout is generous because heavy images (clipbucket, authentik)
+# pull + start slowly on first boot.
+ExecStart=/usr/bin/docker compose \
+    -f docker-compose.yml \
+    up -d --wait --remove-orphans
+
+ExecStop=/usr/bin/docker compose \
+    -f docker-compose.yml \
+    down --remove-orphans
+
+# If any container crashes after boot, restart the whole stack.
+# Docker compose itself is idempotent - already-running services
+# are left alone, only dead ones are recreated.
+Restart=on-failure
+RestartSec=15s
+
+TimeoutStartSec=600s
+TimeoutStopSec=120s
+
+# Log to journal (default)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

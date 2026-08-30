@@ -1,0 +1,30 @@
+# Docker images pulled by the ARR Media Stack docker-compose.yml.
+# One image per line; blank lines and '#' comments are ignored.
+# Used by scripts/build-offline-bundle.sh to produce the offline image bundle.
+ghcr.io/hotio/jellyfin:latest
+ghcr.io/seerr-team/seerr:latest
+ghcr.io/hotio/sonarr:latest
+ghcr.io/hotio/radarr:latest
+ghcr.io/hotio/lidarr:latest
+ghcr.io/hotio/whisparr:latest
+ghcr.io/hotio/prowlarr:latest
+ghcr.io/hotio/bazarr:latest
+ghcr.io/ajnart/homarr:latest
+ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
+ghcr.io/hotio/sabnzbd:latest
+lscr.io/linuxserver/transmission:latest
+lscr.io/linuxserver/deluge:latest
+thomst08/requestrr:latest
+ghcr.io/flaresolverr/flaresolverr:latest
+ghcr.io/autobrr/autobrr:latest
+hrfee/jfa-go:latest
+ghcr.io/dispatcharr/dispatcharr:latest
+lscr.io/linuxserver/tvheadend:latest
+nextpvr/nextpvr_amd64:latest
+ghcr.io/iptv-org/epg:master
+oxygenz/clipbucket-v5:latest
+postgres:17
+ghcr.io/goauthentik/server:latest
+python:3.12-slim
+alpine:3.20
+containrrr/watchtower:latest
