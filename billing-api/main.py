@@ -64,6 +64,7 @@ LDAP_APP_SLUG = os.environ.get("AUTHENTIK_LDAP_APP_SLUG", "jellyfin-ldap")
 LDAP_BASE_DN = os.environ.get("AUTHENTIK_LDAP_BASE_DN", "dc=innotel,dc=us")
 LDAP_BIND_USER = os.environ.get("AUTHENTIK_LDAP_BIND_USER", "authentik-ldap")
 LDAP_BIND_GROUP = os.environ.get("AUTHENTIK_LDAP_BIND_GROUP", "paid_users")
+LDAP_ADMIN_GROUP = os.environ.get("AUTHENTIK_LDAP_ADMIN_GROUP", "jellyfin_admins")
 LDAP_OUTPOST_TOKEN = os.environ.get("AUTHENTIK_LDAP_TOKEN", "ak-ldap-outpost-2026")
 LDAP_BIND_TOKEN = os.environ.get("AUTHENTIK_LDAP_BIND_TOKEN", "ak-ldap-bind-2026")
 LDAP_SEARCH_ROLE = "jellyfin-ldap-search"
@@ -336,6 +337,8 @@ def revoke_paid_user(authentik_user_id: str | None) -> None:
 #     `authentik-ldap` container can fetch its config
 #   * a role granting the bind account "Search full LDAP directory" on the
 #     provider (needed so the plugin can resolve the memberOf filter)
+#   * the jellyfin_admins group, so admins can be granted via the LDAP plugin's
+#     admin filter (Directory -> Groups -> jellyfin_admins)
 # ---------------------------------------------------------------------------
 
 
@@ -533,8 +536,13 @@ def ensure_ldap_setup() -> None:
             ak_role_assign_permission(role_pk, "authentik_providers_ldap.search_full_directory")
         ak_role_add_user(role_pk, sa_pk)
 
+        # Admin group - Jellyfin's LDAP plugin uses its own memberOf filter
+        # against this group to grant Jellyfin admin on login.
+        admin_group = ak_group(LDAP_ADMIN_GROUP)
+
         print(f"[billing-api] LDAP provisioning OK: provider={provider_pk} "
-              f"outpost={outpost_pk} bind={LDAP_BIND_USER} group={LDAP_BIND_GROUP}")
+              f"outpost={outpost_pk} bind={LDAP_BIND_USER} group={LDAP_BIND_GROUP} "
+              f"admin_group={admin_group.get('name')}")
     except HTTPException as exc:
         print(f"[billing-api] WARNING: LDAP provisioning failed: {exc.detail}")
     except Exception as exc:  # noqa: BLE001 - startup resilience

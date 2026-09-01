@@ -496,6 +496,7 @@ services:
       AUTHENTIK_LDAP_BIND_TOKEN: ak-ldap-bind-2026
       AUTHENTIK_LDAP_BIND_USER: authentik-ldap
       AUTHENTIK_LDAP_BIND_GROUP: paid_users
+      AUTHENTIK_LDAP_ADMIN_GROUP: jellyfin_admins
       AUTHENTIK_LDAP_BASE_DN: dc=innotel,dc=us
       DATABASE_URL: postgresql://billing:BillingDB!2026@billing-postgres:5432/billing
     depends_on:
@@ -597,6 +598,7 @@ services:
       AUTHENTIK_LDAP_BIND_USER: authentik-ldap
       AUTHENTIK_LDAP_BIND_TOKEN: ak-ldap-bind-2026
       AUTHENTIK_LDAP_BIND_GROUP: paid_users
+      AUTHENTIK_LDAP_ADMIN_GROUP: jellyfin_admins
       AUTHENTIK_LDAP_BASE_DN: dc=innotel,dc=us
     command: ["python", "/init/init.py"]
     volumes:

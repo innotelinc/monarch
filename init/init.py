@@ -90,6 +90,7 @@ LDAP_PORT = os.environ.get("AUTHENTIK_LDAP_PORT", "3389")
 LDAP_BIND_USER = os.environ.get("AUTHENTIK_LDAP_BIND_USER", "authentik-ldap")
 LDAP_BIND_TOKEN = os.environ.get("AUTHENTIK_LDAP_BIND_TOKEN", "")
 LDAP_BIND_GROUP = os.environ.get("AUTHENTIK_LDAP_BIND_GROUP", "paid_users")
+LDAP_ADMIN_GROUP = os.environ.get("AUTHENTIK_LDAP_ADMIN_GROUP", "jellyfin_admins")
 LDAP_BASE_DN = os.environ.get("AUTHENTIK_LDAP_BASE_DN", "dc=innotel,dc=us")
 
 # ---------------------------------------------------------------------------
@@ -351,6 +352,7 @@ def write_ldap_plugin_config() -> tuple[str, str]:
     """Write the LDAP-Auth plugin config file. Returns (path, xml)."""
     bind_dn = f"cn={LDAP_BIND_USER},ou=users,{LDAP_BASE_DN}"
     search_filter = f"(memberOf=cn={LDAP_BIND_GROUP},ou=groups,{LDAP_BASE_DN})"
+    admin_filter = f"(memberOf=cn={LDAP_ADMIN_GROUP},ou=groups,{LDAP_BASE_DN})"
     xml = f"""<?xml version="1.0"?>
 <PluginConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <LdapUsers />
@@ -364,7 +366,7 @@ def write_ldap_plugin_config() -> tuple[str, str]:
   <LdapBaseDn>{LDAP_BASE_DN}</LdapBaseDn>
   <LdapSearchFilter>{search_filter}</LdapSearchFilter>
   <LdapAdminBaseDn />
-  <LdapAdminFilter />
+  <LdapAdminFilter>{admin_filter}</LdapAdminFilter>
   <EnableLdapAdminFilterMemberUid>false</EnableLdapAdminFilterMemberUid>
   <LdapSearchAttributes>uid, cn, mail, displayName</LdapSearchAttributes>
   <LdapClientCertPath />
@@ -447,7 +449,8 @@ def configure_jellyfin_ldap():
 
     if jellyfin_plugin_installed(token):
         _log("LDAP-Auth plugin loaded. Jellyfin logins now resolve against Authentik LDAP "
-             f"({LDAP_SERVER}:{LDAP_PORT}, group cn={LDAP_BIND_GROUP}).")
+             f"({LDAP_SERVER}:{LDAP_PORT}, group cn={LDAP_BIND_GROUP}, "
+             f"admins cn={LDAP_ADMIN_GROUP}).")
         _results["jellyfin-ldap"] = "configured"
         return True
     _issues.append("jellyfin-ldap: plugin not visible after restart - check Dashboard > Plugins")

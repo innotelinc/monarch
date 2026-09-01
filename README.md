@@ -309,6 +309,7 @@ Everything except adding users is automated:
 | `authentik-ldap` container | `docker-compose.yml` | LDAP outpost (`ghcr.io/goauthentik/ldap`), plain LDAP on 3389 / LDAPS on 6636 inside the network, also mapped to host `389`/`636` for testing |
 | LDAP provider + outpost + app | billing-api on startup (`ensure_ldap_setup`) | base DN `dc=innotel,dc=us`; provider/outpost named `jellyfin-ldap`; the outpost's API token is pinned to `ak-ldap-outpost-2026` (must match the container's `AUTHENTIK_TOKEN`) |
 | Bind service account | billing-api on startup | `authentik-ldap` service account + token pinned to `ak-ldap-bind-2026`; a role grants it "Search full LDAP directory" on the provider |
+| Groups | billing-api on startup | `paid_users` (subscribers - created on first Stripe webhook) and `jellyfin_admins` (Jellyfin admins - auto-created) |
 | Jellyfin LDAP-Auth plugin | `arr-init` | installs the plugin (catalog, falls back to the GitHub release) and writes its config to `plugins/LDAP-Auth/LDAP-Auth.xml`, then restarts Jellyfin |
 
 **What the Jellyfin plugin is configured with** (values in the config file
@@ -320,6 +321,7 @@ arr-init writes):
 | Bind User | `cn=authentik-ldap,ou=users,dc=innotel,dc=us` (password = `ak-ldap-bind-2026`) |
 | Base DN | `dc=innotel,dc=us` |
 | Search Filter | `(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)` |
+| Admin Filter | `(memberOf=cn=jellyfin_admins,ou=groups,dc=innotel,dc=us)` |
 | Username attribute | `cn` (users log in with their Authentik username, not email) |
 | Create users | enabled (first successful login auto-creates the Jellyfin account with all libraries) |
 
@@ -329,6 +331,14 @@ bind succeeds -> Jellyfin login works. Subscription cancels -> billing-api
 sets `is_active = false` -> the LDAP bind fails -> Jellyfin login is blocked,
 even though the user is still in the group. Granting access manually is just
 Directory -> Groups -> `paid_users` -> add the user.
+
+**Jellyfin admins are managed the same way.** Add a user to Directory ->
+Groups -> `jellyfin_admins` (auto-created at provisioning) and on their next
+Jellyfin login the LDAP plugin grants them admin; remove them and the next
+login revokes it. Because the admin filter is the source of truth, admin
+grants made manually inside Jellyfin (Dashboard -> Users) are overridden on
+the user's next LDAP login - use the group instead. The local `ARR_USERNAME`
+admin account is unaffected.
 
 Notes:
 
