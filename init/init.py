@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-arr-init: one-shot automatic wiring of the whole ARR media stack.
+monarch-init: one-shot automatic wiring of the whole Monarch media platform.
 
-Runs once after `docker compose up -d` (container arr-init, image
+Runs once after `docker compose up -d` (container monarch-init, image
 python:3.12-slim, stdlib only - no pip packages needed). It configures:
 
   * Jellyfin      - first-run wizard (creates the admin user with the shared
@@ -47,8 +47,8 @@ from http.cookiejar import CookieJar
 # Configuration
 # ---------------------------------------------------------------------------
 
-USER = os.environ.get("ARR_USERNAME", "admin")
-PASS = os.environ.get("ARR_PASSWORD", "arrarr8")
+USER = os.environ.get("MONARCH_USERNAME", "admin")
+PASS = os.environ.get("MONARCH_PASSWORD", "monarch8")
 APPDATA = "/docker/appdata"
 INIT_DIR = "/docker/appdata/init"
 
@@ -58,7 +58,7 @@ QBT_BASE = "http://qbittorrent:8080"
 PROWLARR_BASE = "http://prowlarr:9696"
 BAZARR_BASE = "http://bazarr:6767"
 
-ARR_APPS = [
+MONARCH_APPS = [
     {"svc": "sonarr", "port": 8989, "api": "v3", "category": "tv",     "media": "tv"},
     {"svc": "radarr", "port": 7878, "api": "v3", "category": "movies", "media": "movies"},
     {"svc": "lidarr", "port": 8686, "api": "v1", "category": "music",  "media": "music"},
@@ -102,7 +102,7 @@ _issues = []
 
 
 def _log(msg: str) -> None:
-    print(f"[arr-init] {msg}", flush=True)
+    print(f"[monarch-init] {msg}", flush=True)
 
 
 def _http(base, path, method="GET", body=None, headers=None, opener=None,
@@ -235,8 +235,8 @@ def configure_jellyfin():
 
     # Log in and keep the admin token as the de-facto API key.
     auth_header = (
-        'MediaBrowser Client="ARR Init", Device="Linux", '
-        'DeviceId="arr-init-001", Version="1.0.0"'
+        'MediaBrowser Client="Monarch Init", Device="Linux", '
+        'DeviceId="monarch-init-001", Version="1.0.0"'
     )
     status, text, j = _http(
         JELLYFIN_BASE, "/Users/AuthenticateByName", method="POST",
@@ -627,11 +627,11 @@ def configure_livetv():
 # Sonarr / Radarr / Lidarr / Whisparr
 # ---------------------------------------------------------------------------
 
-def arr_base(svc, port):
+def monarch_app_base(svc, port):
     return f"http://{svc}:{port}"
 
 
-def set_arr_auth(base, api, key):
+def set_monarch_app_auth(base, api, key):
     status, _, j = _http(base, f"/api/{api}/config/host", headers={"X-Api-Key": key})
     if status != 200 or not isinstance(j, dict):
         return False, "config/host unreachable"
@@ -725,23 +725,23 @@ def ensure_media_mgmt(base, api, key):
 
 
 @arrived("sonarr/radarr/lidarr/whisparr setup")
-def configure_arrs():
+def configure_monarch_apps():
     _log("--- *arr apps ---")
-    for app in ARR_APPS:
+    for app in MONARCH_APPS:
         svc = app["svc"]
         key = api_key_for(svc)
         if not key:
             _issues.append(f"{svc}: API key not found in {APPDATA}/{svc}/config.xml")
             _log(f"WARNING: {svc} API key not found - skipped.")
             continue
-        base = arr_base(svc, app["port"])
+        base = monarch_app_base(svc, app["port"])
         api = app["api"]
 
         if not wait_for(base, f"/api/{api}/system/status", f"{svc}",
                         timeout=900, headers={"X-Api-Key": key}):
             continue
 
-        ok, msg = set_arr_auth(base, api, key)
+        ok, msg = set_monarch_app_auth(base, api, key)
         _log(f"{svc}: auth -> {msg}")
         if not ok:
             _issues.append(f"{svc}: {msg}")
@@ -840,7 +840,7 @@ def configure_prowlarr():
         _issues.append("prowlarr: apps schema unreachable")
         return False
 
-    for app in ARR_APPS:
+    for app in MONARCH_APPS:
         impl = PROWLARR_APP_IMPLS[app["svc"]]
         if impl in existing:
             _log(f"Prowlarr app {impl} already registered - skipping.")
@@ -897,7 +897,7 @@ def configure_qbittorrent():
         _issues.append("qBittorrent WebUI login failed with the shared credentials. "
                        "The PBKDF2 hash may not match this qBittorrent version - grab the "
                        "temporary password from `docker logs qbittorrent` and change it in "
-                       "the WebUI (Tools > Options > Web UI), then re-run arr-init.")
+                       "the WebUI (Tools > Options > Web UI), then re-run monarch-init.")
         _log("WARNING: qBittorrent login failed - categories NOT created.")
         return False
 
@@ -1050,7 +1050,7 @@ def configure_jellyseerr():
         key = api_key_for(app["svc"])
         if not key:
             continue
-        base = arr_base(app["svc"], app["port"])
+        base = monarch_app_base(app["svc"], app["port"])
         api = app["api"]
         profile = root_dir = None
         st, _, j = _http(base, f"/api/{api}/qualityprofile", headers={"X-Api-Key": key})
@@ -1103,13 +1103,13 @@ def configure_jellyseerr():
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    _log(f"arr-init starting (user '{USER}').")
+    _log(f"monarch-init starting (user '{USER}').")
     _log("Timeout for each service: up to 15 minutes on first boot while images start.")
 
     configure_jellyfin()
     configure_jellyfin_ldap()
     configure_livetv()
-    configure_arrs()
+    configure_monarch_apps()
     configure_prowlarr()
     configure_qbittorrent()
     configure_bazarr()

@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build a bootable ARR Media Stack live/install ISO.
+# Build a bootable Monarch Media Platform live/install ISO.
 #
 # The image boots into an Xfce desktop (autologin as the "user" live account)
 # with two launchers:
-#   * Download ARR bundle   - fetch the release + offline bundle from GitHub
-#   * Install ARR Media     - install to this machine (live USB -> disk, or
+#   * Download Monarch bundle - fetch the release + offline bundle from GitHub
+#   * Install Monarch       - install to this machine (live USB -> disk, or
 #                             onto an already-installed Linux system)
 #
 # The ISO is BIOS + UEFI hybrid: GRUB el-torito for CD/BIOS, isohybrid MBR for
 # BIOS-from-USB, and a GRUB EFI image for UEFI (Secure Boot must be disabled).
 #
 # Requirements: live-build, xorriso, grub-efi-amd64-bin, mtools, genisoimage,
-# isolinux (isohdpfx.bin). Output: dist/live-usb/arr-media-live-amd64.iso
+# isolinux (isohdpfx.bin). Output: dist/live-usb/monarch-live-amd64.iso
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$REPO/dist/live-usb}"
 WORK_DIR="${WORK_DIR:-$REPO/.live-build}"
-ISO_NAME="${ISO_NAME:-arr-media-live-amd64.iso}"
-ISO_VOLUME="ARR_MEDIA"
+ISO_NAME="${ISO_NAME:-monarch-live-amd64.iso}"
+ISO_VOLUME="MONARCH_MEDIA"
 BOOTARGS="boot=live components quiet splash"
 
 for cmd in lb xorriso grub-mkimage mformat mcopy; do
@@ -41,13 +41,13 @@ lb config \
   --initsystem systemd \
   --archive-areas "main universe" \
   --bootappend-live "$BOOTARGS" \
-  --iso-application "ARR Media Stack" \
+  --iso-application "Monarch Media Platform" \
   --iso-publisher "Innotel" \
   --iso-volume "$ISO_VOLUME" \
   --zsync false
 
 # ---- chroot package list: desktop + tools + installer dependencies ----
-cat > config/package-lists/arr.list.chroot <<'EOF'
+cat > config/package-lists/monarch.list.chroot <<'EOF'
 # live system bootstrap
 live-boot
 live-config
@@ -88,19 +88,19 @@ bash-completion
 EOF
 
 # ---- includes: installer scripts, autologin, sudo, desktop launchers ----
-mkdir -p config/includes.chroot/opt/arr
-cp "$REPO/scripts/install-arr.sh" config/includes.chroot/opt/arr/
-cp "$REPO/scripts/fetch-offline-bundle.sh" config/includes.chroot/opt/arr/
-chmod 0755 config/includes.chroot/opt/arr/*.sh
+mkdir -p config/includes.chroot/opt/monarch
+cp "$REPO/scripts/install-monarch.sh" config/includes.chroot/opt/monarch/
+cp "$REPO/scripts/fetch-offline-bundle.sh" config/includes.chroot/opt/monarch/
+chmod 0755 config/includes.chroot/opt/monarch/*.sh
 
 # Bake the deployment bundle into the ISO so an offline install always has the
 # full source/compose payload (docker images still come from the USB medium).
-if [ -f "$REPO/dist/offline-bundle/arr-deployment.tar.gz" ]; then
-  cp "$REPO/dist/offline-bundle/arr-deployment.tar.gz" config/includes.chroot/opt/arr/
+if [ -f "$REPO/dist/offline-bundle/monarch-deployment.tar.gz" ]; then
+  cp "$REPO/dist/offline-bundle/monarch-deployment.tar.gz" config/includes.chroot/opt/monarch/
 fi
 
 mkdir -p config/includes.chroot/etc/lightdm/lightdm.conf.d
-cat > config/includes.chroot/etc/lightdm/lightdm.conf.d/50-arr-autologin.conf <<'EOF'
+cat > config/includes.chroot/etc/lightdm/lightdm.conf.d/50-monarch-autologin.conf <<'EOF'
 [Seat:*]
 autologin-user=user
 autologin-user-timeout=0
@@ -108,28 +108,28 @@ user-session=xfce
 EOF
 
 mkdir -p config/includes.chroot/etc/sudoers.d
-cat > config/includes.chroot/etc/sudoers.d/99-arr-live <<'EOF'
+cat > config/includes.chroot/etc/sudoers.d/99-monarch-live <<'EOF'
 user ALL=(ALL) NOPASSWD: ALL
 EOF
-chmod 0440 config/includes.chroot/etc/sudoers.d/99-arr-live
+chmod 0440 config/includes.chroot/etc/sudoers.d/99-monarch-live
 
 mkdir -p config/includes.chroot/etc/skel/Desktop
-cat > config/includes.chroot/etc/skel/Desktop/Download-ARR.desktop <<'EOF'
+cat > config/includes.chroot/etc/skel/Desktop/Download-Monarch.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=Download ARR bundle
-Comment=Download the ARR Media Stack release and offline bundle
-Exec=x-terminal-emulator -e /opt/arr/fetch-offline-bundle.sh
+Name=Download Monarch bundle
+Comment=Download the Monarch Media Platform release and offline bundle
+Exec=x-terminal-emulator -e /opt/monarch/fetch-offline-bundle.sh
 Icon=network-server
 Terminal=true
 Categories=System;
 EOF
-cat > config/includes.chroot/etc/skel/Desktop/Install-ARR.desktop <<'EOF'
+cat > config/includes.chroot/etc/skel/Desktop/Install-Monarch.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=Install ARR Media
-Comment=Install ARR Media Stack (live USB -> internal disk, or this system)
-Exec=x-terminal-emulator -e sudo /opt/arr/install-arr.sh
+Name=Install Monarch
+Comment=Install Monarch Media Platform (live USB -> internal disk, or this system)
+Exec=x-terminal-emulator -e sudo /opt/monarch/install-monarch.sh
 Icon=drive-harddisk
 Terminal=true
 Categories=System;
@@ -183,12 +183,12 @@ insmod search_label
 
 search --no-floppy --set=root --label $ISO_VOLUME
 
-menuentry "ARR Media Stack - Live" {
+menuentry "Monarch Media Platform - Live" {
     linux /live/$KERNEL $BOOTARGS
     initrd /live/$INITRD
 }
 
-menuentry "ARR Media Stack - Live (failsafe)" {
+menuentry "Monarch Media Platform - Live (failsafe)" {
     linux /live/$KERNEL boot=live components noapic noacpi nomodeset
     initrd /live/$INITRD
 }
@@ -226,7 +226,7 @@ rm -rf efiboot
 xorriso -as mkisofs \
   -V "$ISO_VOLUME" \
   -J -R -l -allow-multidot -cache-inodes \
-  -A "ARR Media Stack" -publisher "Innotel" \
+  -A "Monarch Media Platform" -publisher "Innotel" \
   -no-emul-boot -boot-load-size 4 -boot-info-table -b boot/grub/grub_eltorito \
   -eltorito-alt-boot -no-emul-boot -e boot/grub/efi.img \
   -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \

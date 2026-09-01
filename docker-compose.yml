@@ -33,7 +33,7 @@ services:
   # JELLYSEERR - Request Manager
   #
   # Wired to Jellyfin (login + media library) and to
-  # Radarr/Sonarr/Lidarr/Whisparr for requests by arr-init.
+  # Radarr/Sonarr/Lidarr/Whisparr for requests by monarch-init.
   ###############################################
   jellyseerr:
     <<: *common-keys
@@ -111,7 +111,7 @@ services:
   # PROWLARR - Indexer Manager
   # Radarr/Sonarr/Lidarr/Whisparr are registered as
   # "Apps" here and qBittorrent as the download client
-  # automatically by arr-init.
+  # automatically by monarch-init.
   ###############################################
   prowlarr:
     <<: *common-keys
@@ -155,8 +155,8 @@ services:
   ###############################################
   # QBITTORRENT - Main Downloader (WebUI on :8080)
   #
-  # WebUI credentials (ARR_USERNAME / ARR_PASSWORD)
-  # are pre-seeded into its config by arr-seed BEFORE
+  # WebUI credentials (MONARCH_USERNAME / MONARCH_PASSWORD)
+  # are pre-seeded into its config by monarch-seed BEFORE
   # first start so there is no temporary-password dance.
   ###############################################
   qbittorrent:
@@ -165,7 +165,7 @@ services:
     image: ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
     stop_grace_period: 30m
     depends_on:
-      arr-seed:
+      monarch-seed:
         condition: service_completed_successfully
     ports:
       - 8080:8080
@@ -213,8 +213,8 @@ services:
       PUID: 1000
       PGID: 1000
       TZ: ${TZ:-America/New_York}
-      USER: ${ARR_USERNAME:-admin}
-      PASS: ${ARR_PASSWORD:-arrarr8}
+      USER: ${MONARCH_USERNAME:-admin}
+      PASS: ${MONARCH_PASSWORD:-monarch8}
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/transmission:/config
@@ -325,7 +325,7 @@ services:
   ###############################################
   # IPTV - EPG guide generator (Live TV guide)
   # Grabs XMLTV guide data for the channel list in
-  # channels.xml (arr-init writes it on first boot)
+  # channels.xml (monarch-init writes it on first boot)
   # and serves it at http://iptv:3000/guide.xml.
   # Host port is 3001 so it does not clash with the
   # subscription platform (which owns :3000).
@@ -344,7 +344,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # Host /opt/epg holds channels.xml (EPG channel list, written by
-      # arr-init) and receives guide.xml (served at http://iptv:3000/guide.xml).
+      # monarch-init) and receives guide.xml (served at http://iptv:3000/guide.xml).
       - /opt/epg:/epg/public
 
   ###############################################
@@ -426,7 +426,7 @@ services:
       AUTHENTIK_POSTGRESQL__USER: authentik
       AUTHENTIK_POSTGRESQL__PASSWORD: AuthentikDB!2026
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
-      AUTHENTIK_BOOTSTRAP_PASSWORD: ${ARR_PASSWORD:-arrarr8}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
       AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
       AUTHENTIK_BOOTSTRAP_EMAIL: admin@innotel.us
     depends_on:
@@ -483,11 +483,10 @@ services:
   billing-api:
     restart: unless-stopped
     container_name: billing-api
-    image: python:3.12-slim
+    image: ghcr.io/innotelinc/monarch-billing-api:latest
+    build: ./billing-api
     working_dir: /app
-    command: >
-      sh -c "pip install --no-cache-dir -r /app/requirements.txt &&
-             uvicorn main:app --host 0.0.0.0 --port 8001"
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
     environment:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_live_replace_me}
       # Signing secret for the billing-api webhook endpoint. If unset it falls
@@ -495,7 +494,7 @@ services:
       BILLING_WEBHOOK_SECRET: ${BILLING_WEBHOOK_SECRET:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_replace_me}
       STRIPE_PRICE_ID: price_replace_me
-      BILLING_BASE_URL: https://billing.innotel.us
+      BILLING_BASE_URL: https://api.monarch.innotel.us
       BILLING_API_KEY: innotel-billing-api-key
       AUTHENTIK_BASE_URL: http://authentik-server:9000
       AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
@@ -520,13 +519,78 @@ services:
       - ./billing-api:/app
 
   ###############################################
+  # MONARCH-RECS - AI recommendations + smart search
+  # Content-based recommendations over the Jellyfin
+  # library (per-user watch history + similar items),
+  # with smart search. Optional LLM descriptions via
+  # any OpenAI-compatible endpoint when configured
+  # (see .env.sample). Internal API on :8002.
+  ###############################################
+  monarch-recs:
+    <<: *common-keys
+    container_name: monarch-recs
+    image: ghcr.io/innotelinc/monarch-recs:latest
+    build: ./ai-recs
+    working_dir: /app
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
+    depends_on:
+      jellyfin:
+        condition: service_started
+    environment:
+      JELLYFIN_URL: ${JELLYFIN_URL:-http://jellyfin:8096}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      # Fallback: read the admin token monarch-init exports to
+      # /docker/appdata/init/jellyfin-api-key.txt on first boot.
+      JELLYFIN_API_KEY_FILE: /docker/appdata/init/jellyfin-api-key.txt
+      REFRESH_INTERVAL: 900
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+    ports:
+      - 8002:8002
+    volumes:
+      - ./ai-recs:/app
+      - /docker/appdata:/docker/appdata:ro
+
+  ###############################################
+  # MONARCH-HEALTH - media health analytics
+  # Periodically scans the Jellyfin library + media
+  # volume and reports: per-library stats, missing/
+  # duplicate files, disk usage, most-played items
+  # and service health. Internal API on :8003.
+  ###############################################
+  monarch-health:
+    <<: *common-keys
+    container_name: monarch-health
+    image: ghcr.io/innotelinc/monarch-health:latest
+    build: ./health-analytics
+    working_dir: /app
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"]
+    depends_on:
+      jellyfin:
+        condition: service_started
+    environment:
+      JELLYFIN_URL: ${JELLYFIN_URL:-http://jellyfin:8096}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      JELLYFIN_API_KEY_FILE: /docker/appdata/init/jellyfin-api-key.txt
+      SCAN_INTERVAL: 3600
+      MEDIA_ROOT: /data/media
+      REPORT_FILE: /app/data/analytics.json
+    ports:
+      - 8003:8003
+    volumes:
+      - ./health-analytics:/app
+      - /data/media:/data/media:ro
+      - /docker/appdata/monarch-health:/app/data
+
+  ###############################################
   # JELLYFIN SUBSCRIPTION PLATFORM - Public signup,
   # Stripe billing, Jellyfin account provisioning
   #
   # https://github.com/innotelinc/jellyfin-subscription-platform
   # Served on :3000. Set the env vars in .env - most
   # importantly JELLYFIN_API_KEY (see /docker/appdata/init/
-  # after first boot - arr-init exports the admin token
+  # after first boot - monarch-init exports the admin token
   # there) and the Stripe keys.
   ###############################################
   jellyfin-subscription:
@@ -549,34 +613,34 @@ services:
       AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-ak-bootstrap-innotel-2026}
       ACCOUNT_PORTAL_URL: ${ACCOUNT_PORTAL_URL:-http://localhost:9000/if/user/}
       REQUEST_URL: ${REQUEST_URL:-http://localhost:5055}
-      ADMIN_PASSWORD: ${ARR_PASSWORD:-arrarr8}
+      ADMIN_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
       SESSION_SECRET: ${SESSION_SECRET:-change-me}
     volumes:
       - /docker/appdata/jellyfin-subscription:/app/data
 
   ###############################################
-  # ARR-SEED - Pre-seed qBittorrent WebUI credentials
+  # MONARCH-SEED - Pre-seed qBittorrent WebUI credentials
   # Runs once BEFORE qBittorrent first starts so the
-  # WebUI login is ARR_USERNAME / ARR_PASSWORD from
+  # WebUI login is MONARCH_USERNAME / MONARCH_PASSWORD from
   # the very first boot (no temporary password).
   ###############################################
-  arr-seed:
-    container_name: arr-seed
+  monarch-seed:
+    container_name: monarch-seed
     image: python:3.12-slim
     restart: "no"
     environment:
-      ARR_USERNAME: ${ARR_USERNAME:-admin}
-      ARR_PASSWORD: ${ARR_PASSWORD:-arrarr8}
+      MONARCH_USERNAME: ${MONARCH_USERNAME:-admin}
+      MONARCH_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
     command: ["python", "/init/seed_qbt.py"]
     volumes:
       - ./init:/init:ro
       - /docker/appdata/qbittorrent:/config
 
   ###############################################
-  # ARR-INIT - Auto Wire the Whole Stack
+  # MONARCH-INIT - Auto Wire the Whole Stack
   # Runs once after the stack is up and:
-  #   * creates the Jellyfin admin user (ARR_USERNAME /
-  #     ARR_PASSWORD), logs in and exports the admin
+  #   * creates the Jellyfin admin user (MONARCH_USERNAME /
+  #     MONARCH_PASSWORD), logs in and exports the admin
   #     token to /docker/appdata/init/jellyfin-api-key.txt
   #   * sets forms-auth + shared credentials on every
   #     *arr app, root folders and qBittorrent client
@@ -586,8 +650,8 @@ services:
   #   * connects Bazarr to Radarr/Sonarr
   #   * wires Jellyseerr to Jellyfin/Radarr/Sonarr
   ###############################################
-  arr-init:
-    container_name: arr-init
+  monarch-init:
+    container_name: monarch-init
     image: python:3.12-slim
     restart: "no"
     depends_on:
@@ -603,10 +667,10 @@ services:
       - sabnzbd
       - iptv
     environment:
-      ARR_USERNAME: ${ARR_USERNAME:-admin}
-      ARR_PASSWORD: ${ARR_PASSWORD:-arrarr8}
+      MONARCH_USERNAME: ${MONARCH_USERNAME:-admin}
+      MONARCH_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
       TZ: ${TZ:-America/New_York}
-      # Live TV - Jellyfin-native M3U tuner + XMLTV guide. arr-init adds the
+      # Live TV - Jellyfin-native M3U tuner + XMLTV guide. monarch-init adds the
       # tuner/guide to Jellyfin and writes the EPG channel list to /opt/epg.
       LIVETV_M3U_URL: ${LIVETV_M3U_URL:-https://iptv-org.github.io/iptv/countries/us.m3u}
       LIVETV_GUIDE_URL: ${LIVETV_GUIDE_URL:-http://iptv:3000/guide.xml}
@@ -623,8 +687,41 @@ services:
     volumes:
       - ./init:/init:ro
       - /docker/appdata:/docker/appdata
-      # lets arr-init drop /opt/epg/channels.xml for the iptv EPG grabber
+      # lets monarch-init drop /opt/epg/channels.xml for the iptv EPG grabber
       - /opt/epg:/opt/epg
+
+  ###############################################
+  # NGINX PROXY MANAGER - Reverse proxy + wildcard SSL
+  #
+  # Public entry point for the Monarch subdomains.
+  # scripts/npm-proxy-hosts.py configures it through
+  # its API (login -> wildcard cert via DNS challenge
+  # -> proxy hosts). Admin UI on :81 (admin subdomain).
+  #
+  # HTTPS/HTTP land on 443/80, which take over the
+  # host's web ports - see README "Reverse proxy".
+  # host.docker.internal is exposed as a fallback
+  # forward target (NPM_FORWARD_HOST=host.docker.internal)
+  # for reaching host-published ports.
+  ###############################################
+  nginx-proxy-manager:
+    <<: *common-keys
+    container_name: nginx-proxy-manager
+    image: jc21/nginx-proxy-manager:latest
+    ports:
+      - 80:80
+      - 443:443
+      - 81:81
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: ${TZ:-America/New_York}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /docker/appdata/nginx-proxy-manager:/data
+      - /docker/appdata/nginx-proxy-manager/letsencrypt:/etc/letsencrypt
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   ###############################################
   # WATCHTOWER - Auto Updates
@@ -646,9 +743,9 @@ volumes:
   clipbucket_files:
 
 ###############################################
-# ARR Stack Dedicated Network
+# Monarch Stack Dedicated Network
 ###############################################
 
 networks:
   default:
-    name: arr_network
+    name: monarch_network

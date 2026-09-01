@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Download the ARR Media Stack offline bundle (deployment payload + Docker image
+# Download the Monarch Media Platform offline bundle (deployment payload + Docker image
 # archives) from the GitHub release, verify checksums, and unpack it so it can
-# be handed to install-arr.sh (or copied to a USB stick for offline use).
+# be handed to install-monarch.sh (or copied to a USB stick for offline use).
 #
-# Usage: fetch-offline-bundle.sh [OUT_DIR]   (default: ~/arr-offline-bundle)
+# Usage: fetch-offline-bundle.sh [OUT_DIR]   (default: ~/monarch-offline-bundle)
 
-REPO_SLUG="${ARR_REPO:-innotelinc/arr}"
-RELEASE_TAG="${ARR_RELEASE_TAG:-v1.0.0}"
-OUT_DIR="${1:-${ARR_OUT_DIR:-$HOME/arr-offline-bundle}}"
+REPO_SLUG="${MONARCH_REPO:-innotelinc/monarch-media-platform}"
+RELEASE_TAG="${MONARCH_RELEASE_TAG:-v1.0.0}"
+OUT_DIR="${1:-${MONARCH_OUT_DIR:-$HOME/monarch-offline-bundle}}"
 BASE_URL="https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-command -v curl >/dev/null 2>&1 || { echo "curl is required (install it or run from the ARR live image)" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "curl is required (install it or run from the Monarch live image)" >&2; exit 1; }
 
 mkdir -p "$OUT_DIR"
 cd "$OUT_DIR"
 
 echo "Downloading from $BASE_URL"
 
-for file in arr-deployment.tar.gz SHA256SUMS; do
+for file in monarch-deployment.tar.gz SHA256SUMS; do
   echo "  $file"
   curl -fL --retry 3 --retry-delay 2 -o "$file" "$BASE_URL/$file"
 done
@@ -43,7 +43,7 @@ echo "Verifying checksums..."
 sha256sum -c SHA256SUMS
 
 echo "Unpacking the deployment payload..."
-tar -xzf arr-deployment.tar.gz
+tar -xzf monarch-deployment.tar.gz
 
 echo "Reassembling the Docker image archives..."
 : > docker-images.tar.gz
@@ -60,7 +60,6 @@ rm -f docker-images.tar.gz
 
 echo "======================================================"
 echo " Offline bundle ready at: $OUT_DIR"
-echo " Install it with:  $OUT_DIR/scripts/install-arr.sh"
-echo " Or copy the whole directory onto a USB stick for a"
-echo " fully offline install from the ARR live image."
+echo " Install it with:  $OUT_DIR/scripts/install-monarch.sh"echo " Or copy the whole directory onto a USB stick for a"
+ echo " fully offline install from the Monarch live image."
 echo "======================================================"

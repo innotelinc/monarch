@@ -1,60 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ARR Media Stack installer.
+# Monarch Media Platform installer.
 #
 # Two modes:
-#   1. Live session (booted from the ARR live/install USB): installs to a target
+#   1. Live session (booted from the Monarch live/install USB): installs to a target
 #      disk - partitions it, copies the live system, installs GRUB (BIOS and
 #      UEFI), then runs the regular install inside the new system.
-#   2. Already-installed Linux: installs the ARR stack (Docker + images + systemd
+#   2. Already-installed Linux: installs the Monarch stack (Docker + images + systemd
 #      service) into this system.
 #
-# The offline bundle (arr-deployment.tar.gz + docker-images-part*.tar.gz) is used
+# The offline bundle (monarch-deployment.tar.gz + docker-images-part*.tar.gz) is used
 # when present; otherwise the required pieces are fetched from GitHub and Docker
 # registries over the network.
 
-TARGET="${ARR_TARGET:-/opt/arr}"
+TARGET="${MONARCH_TARGET:-/opt/monarch}"
 
 # Resolve the deployment root (the dir that holds docker-compose.yml / the
 # deployment payload). The same installer runs from two layouts:
-#   * repo layout:       <repo>/scripts/install-arr.sh  -> ROOT=<repo>
-#   * deployed layout:   /opt/arr/install-arr.sh         -> ROOT=/opt/arr
+#   * repo layout:       <repo>/scripts/install-monarch.sh  -> ROOT=<repo>
+#   * deployed layout:   /opt/monarch/install-monarch.sh         -> ROOT=/opt/monarch
 # A naive "dirname $0/.." only matches the repo layout; in the deployed system
 # it resolves one level too high (to /opt), which makes install_in_place treat
-# ASSET_DIR!=TARGET and recursively rsync /opt into /opt/arr -- creating a
-# stray /opt/arr/arr and wiping the real payload.
+# ASSET_DIR!=TARGET and recursively rsync /opt into /opt/monarch -- creating a
+# stray /opt/monarch/monarch and wiping the real payload.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR"
 for cand in "$SCRIPT_DIR" "$(cd "$SCRIPT_DIR/.." && pwd)"; do
   if [ -e "$cand/docker-compose.yml" ] || \
-     [ -e "$cand/arr-deployment.tar.gz" ] || \
-     [ -e "$cand/scripts/install-arr.sh" ]; then
+     [ -e "$cand/monarch-deployment.tar.gz" ] || \
+     [ -e "$cand/scripts/install-monarch.sh" ]; then
     ROOT="$cand"
     break
   fi
 done
-ASSET_DIR="${ARR_ASSET_DIR:-$ROOT}"
-RELEASE_TAG="${ARR_RELEASE_TAG:-v1.0.0}"
-REPO_SLUG="${ARR_REPO:-innotelinc/arr}"
-ARR_DISK="${ARR_DISK:-}"
+ASSET_DIR="${MONARCH_ASSET_DIR:-$ROOT}"
+RELEASE_TAG="${MONARCH_RELEASE_TAG:-v1.0.0}"
+REPO_SLUG="${MONARCH_REPO:-innotelinc/monarch-media-platform}"
+MONARCH_DISK="${MONARCH_DISK:-}"
 
 # Local login account for the installed system (documented in the README).
-# Overridable with ARR_USER / ARR_PASSWORD.
-ARR_USER="${ARR_USER:-arr}"
-ARR_PASSWORD="${ARR_PASSWORD:-arr}"
+# Overridable with MONARCH_USER / MONARCH_PASSWORD.
+MONARCH_USER="${MONARCH_USER:-monarch}"
+MONARCH_PASSWORD="${MONARCH_PASSWORD:-monarch}"
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 
 is_live_session() {
-  # ARR_IN_CHROOT guards the second (chrooted) phase of a disk install.
-  [ "${ARR_IN_CHROOT:-0}" = "1" ] && return 1
+  # MONARCH_IN_CHROOT guards the second (chrooted) phase of a disk install.
+  [ "${MONARCH_IN_CHROOT:-0}" = "1" ] && return 1
   [ -d /run/live ] || [ -d /run/live/medium ] || grep -q ' boot=live ' /proc/cmdline 2>/dev/null
 }
 
 install_docker() {
   command -v docker >/dev/null 2>&1 && return 0
-  if command -v apt-get >/dev/null 2>&1 && [ "${ARR_ALLOW_APT:-1}" = "1" ]; then
+  if command -v apt-get >/dev/null 2>&1 && [ "${MONARCH_ALLOW_APT:-1}" = "1" ]; then
     $SUDO apt-get update
     # docker-compose-v2 is the Ubuntu-archive plugin; docker-compose-plugin is
     # the Docker-repo name. Try both so either distro works.
@@ -85,27 +85,27 @@ load_docker_images() {
 
 install_service() {
   local root="$1"
-  $SUDO mkdir -p "$root/etc/arr"
-  $SUDO cp "$root$TARGET/systemd/arr.service" "$root/etc/systemd/system/arr.service" 2>/dev/null || \
-    $SUDO cp "$ROOT/systemd/arr.service" "$root/etc/systemd/system/arr.service"
-  $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" "$root/etc/systemd/system/arr.service"
+  $SUDO mkdir -p "$root/etc/monarch"
+  $SUDO cp "$root$TARGET/systemd/monarch.service" "$root/etc/systemd/system/monarch.service" 2>/dev/null || \
+    $SUDO cp "$ROOT/systemd/monarch.service" "$root/etc/systemd/system/monarch.service"
+  $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" "$root/etc/systemd/system/monarch.service"
   # systemctl --root works offline (no running systemd needed), so it also
   # works from inside the installer chroot. Prefer it whenever a root dir is
   # given, or when we're in the chroot phase of a disk install.
-  if [ -n "$root" ] || [ "${ARR_IN_CHROOT:-0}" = "1" ]; then
+  if [ -n "$root" ] || [ "${MONARCH_IN_CHROOT:-0}" = "1" ]; then
     local sysroot="${root:-/}"
     $SUDO systemctl --root "$sysroot" daemon-reload 2>/dev/null || true
-    $SUDO systemctl --root "$sysroot" enable arr.service 2>/dev/null || \
-      $SUDO ln -sf /etc/systemd/system/arr.service "$sysroot/etc/systemd/system/multi-user.target.wants/arr.service"
+    $SUDO systemctl --root "$sysroot" enable monarch.service 2>/dev/null || \
+      $SUDO ln -sf /etc/systemd/system/monarch.service "$sysroot/etc/systemd/system/multi-user.target.wants/monarch.service"
     # start only makes sense with a running systemd (live install)
     if [ -z "$root" ] && [ -d /run/systemd/system ]; then
-      $SUDO systemctl start arr.service 2>/dev/null || true
+      $SUDO systemctl start monarch.service 2>/dev/null || true
     fi
   else
     $SUDO systemctl daemon-reload 2>/dev/null || true
-    $SUDO systemctl enable arr.service 2>/dev/null || \
-      $SUDO ln -sf /etc/systemd/system/arr.service /etc/systemd/system/multi-user.target.wants/arr.service
-    $SUDO systemctl start arr.service 2>/dev/null || true
+    $SUDO systemctl enable monarch.service 2>/dev/null || \
+      $SUDO ln -sf /etc/systemd/system/monarch.service /etc/systemd/system/multi-user.target.wants/monarch.service
+    $SUDO systemctl start monarch.service 2>/dev/null || true
   fi
 }
 
@@ -137,19 +137,19 @@ install_in_place() {
     if grep -q '^SESSION_SECRET=change-me' "$TARGET/.env"; then
       $SUDO sed -i "s|^SESSION_SECRET=change-me.*|SESSION_SECRET=$(openssl rand -hex 32 2>/dev/null || tr -dc 'a-f0-9' < /dev/urandom | head -c 64)|" "$TARGET/.env"
     fi
-    echo "Created $TARGET/.env from .env.sample - edit ARR_USERNAME / ARR_PASSWORD and the Stripe keys."
+    echo "Created $TARGET/.env from .env.sample - edit MONARCH_USERNAME / MONARCH_PASSWORD and the Stripe keys."
   else
     echo ".env already present - leaving it untouched."
   fi
   load_docker_images "$TARGET/dist/docker-images"
   install_service ""
-  echo "ARR Media Stack installed at $TARGET and started."
+  echo "Monarch Media Platform installed at $TARGET and started."
   echo "Open the Homarr dashboard at http://<this-host>:7575"
 }
 
 # ---- Mode 1: live USB -> install to a disk ----
 install_to_disk() {
-  local disk="$ARR_DISK"
+  local disk="$MONARCH_DISK"
 
   if [ -z "$disk" ]; then
     # Exclude the live medium's disk and prefer a disk with no partitions.
@@ -170,15 +170,15 @@ install_to_disk() {
     fi
   fi
   if [ -z "$disk" ] || [ ! -b "$disk" ]; then
-    echo "No target disk found. Set ARR_DISK=/dev/sdX to choose one." >&2
+    echo "No target disk found. Set MONARCH_DISK=/dev/sdX to choose one." >&2
     echo "Disks:" >&2
     lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS 2>/dev/null >&2
     exit 2
   fi
 
-  if [ "${ARR_YES:-0}" != "1" ]; then
+  if [ "${MONARCH_YES:-0}" != "1" ]; then
     echo "======================================================"
-    echo " ARR Media Stack will install to: $disk"
+    echo " Monarch Media Platform will install to: $disk"
     echo " ALL DATA ON THIS DISK WILL BE DESTROYED."
     echo "======================================================"
     lsblk "$disk"
@@ -233,38 +233,38 @@ install_to_disk() {
     rsync -aAX --one-file-system \
       --exclude '/proc/*' --exclude '/sys/*' --exclude '/dev/*' \
       --exclude '/run/*' --exclude '/mnt/*' --exclude '/media/*' \
-      --exclude '/tmp/*' --exclude '/live' --exclude '/opt/arr' \
+      --exclude '/tmp/*' --exclude '/live' --exclude '/opt/monarch' \
       / "$mnt/"
   fi
 
-  # Stage the ARR application payload (source/compose/systemd) into the target.
+  # Stage the Monarch application payload (source/compose/systemd) into the target.
   # The baked ISO copy or the offline bundle on the USB is used when present;
   # otherwise the payload is fetched after boot.
-  mkdir -p "$mnt/opt/arr"
-  if [ -f "$ROOT/arr-deployment.tar.gz" ]; then
-    tar -xzf "$ROOT/arr-deployment.tar.gz" -C "$mnt/opt/arr"
-  elif [ -f /opt/arr/arr-deployment.tar.gz ]; then
-    tar -xzf /opt/arr/arr-deployment.tar.gz -C "$mnt/opt/arr"
+  mkdir -p "$mnt/opt/monarch"
+  if [ -f "$ROOT/monarch-deployment.tar.gz" ]; then
+    tar -xzf "$ROOT/monarch-deployment.tar.gz" -C "$mnt/opt/monarch"
+  elif [ -f /opt/monarch/monarch-deployment.tar.gz ]; then
+    tar -xzf /opt/monarch/monarch-deployment.tar.gz -C "$mnt/opt/monarch"
   else
     echo "No deployment bundle found; the target will fetch it after boot." >&2
   fi
 
   # Stage offline docker images if the bundle is on an attached medium.
-  mkdir -p "$mnt/opt/arr/dist"
+  mkdir -p "$mnt/opt/monarch/dist"
   for medium in /media/* /mnt/* /run/live/medium; do
     [ -d "$medium" ] || continue
     if [ -d "$medium/dist/docker-images" ]; then
       echo "Copying offline images from $medium..."
-      cp -a "$medium/dist/docker-images" "$mnt/opt/arr/dist/"
+      cp -a "$medium/dist/docker-images" "$mnt/opt/monarch/dist/"
     elif [ -f "$medium/docker-images.tar.gz" ]; then
       echo "Copying offline images from $medium..."
-      mkdir -p "$mnt/opt/arr/dist/docker-images"
+      mkdir -p "$mnt/opt/monarch/dist/docker-images"
       if [ -x "$ROOT/scripts/split-image-bundle.sh" ]; then
         bash "$ROOT/scripts/split-image-bundle.sh" \
-          "$medium/docker-images.tar.gz" "$mnt/opt/arr/dist/docker-images"
+          "$medium/docker-images.tar.gz" "$mnt/opt/monarch/dist/docker-images"
       else
-        tar -xzf "$medium/docker-images.tar.gz" -C "$mnt/opt/arr/dist/docker-images" --strip-components=1 2>/dev/null \
-          || tar -xzf "$medium/docker-images.tar.gz" -C "$mnt/opt/arr/dist/docker-images"
+        tar -xzf "$medium/docker-images.tar.gz" -C "$mnt/opt/monarch/dist/docker-images" --strip-components=1 2>/dev/null \
+          || tar -xzf "$medium/docker-images.tar.gz" -C "$mnt/opt/monarch/dist/docker-images"
       fi
     fi
   done
@@ -285,40 +285,40 @@ UUID=$uuid_efi /boot/efi vfat umask=0077 0 1
 EOF
 
   # The chroot script creates a login user, sets up DHCP networking and
-  # enables NetworkManager + docker + the arr service. systemctl needs
+  # enables NetworkManager + docker + the monarch service. systemctl needs
   # `--root /` here because no systemd is running inside the chroot.
-  cat > "$mnt/tmp/arr-chroot.sh" <<'CHROOT'
+  cat > "$mnt/tmp/monarch-chroot.sh" <<'CHROOT'
 #!/bin/bash
 set -e
 if [ -d /sys/firmware/efi ]; then
   echo "Installing GRUB for UEFI..."
-  grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=arr --recheck
+  grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=monarch --recheck
 else
   echo "Installing GRUB for BIOS..."
-  grub-install --target=i386-pc --recheck "$ARR_DISK"
+  grub-install --target=i386-pc --recheck "$MONARCH_DISK"
 fi
 update-grub
 
 # ── login user (the live CD's 'user' account only exists in the live session)
 # Create a real login account with a known password + sudo + docker groups.
-if ! id "$ARR_USER" >/dev/null 2>&1; then
-  useradd -m -s /bin/bash -G sudo,docker "$ARR_USER" 2>/dev/null || \
-    useradd -m -s /bin/bash -G sudo "$ARR_USER"
-  echo "$ARR_USER:$ARR_PASSWORD" | chpasswd
-  echo "Created login user: $ARR_USER"
+if ! id "$MONARCH_USER" >/dev/null 2>&1; then
+  useradd -m -s /bin/bash -G sudo,docker "$MONARCH_USER" 2>/dev/null || \
+    useradd -m -s /bin/bash -G sudo "$MONARCH_USER"
+  echo "$MONARCH_USER:$MONARCH_PASSWORD" | chpasswd
+  echo "Created login user: $MONARCH_USER"
 fi
-# passwordless sudo for the arr admin user
-cat > /etc/sudoers.d/99-arr-admin <<EOF
-$ARR_USER ALL=(ALL) NOPASSWD: ALL
+# passwordless sudo for the monarch admin user
+cat > /etc/sudoers.d/99-monarch-admin <<EOF
+$MONARCH_USER ALL=(ALL) NOPASSWD: ALL
 EOF
-chmod 0440 /etc/sudoers.d/99-arr-admin
+chmod 0440 /etc/sudoers.d/99-monarch-admin
 
 # ── networking: DHCP on every ethernet interface ──────────────────────────
 # The live session gets its IP from NetworkManager; the installed system must
 # too. Enable NetworkManager + systemd-networkd and add a netplan rule so
 # ethernet comes up with DHCP on first boot (works with or without NM).
 mkdir -p /etc/netplan
-cat > /etc/netplan/99-arr-dhcp.yaml <<'NETPLAN'
+cat > /etc/netplan/99-monarch-dhcp.yaml <<'NETPLAN'
 network:
   version: 2
   renderer: NetworkManager
@@ -333,14 +333,14 @@ systemctl --root / enable NetworkManager 2>/dev/null || true
 systemctl --root / enable systemd-networkd 2>/dev/null || true
 systemctl --root / enable docker 2>/dev/null || true
 CHROOT
-  chmod 0755 "$mnt/tmp/arr-chroot.sh"
-  ARR_DISK="$disk" ARR_USER="$ARR_USER" ARR_PASSWORD="$ARR_PASSWORD" \
-    chroot "$mnt" /bin/bash /tmp/arr-chroot.sh
-  rm -f "$mnt/tmp/arr-chroot.sh"
+  chmod 0755 "$mnt/tmp/monarch-chroot.sh"
+  MONARCH_DISK="$disk" MONARCH_USER="$MONARCH_USER" MONARCH_PASSWORD="$MONARCH_PASSWORD" \
+    chroot "$mnt" /bin/bash /tmp/monarch-chroot.sh
+  rm -f "$mnt/tmp/monarch-chroot.sh"
 
-  echo "Installing the ARR application inside the new system..."
-  ARR_IN_CHROOT=1 ARR_DISK="$disk" \
-    chroot "$mnt" /bin/bash /opt/arr/scripts/install-arr.sh || {
+  echo "Installing the Monarch application inside the new system..."
+  MONARCH_IN_CHROOT=1 MONARCH_DISK="$disk" \
+    chroot "$mnt" /bin/bash /opt/monarch/scripts/install-monarch.sh || {
       echo "Application install inside the target reported an error; the system is still installed." >&2
     }
 
@@ -353,7 +353,7 @@ CHROOT
   rmdir "$mnt" 2>/dev/null || true
 
   echo "======================================================"
-  echo " ARR Media Stack is installed on $disk."
+  echo " Monarch Media Platform is installed on $disk."
   echo " Remove the USB stick and reboot into the new system."
   echo "======================================================"
 }

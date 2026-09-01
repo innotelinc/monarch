@@ -1,9 +1,20 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# release.yml — cut a new numbered ARR Media Stack release with the installer
-# assets: deployment payload, source bundle, Docker image bundle, and the
-# BIOS+UEFI live/install ISO.
+# release.yml — build & publish the Monarch Media Platform release.
 #
-# Trigger: manual via "Run workflow" (recommended), or on a schedule below.
+# Triggers:
+#   • every tagged release  (git tag v* && git push --tags)  — recommended
+#   • manual via "Run workflow" (version bump minor | major), or
+#   • nightly schedule.
+#
+# What a release produces:
+#   build-images    publish the first-party Docker images to GHCR
+#                   (ghcr.io/innotelinc/monarch-billing-api|recs|health),
+#                   tagged with the release version AND :latest
+#   release         cut the GitHub release with deployment payload +
+#                   source bundle + checksums
+#   release-images  docker image bundle (offline install) — parallel VM
+#   release-iso     bootable live/install ISO — parallel VM
+#
 # Inputs:
 #   minor | major   - version bump from the last release (default: minor)
 #   lightweight     - skip the docker image bundle + live ISO (quick test only)
@@ -20,9 +31,12 @@
 #     manual test release.
 # ═══════════════════════════════════════════════════════════════════════════
 
-name: Release ARR Media Stack
+name: Release Monarch Media Platform
 
 on:
+  push:
+    tags:
+      - "v*"
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
@@ -41,14 +55,102 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
-  group: arr-release
+  group: monarch-release
   cancel-in-progress: false
 
 jobs:
+  # ── Publish the first-party images (billing-api/recs/health) to GHCR.
+  # Runs before the offline bundle job so the bundle can include the fresh
+  # images. Tagged runs publish VERSION + latest; otherwise next-version +
+  # latest (the version string is recomputed here to keep jobs independent).
+  build-images:
+    name: Build & publish Monarch images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute release version
+        id: version
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'minor' }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -n "${GITHUB_REF_NAME}" ]; then
+            echo "tagged release: ${GITHUB_REF_NAME}"
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LAST="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+          LAST="${LAST#v}"
+          if [ -z "$LAST" ]; then
+            echo "no prior release; starting at v1.0.0"
+            echo "version=v1.0.0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          MAJOR="${LAST%%.*}"; REST="${LAST#*.}"; MINOR="${REST%%.*}"
+          [ -n "$MAJOR" ] && [ -n "$MINOR" ] || { echo "could not parse last release '$LAST'" >&2; exit 1; }
+          if [ "$BUMP" = "major" ]; then
+            MAJOR=$((MAJOR + 1)); MINOR=0
+          else
+            MINOR=$((MINOR + 1))
+          fi
+          echo "last release: v$LAST → next: v${MAJOR}.${MINOR}"
+          echo "version=v${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build & push Monarch billing-api
+        uses: docker/build-push-action@v6
+        with:
+          context: ./billing-api
+          file: ./billing-api/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/innotelinc/monarch-billing-api:${{ steps.version.outputs.version }}
+            ghcr.io/innotelinc/monarch-billing-api:latest
+
+      - name: Build & push Monarch AI recommendations
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ai-recs
+          file: ./ai-recs/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/innotelinc/monarch-recs:${{ steps.version.outputs.version }}
+            ghcr.io/innotelinc/monarch-recs:latest
+
+      - name: Build & push Monarch media health
+        uses: docker/build-push-action@v6
+        with:
+          context: ./health-analytics
+          file: ./health-analytics/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/innotelinc/monarch-health:${{ steps.version.outputs.version }}
+            ghcr.io/innotelinc/monarch-health:latest
+
+  # ── Cut the GitHub release (payload + source bundle; version from the tag
+  # when one was pushed, otherwise bumped from the last release).
   release:
-    name: Bump version & cut release
+    name: Cut release
+    needs: build-images
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -58,23 +160,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute next release version
+      - name: Compute release version
         id: version
         env:
           BUMP: ${{ github.event.inputs.bump || 'minor' }}
         run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -n "${GITHUB_REF_NAME}" ]; then
+            echo "tagged release: ${GITHUB_REF_NAME}"
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           LAST="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
           LAST="${LAST#v}"
-          # No prior release: start numbered releases at v1.0.0.
           if [ -z "$LAST" ]; then
             echo "no prior release; starting at v1.0.0"
             echo "version=v1.0.0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          MAJOR="${LAST%%.*}"
-          REST="${LAST#*.}"
-          MINOR="${REST%%.*}"
-          # Guard against a parse that left either component empty.
+          MAJOR="${LAST%%.*}"; REST="${LAST#*.}"; MINOR="${REST%%.*}"
           [ -n "$MAJOR" ] && [ -n "$MINOR" ] || { echo "could not parse last release '$LAST'" >&2; exit 1; }
           if [ "$BUMP" = "major" ]; then
             MAJOR=$((MAJOR + 1)); MINOR=0
@@ -102,27 +205,32 @@ jobs:
             EXTRA="**Full release**: includes the docker image bundle and live ISO, built and uploaded by parallel jobs in this run."
           fi
           NOTES=$(cat <<NOTESEOF
-          ARR Media Stack **$VERSION** — the \`arr\` deployment with installer, offline bundle, and live/install ISO.
+          Monarch Media Platform **$VERSION** — the self-hosted streaming platform with AI recommendations, live TV, Authentik SSO and media automation.
 
-          **This release was generated automatically** by the release workflow (or dispatched manually).
+          **This release was generated automatically** by the release workflow (tagged push, schedule, or manual dispatch).
+
+          **First-party images published to GHCR** (also tagged \`latest\`):
+          - \`ghcr.io/innotelinc/monarch-billing-api\` — Stripe webhooks -> Authentik provisioning
+          - \`ghcr.io/innotelinc/monarch-recs\` — AI recommendations + smart search
+          - \`ghcr.io/innotelinc/monarch-health\` — media health analytics
 
           **What's included:**
-          - \`arr-deployment.tar.gz\` — full source + \`docker-compose.yml\` + systemd payload
-          - \`arr-source-bundle.tar.gz\` — full uncompiled repo for offline rebuilds
+          - \`monarch-deployment.tar.gz\` — full source + \`docker-compose.yml\` + systemd payload
+          - \`monarch-source-bundle.tar.gz\` — full uncompiled repo for offline rebuilds
           - $EXTRA
 
           **How to use it:**
-          - **Live install** — write \`arr-media-live-amd64.iso\` to a USB stick (\`dd\`), boot it, and launch **Install ARR Media** from the desktop to install the whole stack onto an internal disk.
-          - **In-place install** on an already-installed Linux box — run \`scripts/install-arr.sh\` from the deployment payload.
+          - **Live install** — write \`monarch-live-amd64.iso\` to a USB stick (\`dd\`), boot it, and launch **Install Monarch** from the desktop to install the whole platform onto an internal disk.
+          - **In-place install** on an already-installed Linux box — run \`scripts/install-monarch.sh\` from the deployment payload, or \`./setup.sh\` to also auto-configure Nginx Proxy Manager (subdomains + wildcard SSL).
           - **Offline** — \`scripts/fetch-offline-bundle.sh\` pulls the deployment bundle + docker image parts for a fully offline install.
           NOTESEOF
           )
           gh release create "$VERSION" \
-            dist/offline-bundle/arr-deployment.tar.gz \
+            dist/offline-bundle/monarch-deployment.tar.gz \
             dist/offline-bundle/SHA256SUMS \
-            dist/source-bundle/arr-source-bundle.tar.gz \
-            dist/source-bundle/arr-source-bundle.tar.gz.sha256 \
-            --title "ARR Media Stack $VERSION" \
+            dist/source-bundle/monarch-source-bundle.tar.gz \
+            dist/source-bundle/monarch-source-bundle.tar.gz.sha256 \
+            --title "Monarch Media Platform $VERSION" \
             --notes "$NOTES"
           echo "release_url=$(gh release view "$VERSION" --json url -q .url)" >> "$GITHUB_OUTPUT"
 
@@ -131,7 +239,7 @@ jobs:
   # deployment tarball and SHA256SUMS (keeping payload + checksums consistent).
   release-images:
     name: Build & upload docker image bundle
-    needs: release
+    needs: [release, build-images]
     if: github.event.inputs.lightweight != 'true'
     runs-on: ubuntu-latest
     env:
@@ -144,6 +252,10 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           sudo docker system prune -af 2>/dev/null || true
           df -h / | tail -1
+      # The first-party Monarch images are private on GHCR until made public -
+      # authenticate with the run token so the bundle can pull them.
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build docker image bundle
         run: ./scripts/build-offline-bundle.sh
       - name: Upload image bundle + refreshed checksums
@@ -151,7 +263,7 @@ jobs:
           shopt -s nullglob
           gh release upload "$VERSION" \
             dist/offline-bundle/docker-images-part*.tar.gz \
-            dist/offline-bundle/arr-deployment.tar.gz \
+            dist/offline-bundle/monarch-deployment.tar.gz \
             dist/offline-bundle/SHA256SUMS --clobber
 
   # ── Live ISO (separate VM: ~7 GB live-build chroot + ~2 GB ISO).
@@ -182,16 +294,16 @@ jobs:
       - name: Upload live ISO
         run: |
           gh release upload "$VERSION" \
-            dist/live-usb/arr-media-live-amd64.iso \
-            dist/live-usb/arr-media-live-amd64.iso.sha256 --clobber
+            dist/live-usb/monarch-live-amd64.iso \
+            dist/live-usb/monarch-live-amd64.iso.sha256 --clobber
 
   summarize:
     name: Summarize release
-    needs: [release, release-images, release-iso]
+    needs: [build-images, release, release-images, release-iso]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: |
           echo "::notice::Release: ${{ needs.release.outputs.version }} — ${{ needs.release.outputs.release_url }}"
-          echo "::notice::Image bundle: ${{ needs.release-images.result }} | Live ISO: ${{ needs.release-iso.result }}"
+          echo "::notice::Images: ${{ needs.build-images.result }} | Image bundle: ${{ needs.release-images.result }} | Live ISO: ${{ needs.release-iso.result }}"
           exit 0

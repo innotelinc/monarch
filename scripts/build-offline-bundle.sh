@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the ARR Media Stack offline release bundle:
+# Build the Monarch Media Platform offline release bundle:
 #
-#   arr-deployment.tar.gz        - full source + compose + systemd payload
+#   monarch-deployment.tar.gz        - full source + compose + systemd payload
 #   docker-images-partN.tar.gz   - Docker image archives (split < 2 GB each
 #                                  so they can be uploaded to GitHub)
 #   SHA256SUMS                   - checksums for the above
@@ -24,7 +24,7 @@ echo "== Building deployment bundle (source + compose + systemd) =="
 mkdir -p "$STAGE/src"
 git -C "$REPO" archive --format=tar HEAD | tar -xf - -C "$STAGE/src" 2>/dev/null || \
   cp -a "$REPO/." "$STAGE/src/"
-for file in scripts/install-arr.sh scripts/fetch-offline-bundle.sh \
+for file in scripts/install-monarch.sh scripts/fetch-offline-bundle.sh \
             scripts/split-image-bundle.sh \
             scripts/build-source-bundle.sh scripts/build-offline-bundle.sh \
             scripts/build-live-usb.sh scripts/offline-images.txt; do
@@ -32,14 +32,14 @@ for file in scripts/install-arr.sh scripts/fetch-offline-bundle.sh \
   cp "$REPO/$file" "$STAGE/src/$file" 2>/dev/null || true
 done
 rm -rf "$STAGE/src/.env" "$STAGE/src/.git" "$STAGE/src/dist" "$STAGE/src/.live-build"
-tar -czf "$OUT_DIR/arr-deployment.tar.gz" -C "$STAGE/src" .
+tar -czf "$OUT_DIR/monarch-deployment.tar.gz" -C "$STAGE/src" .
 
 DEPLOYMENT_ONLY=0
 [ "${1:-}" = "--deployment-only" ] && DEPLOYMENT_ONLY=1
 
 if [ "$DEPLOYMENT_ONLY" -eq 1 ]; then
   echo "== Checksums (deployment + any existing image parts) =="
-  ( cd "$OUT_DIR" && shopt -s nullglob && sha256sum arr-deployment.tar.gz docker-images-part*.tar.gz > SHA256SUMS )
+  ( cd "$OUT_DIR" && shopt -s nullglob && sha256sum monarch-deployment.tar.gz docker-images-part*.tar.gz > SHA256SUMS )
   echo "Created in $OUT_DIR:"
   ls -lh "$OUT_DIR"
   exit 0
@@ -86,7 +86,7 @@ echo "== Verifying streamed bundle (cat parts* must be a valid multi-member gzip
 cat "$OUT_DIR"/docker-images-part*.tar.gz | gzip -t && echo "gzip OK"
 
 echo "== Checksums =="
-( cd "$OUT_DIR" && sha256sum arr-deployment.tar.gz docker-images-part*.tar.gz > SHA256SUMS )
+( cd "$OUT_DIR" && sha256sum monarch-deployment.tar.gz docker-images-part*.tar.gz > SHA256SUMS )
 
 echo "Created in $OUT_DIR:"
 ls -lh "$OUT_DIR"

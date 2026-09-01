@@ -58,7 +58,7 @@ AUTHENTIK_DEFAULT_GROUP = os.environ.get("AUTHENTIK_DEFAULT_GROUP", "paid_users"
 
 # LDAP outpost provisioning (Jellyfin login gate). The values below are the
 # compose defaults - keep them in sync with the `authentik-ldap` service and
-# the arr-init container in docker-compose.yml.
+# the monarch-init container in docker-compose.yml.
 LDAP_OUTPOST_NAME = os.environ.get("AUTHENTIK_LDAP_OUTPOST", "jellyfin-ldap")
 LDAP_APP_SLUG = os.environ.get("AUTHENTIK_LDAP_APP_SLUG", "jellyfin-ldap")
 LDAP_BASE_DN = os.environ.get("AUTHENTIK_LDAP_BASE_DN", "dc=innotel,dc=us")
@@ -79,7 +79,7 @@ DATABASE_URL = os.environ.get(
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
-app = FastAPI(title="ARR Billing API", version="1.0.0")
+app = FastAPI(title="Monarch Billing API", version="1.0.0")
 
 # ---------------------------------------------------------------------------
 # Database
@@ -513,7 +513,7 @@ def ensure_ldap_setup() -> None:
         sa, bind_token_id = ak_ensure_service_account(LDAP_BIND_USER)
         sa_pk = sa.get("user_pk") or sa.get("pk")
         ak_ensure_token(bind_token_id, sa_pk, LDAP_BIND_TOKEN,
-                        "Jellyfin LDAP bind user (arr stack)")
+                        "Jellyfin LDAP bind user (monarch stack)")
 
         provider = ak_ensure_ldap_provider()
         provider_pk = provider.get("pk")
@@ -524,7 +524,7 @@ def ensure_ldap_setup() -> None:
         # The outpost's own API token (auto-created with the outpost) is pinned
         # to the value the `authentik-ldap` container uses as AUTHENTIK_TOKEN.
         ak_ensure_token(f"ak-outpost-{outpost_pk}-api", None, LDAP_OUTPOST_TOKEN,
-                        "LDAP outpost API token (arr stack)", intent="api")
+                        "LDAP outpost API token (monarch stack)", intent="api")
 
         role = ak_ensure_role(LDAP_SEARCH_ROLE)
         role_pk = role.get("pk")

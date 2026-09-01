@@ -1,4 +1,4 @@
-# Docker images pulled by the ARR Media Stack docker-compose.yml.
+# Docker images pulled by the Monarch Media Platform docker-compose.yml.
 # One image per line; blank lines and '#' comments are ignored.
 # Used by scripts/build-offline-bundle.sh to produce the offline image bundle.
 ghcr.io/hotio/jellyfin:latest
@@ -27,6 +27,14 @@ ghcr.io/goauthentik/server:latest
 ghcr.io/goauthentik/ldap:latest
 python:3.12-slim
 containrrr/watchtower:latest
+jc21/nginx-proxy-manager:latest
+
+# The first-party Monarch images are published by the release workflow
+# (build-images job) to GHCR - they land in the offline bundle on the run
+# after they are pushed.
+ghcr.io/innotelinc/monarch-billing-api:latest
+ghcr.io/innotelinc/monarch-recs:latest
+ghcr.io/innotelinc/monarch-health:latest
 
 # The subscription platform image is public on GHCR (same org/user), so the
 # release CI can pull it without auth and it ships in the offline bundle.

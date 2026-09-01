@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-arr-seed: pre-seed qBittorrent WebUI credentials before first boot.
+monarch-seed: pre-seed qBittorrent WebUI credentials before first boot.
 
 qBittorrent >= 4.6.1 refuses to log in with the historical admin/adminadmin
 default and instead prints a random temporary password to the container logs
@@ -8,7 +8,7 @@ on first start. There is no API to change the WebUI password, so the only
 reliable way to give it a known login from the start is to write its
 qBittorrent.conf *before* the container first starts.
 
-This container is gated by `qbittorrent -> depends_on arr-seed
+This container is gated by `qbittorrent -> depends_on monarch-seed
 (service_completed_successfully)` so the config always lands first.
 
 The WebUI password is stored as a PBKDF2-HMAC-SHA512 hash (16-byte salt,
@@ -30,8 +30,8 @@ import os
 import re
 import sys
 
-USER = os.environ.get("ARR_USERNAME", "admin")
-PASS = os.environ.get("ARR_PASSWORD", "arrarr8")
+USER = os.environ.get("MONARCH_USERNAME", "admin")
+PASS = os.environ.get("MONARCH_PASSWORD", "monarch8")
 
 CONFIG_DIR = "/config/qBittorrent"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "qBittorrent.conf")
@@ -59,7 +59,7 @@ def main() -> int:
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
     except OSError as exc:
-        print(f"[arr-seed] ERROR: cannot create {CONFIG_DIR}: {exc}")
+        print(f"[monarch-seed] ERROR: cannot create {CONFIG_DIR}: {exc}")
         return 1
 
     existing = ""
@@ -69,7 +69,7 @@ def main() -> int:
 
     # Never clobber an existing password (first boot happened already).
     if re.search(r"WebUI\\Password_PBKDF2\s*=\s*\"?[^\s\"]", existing):
-        print("[arr-seed] qBittorrent.conf already has a WebUI password - nothing to do.")
+        print("[monarch-seed] qBittorrent.conf already has a WebUI password - nothing to do.")
         return 0
 
     salt = os.urandom(SALT_LEN)
@@ -116,10 +116,10 @@ def main() -> int:
         with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
             fh.write(body)
     except OSError as exc:
-        print(f"[arr-seed] ERROR: cannot write {CONFIG_FILE}: {exc}")
+        print(f"[monarch-seed] ERROR: cannot write {CONFIG_FILE}: {exc}")
         return 1
 
-    print(f"[arr-seed] Seeded qBittorrent WebUI credentials for user '{USER}' into {CONFIG_FILE}.")
+    print(f"[monarch-seed] Seeded qBittorrent WebUI credentials for user '{USER}' into {CONFIG_FILE}.")
     return 0
 
 

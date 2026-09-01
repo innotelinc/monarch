@@ -1,6 +1,6 @@
 [Unit]
-Description=ARR Media Stack (Jellyfin, *arr, downloaders, IPTV)
-Documentation=https://github.com/innotelinc/arr
+Description=Monarch Media Platform (Jellyfin, *arr, downloaders, IPTV)
+Documentation=https://github.com/innotelinc/monarch-media-platform
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -8,7 +8,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/opt/arr
+WorkingDirectory=/opt/monarch
 
 # Bring up the whole stack with one compose file. --wait holds until every
 # service with a healthcheck reports healthy and all depends_on conditions

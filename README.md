@@ -1,122 +1,100 @@
-# ARR stack NEW VERSION <br />
-Below are instructions for Debian / Ubuntu operating system, but docker can be natively run on any linux distro <br />
-and if you have Windows or Mac - you can use for tools like [Docker Desktop](https://docs.docker.com/desktop/) to run docker containers. <br />
+# Monarch — Media Platform <br />
 
-Besides the manual setup below, this repo ships an **installer**, an **offline bundle**, and a **bootable live/install ISO** (the same packaging approach as the [Capstone](https://github.com/innotelinc/capstone) project). See the [Installer & Live USB](#installer--live-usb) section further down, and for building releases see the [Building a release](#building-a-release) section. <br />
+A premium self-hosted Netflix-style media platform with **AI-powered
+recommendations**, **live TV**, **user profiles**, **Authentik SSO**, **media
+automation** and **enterprise-grade infrastructure**.
 
-#Install Docker <br />
-apt update && apt -y upgrade <br />
-apt -y remove apparmor <br />
-apt -y install ca-certificates curl gnupg build-essential perl curl wget xsel <br />
-mkdir -m 0755 -p /etc/apt/keyrings <br />
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg <br />
+<br />
 
-echo \ <br />
-  "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \ <br />
-  "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \ <br />
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null <br />
+| | |
+|---|---|
+| **Streaming** | Jellyfin (movies, TV, music, live TV) with user profiles & watch history |
+| **AI** | content-based recommendations, smart search, optional LLM blurbs (`monarch-recs`) |
+| **Health** | library + disk analytics, missing/duplicate/orphan detection (`monarch-health`) |
+| **Auth** | Authentik SSO — users & passwords live in Authentik; Jellyfin logins resolve via LDAP |
+| **Media automation** | Sonarr / Radarr / Lidarr / Prowlarr / qBittorrent / Bazarr, wired automatically |
+| **Live TV** | native M3U tuner + XMLTV guide (iptv-org), zero TVHeadend setup |
+| **Proxy & SSL** | Nginx Proxy Manager auto-configured via API, wildcard Let's Encrypt cert via DNS challenge |
+| **Delivery** | Docker Compose stack, one-command installer, offline bundle, live/install ISO |
+| **Subscriptions** | Stripe checkout landing page + billing-api → Authentik `paid_users` group |
+| **Extras** | watch parties (SyncPlay), offline downloads, request portal (Jellyseerr) |
 
-apt update <br />
+Objectives of this repo: rebrand the classic *arr stack as **Monarch**,
+Authentik-first authentication, everything Dockerized, release artifacts on
+every tagged release, first-party images published to GHCR, and automatic
+reverse-proxy + wildcard-SSL provisioning for the `monarch.innotel.us`
+subdomains. No third-party author attribution is included anywhere in this
+project.
 
-apt -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-compose-plugin docker-ce-rootless-extras docker-buildx-plugin <br />
+Instructions below are for Debian / Ubuntu, but Docker runs natively on any
+Linux distro (and you can run the containers on Windows/Mac via
+[Docker Desktop](https://docs.docker.com/desktop/)).
 
-systemctl start docker <br />
-systemctl enable docker <br />
-
-#Install GoLang <br />
-cd /usr/src <br />
-wget https://go.dev/dl/go1.26.0.linux-amd64.tar.gz <br />
-tar -C /usr/local -xvf go1.26.0.linux-amd64.tar.gz <br />
-
-tee -a ~/.profile<<EOF <br />
-export PATH=$PATH:/usr/local/go/bin <br />
-EOF <br />
-
-source ~/.profile <br />
-
-go version <br />
-
-cd /usr/src <br />
-git clone https://github.com/docker/compose.git <br />
-cd compose <br />
-make <br />
-mv ./bin/build/docker-compose /usr/local/bin/ <br />
-chmod +x /usr/local/bin/docker-compose <br />
-sudo ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose <br />
-
-#Portainer <br />
-docker volume create portainer_data <br />
-
-docker run -d -p 8000:8000 -p 9443:9443 --name portainer --restart=always -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer-ce:latest <br />
-
-#Accesible http://localhost:9443 <br />
-
-```
-
-To test if docker compose has been installed, run :
-`docker-compose`
-
-You should get a lot of command arguments including 'version' one, so run again:
-`docker-compose version`
-
-That will show all works as expected. <br />
-Create folder structure as per this [TRASH GUIDE](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Docker/) now:
-
-```
-cd /opt <br />
-sudo mkdir -p /data/{usenet/{incomplete,complete}/{tv,movies,music,xxx},media/{tv,movies,music,xxx},torrents/{tv,movies,music,xxx}} <br />
-sudo apt install tree <br />
-tree /data <br />
-sudo chown -R 1000:1000 /data <br />
-sudo chmod -R a=,a+rX,u+w,g+w /data <br />
-ls -ln /data <br />
-
-git clone https://github.com/innotelinc/arr.git <br />
-cd arr <br />
-
-cp .env.sample .env      # then edit ARR_USERNAME / ARR_PASSWORD (see below)
-
-Note that hostnames are not needed here as we have dedicated network for our containers <br />
+Besides the manual setup, this repo ships a **one-command setup script**, an
+**installer**, an **offline bundle** and a **bootable live/install ISO**. See
+[Installer & Live USB](#installer--live-usb) and
+[Building a release](#building-a-release).
 
 ***************************
 
-# First run: <br />
+# Quick start (recommended)
 
-You should be able to run all services now with simple `sudo docker-compose up -d`
+```bash
+git clone https://github.com/innotelinc/monarch-media-platform
+cd monarch-media-platform
+cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc. (below)
+./setup.sh
+```
+
+`setup.sh` is idempotent and does three things:
+
+1. Creates `.env` from `.env.sample` when missing (never overwrites).
+2. Installs the stack via `scripts/install-monarch.sh` (Docker, `/data`
+   layout, `monarch.service` systemd unit, `docker compose up -d`).
+3. Auto-configures **Nginx Proxy Manager** through its API
+   (`scripts/npm-proxy-hosts.py`): creates the subdomain proxy hosts and
+   requests a **wildcard Let's Encrypt certificate** via a DNS challenge.
+
+Re-run `./setup.sh` any time you change `.env` or `scripts/npm-hosts.conf` —
+the proxy hosts are reconciled in place and the certificate is reused.
+
+**Migration note:** the old *arr stack used `ARR_USERNAME` / `ARR_PASSWORD`.
+Monarch uses `MONARCH_USERNAME` / `MONARCH_PASSWORD` — if you have an
+existing `.env`, regenerate it from `.env.sample` (or `sed -i 's/^ARR_/MONARCH_/' .env`).
 
 ***************************
 
 # Shared initial credentials
 
-Edit `.env` (it is gitignored, so your credentials never get committed) - the two
-most important variables are:
+Edit `.env` (it is gitignored, so your credentials never get committed) — the
+two most important variables are:
 
 ```
-ARR_USERNAME=admin        # your username
-ARR_PASSWORD=arrarr8      # your password
+MONARCH_USERNAME=admin        # your username
+MONARCH_PASSWORD=monarch8     # your password
 ```
 
 Those same credentials are applied automatically to **every service that
 requires a login**: Jellyfin, Jellyseerr, Sonarr, Radarr, Lidarr, Whisparr,
 Prowlarr, Bazarr, qBittorrent, Transmission, the Authentik bootstrap admin
 (email `admin@innotel.us`) and the subscription platform's `/admin` panel.
-Anything you change in `.env` later is picked up by the automation on the next
-`docker-compose up -d` (the init containers re-run and only touch services
-that still have default/no credentials).
+Anything you change in `.env` later is picked up by the automation on the
+next `docker compose up -d` (the init containers re-run and only touch
+services that still have default/no credentials).
 
 ***************************
 
 # Everything is wired for you on first boot
 
 Two one-shot containers do the wiring so you do **not** have to click through
-the old manual setup:
+the manual setup:
 
 | Container    | When            | What it does |
 |--------------|-----------------|--------------|
-| `arr-seed`   | before qBittorrent starts | writes qBittorrent's WebUI login (`ARR_USERNAME`/`ARR_PASSWORD`) into its config - no temporary-password dance |
-| `arr-init`   | after the stack is up | wires the whole stack (below) |
+| `monarch-seed` | before qBittorrent starts | writes qBittorrent's WebUI login (`MONARCH_USERNAME`/`MONARCH_PASSWORD`) into its config - no temporary-password dance |
+| `monarch-init` | after the stack is up | wires the whole stack (below) |
 
-`arr-init` automatically:
+`monarch-init` automatically:
 
 * **Jellyfin** - completes the first-run wizard (creates the admin user with
   your credentials), adds Media libraries (`/data/media/movies`, `tv`,
@@ -137,7 +115,6 @@ the old manual setup:
   **Apps** (full sync) - so indexers added in Prowlarr flow to all *arr apps
 * **qBittorrent** - verifies the WebUI login and creates the `movies`, `tv`,
   `music` and `xxx` categories with their save paths under `/data/torrents`
-  (default save path `/data/torrents`, no temp dir)
 * **Bazarr** - sets basic authentication with your credentials and connects
   Sonarr + Radarr so subtitle syncing works
 * **Jellyseerr** - initializes the request manager against **Jellyfin** and
@@ -146,12 +123,12 @@ the old manual setup:
 Watch it work / check for problems:
 
 ```
-sudo docker logs arr-init
+sudo docker logs monarch-init
 sudo cat /docker/appdata/init/status.json      # per-service result + any issues list
 ```
 
-Everything is idempotent - `arr-init` re-runs safely on every `up -d` and only
-touches services that are still unconfigured.
+Everything is idempotent - `monarch-init` re-runs safely on every `up -d` and
+only touches services that are still unconfigured.
 
 ***************************
 
@@ -159,9 +136,9 @@ touches services that are still unconfigured.
 
 | Service    | URL                   | Notes |
 |------------|-----------------------|-------|
-| Homarr (dashboard) | http://localhost:7575 | |
-| Jellyfin   | http://localhost:8096 | admin = your `.env` credentials |
-| Jellyseerr | http://localhost:5055 | requests; connected to Jellyfin + Radarr/Sonarr |
+| Homarr (dashboard) | http://localhost:7575 | `app.monarch.innotel.us` |
+| Jellyfin   | http://localhost:8096 | `media.monarch.innotel.us`; admin = your `.env` credentials |
+| Jellyseerr | http://localhost:5055 | `req.monarch.innotel.us`; requests; connected to Jellyfin + Radarr/Sonarr |
 | Prowlarr   | http://localhost:9696 | indexers; all *arr apps pre-registered |
 | Radarr     | http://localhost:7878 | movies |
 | Sonarr     | http://localhost:8989 | tv |
@@ -173,465 +150,449 @@ touches services that are still unconfigured.
 | Transmission | http://localhost:9091 | optional extra downloader |
 | Deluge     | http://localhost:8112 | optional; default WebUI password is `deluge` on first login |
 | autobrr    | http://localhost:7474 | optional; manual setup |
-| Subscription platform | http://localhost:3000 | signup + Stripe Checkout landing page |
-| Authentik  | http://localhost:9000 | SSO + `paid_users` group = user management |
+| Subscription platform | http://localhost:3000 | `subscribe.monarch.innotel.us`; signup + Stripe Checkout landing page |
+| Authentik  | http://localhost:9000 | `auth.monarch.innotel.us`; SSO + `paid_users` group = user management |
 | Authentik LDAP | localhost:389 / 636 | LDAP outpost - Jellyfin logins authenticate against it |
-| Billing API | http://localhost:8001 | Stripe webhooks -> Authentik paid users + Postgres |
+| Billing API | http://localhost:8001 | `api.monarch.innotel.us`; Stripe webhooks -> Authentik paid users + Postgres |
+| **Monarch AI** | http://localhost:8002 | `monarch-recs` - AI recommendations + smart search (internal API) |
+| **Monarch Health** | http://localhost:8003 | `monarch-health` - media health analytics (internal API) |
+| Nginx Proxy Manager | http://localhost:81 | `admin.monarch.innotel.us`; reverse proxy + wildcard SSL |
 | Clipbucket | http://localhost:8088 | video platform |
-| IPTV guide | http://localhost:3001 | XMLTV guide (`/guide.xml`) for Jellyfin Live TV |
+| IPTV guide | http://localhost:3001 | `tv.monarch.innotel.us`; XMLTV guide (`/guide.xml`) for Jellyfin Live TV |
 | TVHeadend / NextPVR / Dispatcharr | 9981 / 8866 / 9191 | optional legacy live-TV backends (Jellyfin Live TV uses a native M3U tuner, so these are not required) |
 
 ***************************
 
-# What's still manual (one-time, mostly external)
+# Subdomains & Nginx Proxy Manager (automatic)
 
-The automation covers app-to-app wiring. These still need you:
+The stack ships `nginx-proxy-manager` (admin UI on **:81**). After the
+first `docker compose up -d`, `scripts/npm-proxy-hosts.py` (invoked by
+`setup.sh`) configures it entirely through its API:
 
-1. **Add indexers to Prowlarr** (`http://<host>:9696` -> Settings -> Indexers).
-   They flow automatically to Radarr/Sonarr/Lidarr/Whisparr because they are
-   already registered as Apps. Legal/public-domain sources like
-   **Archive.org** work great (see [Remaining config](#remaining-config)).
-2. **FlareSolverr proxy** - Prowlarr -> Settings -> Indexers -> Indexer Proxies:
-   host `http://flaresolverr:8191`, tag it e.g. `cloudflare` (optional).
-3. **Jellyseerr** - after first login, check Settings -> Users/Plex: enable
-   **Jellyfin** sign-in if you want subscribers to log in with their Jellyfin
-   accounts (the local `ARR_USERNAME` login from the wizard always works).
-4. **Subscription platform + Authentik** - see the dedicated section below.
+| Subdomain | Service | Port | WebSockets |
+|-----------|---------|------|------------|
+| `app.monarch.innotel.us` | Homarr dashboard | 7575 | yes |
+| `api.monarch.innotel.us` | billing-api | 8001 | - |
+| `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
+| `media.monarch.innotel.us` | Jellyfin | 8096 | yes |
+| `tv.monarch.innotel.us` | IPTV/EPG guide | 3001 | - |
+| `admin.monarch.innotel.us` | Nginx Proxy Manager admin | 81 | - |
+| `subscribe.monarch.innotel.us` | landing page + Stripe checkout | 3000 | - |
+| `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
+
+The mapping lives in `scripts/npm-hosts.conf` — add/remove lines freely; the
+script reconciles the proxy hosts on every run (idempotent). To forward to
+host-published ports instead of container names, set
+`NPM_FORWARD_HOST=host.docker.internal` in `.env`.
+
+### Wildcard SSL (automatic)
+
+The script requests one **Let's Encrypt wildcard certificate** for
+`*.monarch.innotel.us` (+ the apex) using a **DNS challenge**, then attaches
+it to every proxy host and forces HTTPS. Configuration in `.env`:
+
+```
+MONARCH_DOMAIN=monarch.innotel.us
+SSL_EMAIL=admin@innotel.us
+NPM_ADMIN_EMAIL=admin@innotel.us
+NPM_ADMIN_PASSWORD=change-me          # set once in the NPM UI on first login
+NPM_DNS_PROVIDER=cloudflare
+NPM_DNS_CREDENTIALS={"auth_token":"your-cloudflare-api-token"}
+```
+
+One-time DNS prerequisite (outside the script): a wildcard A record
+
+```
+*.monarch.innotel.us   A   <this host's public IP>
+```
+
+For Cloudflare the API token needs **Zone:DNS:Edit** permission on the zone.
+Other DNS providers are supported via `NPM_DNS_PROVIDER` (route53, godaddy,
+vultr, ovh, hetzner, ...) — credentials always go in `NPM_DNS_CREDENTIALS`
+as JSON (or set `CLOUDFLARE_API_TOKEN` for the Cloudflare convenience path).
+
+First-time NPM admin: open `http://<host>:81` once, create your admin
+account (default `admin@example.com` / `changeme`), then re-run `./setup.sh`.
+The script prints clear guidance if the API login fails.
+
+> The proxy hosts are created with `client_max_body_size 0;`, exploit
+> blocking and HTTPS-forcing enabled; `monarch-recs` and `monarch-health`
+> stay internal (not exposed by default).
 
 ***************************
 
-# Subscription Landing Page + User Management (Authentik)
+# Authentication & user management (Authentik)
 
-The stack's public signup page is [jellyfin-subscription-platform](https://github.com/innotelinc/jellyfin-subscription-platform)
-(`http://<host>:3000`): visitors pick a plan and pay through Stripe Checkout.
-**User management is Authentik-first**: payments made through the landing page
-are mirrored into the `paid_users` group by **billing-api**, and subscribers
-are given access in Authentik. The landing page's `/admin` panel manages the
-same Authentik accounts (create users, set/reset passwords, enable/disable,
-delete) - there is no separate Jellyfin user store for subscribers.
-
-GitHub Container Registry image (the repo is private, so authenticate first):
-
-```
-echo YOUR_GH_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-```
-
-Configure it via `.env` (all variables are documented in `.env.sample`):
-
-| Variable | What it is |
-|----------|------------|
-| `APP_URL` | public URL of the site, e.g. `https://subscribe.innotel.us` (Stripe redirects use it) |
-| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Stripe keys (webhook #1 - the platform) |
-| `BILLING_WEBHOOK_SECRET` | signing secret of webhook #2 (billing-api); optional, falls back to `STRIPE_WEBHOOK_SECRET` |
-| `JELLYFIN_URL` / `JELLYFIN_API_KEY` | Jellyfin server + key (used for the media links on the success page) |
-| `AUTHENTIK_BASE_URL` / `AUTHENTIK_BOOTSTRAP_TOKEN` | Authentik API + bootstrap token - the platform creates the subscriber's Authentik account/password here (same token billing-api uses) |
-| `ACCOUNT_PORTAL_URL` | account portal link shown to users - Authentik's self-service user settings, e.g. `https://auth.innotel.us/if/user/` (defaults to `AUTHENTIK_BASE_URL/if/user/`) |
-| `REQUEST_URL` | Jellyseerr request portal shown to Premium users, e.g. `https://req.innotel.us` |
-| `SESSION_SECRET` | long random string (`openssl rand -hex 32`) |
-
-**Getting `JELLYFIN_API_KEY`:** `arr-init` creates the Jellyfin admin and
-exports its token (it is a valid API credential) on first boot to
-`/docker/appdata/init/jellyfin-api-key.txt`. Copy it into `.env`:
-
-```
-sudo cp /docker/appdata/init/jellyfin-api-key.txt /tmp/jfkey.txt
-echo "JELLYFIN_API_KEY=$(cat /tmp/jfkey.txt)" | sudo tee -a /opt/arr/.env
-sudo docker compose up -d
-```
-
-Alternatively create a normal key in Jellyfin Dashboard -> Advanced -> API Keys
-and use that.
-
-**Stripe webhooks:** Stripe dashboard -> Developers -> Webhooks -> add **two**
-endpoints, both with the same six events:
-
-```
-1. URL:     https://YOUR-DOMAIN/api/webhook      -> platform (checkout UX + admin)
-2. URL:     http://<host>:8001/api/webhook       -> billing-api (Authentik paid_users)
-
-Events:  checkout.session.completed
-         customer.subscription.updated
-         customer.subscription.deleted
-         invoice.payment_succeeded
-         invoice.payment_failed
-```
-
-Copy the `whsec_...` signing secret of endpoint 1 into `STRIPE_WEBHOOK_SECRET`
-and endpoint 2's secret into `BILLING_WEBHOOK_SECRET` (or reuse one for both).
-When a checkout completes, billing-api creates (or finds) the subscriber in
-Authentik, adds them to the `paid_users` group and records the subscription
-in Postgres; cancels (`customer.subscription.deleted`) disable their access.
-
-### Authentik setup (one-time)
-
-Authentik boots with a **bootstrap admin** - the `AUTHENTIK_BOOTSTRAP_*` env
-vars on the `authentik-worker` container create it for you, so there is no
-setup wizard to click through:
+**User management is Authentik-first.** Authentik boots with a bootstrap
+admin (no setup wizard to click through):
 
 | What | Value |
 |------|-------|
-| Admin UI | `http://localhost:9000` |
+| Admin UI | `https://auth.monarch.innotel.us` (or `http://localhost:9000`) |
 | Username | `akadmin` |
-| Password | your `ARR_PASSWORD` from `.env` |
+| Password | your `MONARCH_PASSWORD` from `.env` |
 | Email | `admin@innotel.us` |
 
-Bootstrap credentials are applied **only on first boot** (when the Authentik
-database is empty). Changing `ARR_PASSWORD` in `.env` later does **not** reset
-the admin password - change it in the admin UI instead (Directory -> Users ->
-`akadmin`).
+Bootstrap credentials are applied **only on first boot**. Changing
+`MONARCH_PASSWORD` later does **not** reset the admin password — change it in
+the admin UI instead (Directory -> Users -> `akadmin`).
 
-**The `paid_users` group is the source of truth for who has access.** billing-api
-talks to Authentik's API with the shared `AUTHENTIK_BOOTSTRAP_TOKEN` from
-`docker-compose.yml` and auto-creates the group on its first successful Stripe
-webhook, so there is nothing to set up manually:
-
-- **Checkout completes** (`checkout.session.completed` / invoice paid) ->
-  billing-api finds or creates the subscriber in Authentik (username/email
-  from the checkout) and adds them to `paid_users`
-- **Subscription cancels** (`customer.subscription.deleted`) -> billing-api
-  sets the user `is_active = false`, so their access is off
-
-To verify or grant access manually: admin UI -> Directory -> Groups ->
-`paid_users`. Anyone in that group counts as a subscriber - add or remove
-users there to grant/revoke access without touching Stripe.
-
-Subscribers manage their own password in Authentik's self-service settings
-(`http://localhost:9000/if/user/` - the "account portal" link the landing
-page shows). The platform's own `/admin` panel is separate and signs in with
-`ADMIN_PASSWORD` (defaults to `ARR_PASSWORD`).
+**The `paid_users` group is the source of truth for who has access.**
+Payments made through the landing page are mirrored into `paid_users` by
+billing-api, and subscribers are given access in Authentik — there is no
+separate Jellyfin user store for subscribers.
 
 ### Authentik LDAP -> Jellyfin (login gate)
 
-**Jellyfin logins now authenticate against Authentik directly.** The stack
-ships an Authentik **LDAP outpost** (`authentik-ldap` container) and wires the
-Jellyfin **LDAP-Auth plugin** to it, so there is no separate Jellyfin user
-store for subscribers: users and passwords live in Authentik, and **disabling
-a user in Authentik blocks their Jellyfin login** (the LDAP bind fails).
-
-Everything except adding users is automated:
+Jellyfin logins authenticate against Authentik directly through the bundled
+**LDAP outpost** and the Jellyfin **LDAP-Auth plugin**. Disabling a user in
+Authentik blocks their Jellyfin login (the LDAP bind fails).
 
 | Piece | Who sets it up | What it is |
 |-------|----------------|------------|
-| `authentik-ldap` container | `docker-compose.yml` | LDAP outpost (`ghcr.io/goauthentik/ldap`), plain LDAP on 3389 / LDAPS on 6636 inside the network, also mapped to host `389`/`636` for testing |
-| LDAP provider + outpost + app | billing-api on startup (`ensure_ldap_setup`) | base DN `dc=innotel,dc=us`; provider/outpost named `jellyfin-ldap`; the outpost's API token is pinned to `ak-ldap-outpost-2026` (must match the container's `AUTHENTIK_TOKEN`) |
-| Bind service account | billing-api on startup | `authentik-ldap` service account + token pinned to `ak-ldap-bind-2026`; a role grants it "Search full LDAP directory" on the provider |
-| Groups | billing-api on startup | `paid_users` (subscribers - created on first Stripe webhook) and `jellyfin_admins` (Jellyfin admins - auto-created) |
-| Jellyfin LDAP-Auth plugin | `arr-init` | installs the plugin (catalog, falls back to the GitHub release) and writes its config to `plugins/LDAP-Auth/LDAP-Auth.xml`, then restarts Jellyfin |
+| `authentik-ldap` container | `docker-compose.yml` | LDAP outpost, plain LDAP on 3389 / LDAPS on 6636 inside the network |
+| LDAP provider + outpost + app | billing-api on startup (`ensure_ldap_setup`) | base DN `dc=innotel,dc=us`; provider/outpost named `jellyfin-ldap` |
+| Bind service account | billing-api on startup | `authentik-ldap` service account + pinned token |
+| Groups | billing-api on startup | `paid_users` (subscribers) and `jellyfin_admins` (Jellyfin admins - auto-created) |
+| Jellyfin LDAP-Auth plugin | `monarch-init` | installs the plugin and writes its config, then restarts Jellyfin |
 
-**What the Jellyfin plugin is configured with** (values in the config file
-arr-init writes):
+The full access chain: **Stripe checkout -> billing-api adds the user to
+`paid_users` -> LDAP bind succeeds -> Jellyfin login works.** Subscription
+cancels -> user set inactive -> LDAP bind fails -> Jellyfin login blocked.
 
-| Setting | Value |
-|---------|-------|
-| LDAP Server / Port | `authentik-ldap` / `3389` (plain LDAP on the docker network) |
-| Bind User | `cn=authentik-ldap,ou=users,dc=innotel,dc=us` (password = `ak-ldap-bind-2026`) |
-| Base DN | `dc=innotel,dc=us` |
-| Search Filter | `(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)` |
-| Admin Filter | `(memberOf=cn=jellyfin_admins,ou=groups,dc=innotel,dc=us)` |
-| Username attribute | `cn` (users log in with their Authentik username, not email) |
-| Create users | enabled (first successful login auto-creates the Jellyfin account with all libraries) |
+**User profiles & watch history are native Jellyfin features.** Each Authentik
+account maps to a Jellyfin profile (created automatically on first LDAP
+login), with its own watch history, resume state, ratings and per-profile
+Continue Watching rows. Profiles are managed in Authentik
+(Directory -> Users); admins are granted via the `jellyfin_admins` group.
 
-**So the full access chain is:** Stripe checkout -> billing-api adds the user
-to `paid_users` (and they are active) -> the LDAP search finds them and the
-bind succeeds -> Jellyfin login works. Subscription cancels -> billing-api
-sets `is_active = false` -> the LDAP bind fails -> Jellyfin login is blocked,
-even though the user is still in the group. Granting access manually is just
-Directory -> Groups -> `paid_users` -> add the user.
+Test the outpost from the host:
 
-**Jellyfin admins are managed the same way.** Add a user to Directory ->
-Groups -> `jellyfin_admins` (auto-created at provisioning) and on their next
-Jellyfin login the LDAP plugin grants them admin; remove them and the next
-login revokes it. Because the admin filter is the source of truth, admin
-grants made manually inside Jellyfin (Dashboard -> Users) are overridden on
-the user's next LDAP login - use the group instead. The local `ARR_USERNAME`
-admin account is unaffected.
+```
+ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,ou=users,dc=innotel,dc=us" -w ak-ldap-bind-2026 '(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)' cn
+```
 
-Notes:
+### Subscription platform + billing
 
-* The existing Jellyfin admin (`ARR_USERNAME`) is a local account and keeps
-  working - the LDAP plugin is an *additional* authentication provider.
-* LDAP is plaintext **inside the private docker network only** (host ports
-  `389`/`636` are for `ldapsearch` testing). To use LDAPS end-to-end, assign
-a certificate to the provider (Applications -> Providers -> `jellyfin-ldap`
--> Protocol settings) and change the plugin config to port `6636` with
-`UseSsl` enabled.
-* Test the outpost from the host: `ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,ou=users,dc=innotel,dc=us" -w ak-ldap-bind-2026 '(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)' cn`
-* All the token values above are internal defaults hardcoded in
-  `docker-compose.yml` (same pattern as `AUTHENTIK_BOOTSTRAP_TOKEN`) - keep
-them in sync if you change any of them.
+The public signup page (`subscribe.monarch.innotel.us`, host port 3000) lets
+visitors pick a plan and pay through Stripe Checkout. billing-api receives a
+second Stripe webhook and provisions the subscriber into Authentik. See
+`.env.sample` for `APP_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`BILLING_WEBHOOK_SECRET`, `JELLYFIN_URL` / `JELLYFIN_API_KEY` and
+`ACCOUNT_PORTAL_URL` / `REQUEST_URL`.
+
+Getting `JELLYFIN_API_KEY`: `monarch-init` exports the Jellyfin admin token on
+first boot to `/docker/appdata/init/jellyfin-api-key.txt` — copy it into
+`.env`. `monarch-recs` and `monarch-health` read the same file automatically.
 
 ***************************
 
-## Restart services: <br />
-It might be a good idea to restart all services and see if they come up as expected: <br />
+# AI recommendations & smart search (monarch-recs)
+
+`monarch-recs` (port 8002, internal API) is a content-based recommendation
+engine over your Jellyfin library — **fully local, no external AI required**:
+
+| Endpoint | What it does |
+|----------|--------------|
+| `GET /api/recommendations?user_id=<id>` | personalized picks from that profile's watch history (falls back to trending) |
+| `GET /api/recommendations?item_id=<id>` | "more like this" for one title |
+| `GET /api/trending` | most-played titles across all profiles |
+| `GET /api/search?q=inception&genre=action&year=2010` | ranked smart search over name/genre/year/cast/overview with filters |
+| `GET /api/describe?item_id=<id>` | LLM-generated blurb (when configured) |
+
+How it works: each item is tokenized (name weighted, plus genres, tags,
+cast, overview) into a sparse TF-IDF vector; recommendations are cosine
+similarity in pure Python (no numpy/sklearn dependency). The index refreshes
+every `REFRESH_INTERVAL` seconds (default 900) so new additions are picked
+up. Auth: the admin token exported by `monarch-init`.
+
+**Optional "AI" blurbs:** set `OPENAI_API_KEY` (and optionally
+`OPENAI_BASE_URL` / `OPENAI_MODEL`) in `.env` to enable `/api/describe` with
+any OpenAI-compatible endpoint — OpenAI, Ollama, vLLM, llama.cpp, etc.
 
 ```
-sudo docker-compose down
-sudo docker-compose up -d
+curl "http://localhost:8002/api/recommendations?user_id=<uid>&limit=5"
+curl "http://localhost:8002/api/search?q=night of the living dead"
 ```
- <br />
-If the first line that says : <br />
-`WARN[0000] No services to build`  - this message is actually expected here.  <br />
 
-**************************
+***************************
 
-## Remaining config: <br />
-That should be it, you just need to add some indexers to Prowlarr. <br />
-You can add more indexers - just google for something like 'what are the best legal indexers for Prowlarr' or something similar. <br />
+# Media health analytics (monarch-health)
 
-It is a common misconception that the "Arr" stack is only for pirated content.  <br />
-In reality, these are powerful automation tools for managing media, and there is a wealth of legal, copyright-free, and open-source content you can use them for. <br />
-In Radarr, you can download movies that have entered the Public Domain or are released under Creative Commons licenses. <br />
-Public Domain Classics: These are "Golden Age" movies where the copyright was not renewed like: <br />
-Night of the Living Dead (1968), His Girl Friday (1940), Charade (1963), and The General (1926). <br />
-Configure Prowlarr with The "Gold Standard" Indexer for legal media like The Internet Archive (Archive.org). <br />
-They host thousands of public domain movies. <br />
+`monarch-health` (port 8003, internal API) periodically scans the Jellyfin
+library + the `/data/media` volume and publishes a JSON report:
 
-## Live TV (Jellyfin) <br />
+| Endpoint | What it does |
+|----------|--------------|
+| `GET /api/analytics` | latest report from the periodic scan |
+| `POST /api/analytics/scan` | run a scan on demand |
+| `GET /api/services` | reachability of Jellyfin, Authentik, billing-api, recs, health |
+| `GET /health` | service status + last scan time |
 
-Live TV is wired automatically on first boot - **no TVHeadend or NextPVR
+The report includes **per-library stats** (item counts by type),
+**missing files** (items whose file vanished from disk), **duplicates**
+(same filename within a library), **orphan files** (media on disk not
+registered in Jellyfin), **disk usage** for the media volume, **recently
+added** (30 days) and **most-played** titles. It is written to
+`/docker/appdata/monarch-health/analytics.json` after every scan and served
+through the API so dashboards can read a consistent snapshot.
+
+```
+curl http://localhost:8003/api/analytics | python3 -m json.tool
+```
+
+***************************
+
+# Watch parties & offline downloads
+
+Both are **native Jellyfin features**, enabled out of the box:
+
+* **Watch parties (SyncPlay)** — any profile can start a SyncPlay session
+  from the Jellyfin app (tap the SyncPlay icon and invite others); playback,
+  pause and seek stay in sync across participants. SyncPlay is enabled by
+  default; administer it in Jellyfin Dashboard -> Playback.
+* **Offline downloads** — the Jellyfin mobile/desktop apps download titles to
+  the device for offline viewing. Downloads are authenticated against
+  Authentik (via the LDAP login chain), so revoked users lose access.
+
+***************************
+
+# Live TV (Jellyfin)
+
+Live TV is wired automatically on first boot — **no TVHeadend or NextPVR
 setup needed**. Jellyfin ingests a playlist directly as a native **M3U
 tuner** and uses the XMLTV guide generated by the `iptv` container:
 
 | Piece | Who sets it up | What it is |
 |-------|----------------|------------|
-| Channel source | `arr-init` (Jellyfin API) | M3U tuner pointing at `LIVETV_M3U_URL` (default: the free iptv-org **US** playlist, ~700 channels) - swap it for your own provider's playlist to use a paid source |
-| Guide (EPG) | `arr-init` + `iptv` container | `arr-init` writes the EPG channel list to `/opt/epg/channels.xml` (assembled from iptv-org's site files - Xumo + i24news by default, ~190 channels - falling back to the bundled list), and the `iptv` container (ghcr.io/iptv-org/epg) grabs the guide twice a day and serves it at `http://iptv:3000/guide.xml`; Jellyfin gets it as an XMLTV provider |
+| Channel source | `monarch-init` (Jellyfin API) | M3U tuner pointing at `LIVETV_M3U_URL` (default: the free iptv-org **US** playlist, ~700 channels) |
+| Guide (EPG) | `monarch-init` + `iptv` container | channel list at `/opt/epg/channels.xml`; guide grabbed twice a day and served at `http://iptv:3000/guide.xml` |
 
-**First boot:** `arr-init` adds the tuner and guide provider (it is
-idempotent - re-runs are no-ops). The guide download happens on the `iptv`
-container's schedule, so to get listings immediately:
+**First boot:** `monarch-init` adds the tuner and guide provider
+(idempotent). To get listings immediately:
 
 ```
 sudo docker restart iptv        # triggers an EPG grab right away
-sudo docker logs iptv           # watch it download the guide
 ```
 
-Then in Jellyfin: **Dashboard -> Live TV** - channels appear after the tuner
-finishes its refresh and the guide fills in once the XMLTV download
-completes (use the **Refresh Guide** button if you do not want to wait).
+**Custom providers:** set `LIVETV_M3U_URL` (and optionally
+`LIVETV_GUIDE_URL`) in `.env` to your IPTV provider's playlist. Free
+iptv-org streams are community-sourced — most play, but some channels may be
+offline or geo-blocked.
 
-Customizing:
+***************************
 
-* **Your own provider**: set `LIVETV_M3U_URL` in `.env` to your M3U playlist
-  URL (and `LIVETV_GUIDE_URL` if you have your own XMLTV) - nothing else to
-  change.
-* **Different channel lineup**: put your own `channels.xml` at
-  `/opt/epg/channels.xml` (format: `<channel site=... xmltv_id=... site_id=...>`
-  entries, see https://github.com/iptv-org/epg/tree/master/sites), or delete
-  the file and let arr-init rebuild it on the next run from the sites in
-  `LIVETV_EPG_SITES`.
-* Free iptv-org streams are community-sourced - most play, but some channels
-  may be offline or geo-blocked. That is expected with a free source.
-
-**************************
-
-## Reverse proxy (Nginx Proxy Manager / any proxy) <br />
-
-Only the services you want public need a proxy entry. Everything below is a
-host port from `docker-compose.yml` - point a proxy host at each one and
-enable WebSockets where noted. The usual public set is the first four:
-
-| Service | Host port | Example domain | WebSockets |
-|---------|-----------|----------------|------------|
-| Subscription platform (landing page) | `3000` | `subscribe.innotel.us` | - |
-| Authentik (admin UI + user portal) | `9000` | `auth.innotel.us` | - |
-| Jellyfin | `8096` | `media.innotel.us` | yes |
-| Jellyseerr | `5055` | `req.innotel.us` | yes |
-| Homarr (dashboard) | `7575` | `home.innotel.us` | yes |
-| IPTV guide | `3001` | `epg.innotel.us` | - |
-| Clipbucket | `8088` | `tube.innotel.us` | - |
-| qBittorrent / SABnzbd / Transmission / Deluge WebUIs | `8080` / `8081` / `9091` / `8112` | internal only (or proxy behind auth) | - |
-| Sonarr / Radarr / Lidarr / Whisparr / Prowlarr / Bazarr | `8989` / `7878` / `8686` / `6969` / `9696` / `6767` | internal only | - |
-| Requestrr / FlareSolverr / autobrr / Dispatcharr | `4545` / `8191` / `7474` / `9191` | internal only | - |
-| TVHeadend / NextPVR | `9981` / `8866` | internal only | - |
-
-After the proxy is up, set the public URLs in `.env` so links are correct:
+# Restart services
 
 ```
-APP_URL=https://subscribe.innotel.us
-ACCOUNT_PORTAL_URL=https://auth.innotel.us/if/user/     # Authentik self-service (password resets)
-REQUEST_URL=https://req.innotel.us
+sudo docker compose down
+sudo docker compose up -d
 ```
 
-(`AUTHENTIK_BASE_URL` stays the internal `http://authentik-server:9000` -
-containers call the API over the docker network; only the user-facing portal
-link needs the public URL.)
+***************************
 
-Non-HTTP ports that do **not** go through the proxy - forward them at the
-firewall/router instead: qBittorrent `6881` (tcp+udp), Transmission `51413`
-(tcp+udp), Deluge `58846`/`58946`. Authentik LDAP `389`/`636` are for
-host-side `ldapsearch` testing only - Jellyfin reaches the outpost over the
-docker network, so nothing needs forwarding for logins to work.
+# What's still manual (one-time, mostly external)
 
-**************************
+1. **Add indexers to Prowlarr** (`http://<host>:9696` -> Settings ->
+   Indexers) — they flow automatically to Radarr/Sonarr/Lidarr/Whisparr.
+   Legal/public-domain sources like **Archive.org** work great
+   (see [Remaining config](#remaining-config)).
+2. **FlareSolverr proxy** - Prowlarr -> Settings -> Indexers -> Indexer
+   Proxies: host `http://flaresolverr:8191`, tag it e.g. `cloudflare`
+   (optional).
+3. **NPM admin password** — set it once in the NPM UI before (re)running
+   `./setup.sh`.
+4. **Jellyseerr** - after first login, check Settings -> Users/Plex: enable
+   **Jellyfin** sign-in if you want subscribers to log in with their Jellyfin
+   accounts.
+5. **Stripe webhooks** — two endpoints, six events each (see
+   `.env.sample`).
 
-**************************
+***************************
 
-**************************
+# Installer & Live USB
 
-# Installer & Live USB <br /> <br />
+The repo ships a single **installer** that runs both as a live-USB→disk
+installer and as an in-place installer on an already-running Linux box, plus
+a **live/install ISO** you can boot and run the installer from.
 
-This repo mirrors the packaging approach of the [Capstone](https://github.com/innotelinc/capstone) project: a single **installer** that runs both as a live-USB→disk installer and as an in-place installer on an already-running Linux box, plus a **live/install ISO** you can boot and run the installer from. <br />
+## Installer
 
-## Installer <br />
+`scripts/install-monarch.sh` installs the whole platform. Two modes:
 
-`scripts/install-arr.sh` installs the whole ARR Media Stack. It has two modes: <br />
-- **In-place** (already-installed Linux): installs Docker (if missing), creates the `/data` folder layout, creates `.env` from `.env.sample` when missing, loads any offline Docker image archives it finds, installs the `arr.service` systemd unit, and starts the stack via `docker compose up -d`. <br />
-- **Live USB → disk** (booted from the ARR ISO): partitions the selected disk, copies the live system, installs GRUB (BIOS + UEFI), creates an `arr` login user, enables DHCP networking, and runs the in-place install inside the new system. <br />
+- **In-place** (already-installed Linux): installs Docker (if missing),
+  creates the `/data` folder layout, creates `.env` from `.env.sample` when
+  missing, loads any offline Docker image archives it finds, installs the
+  `monarch.service` systemd unit, and starts the stack via
+  `docker compose up -d`. Prefer `./setup.sh` which also configures Nginx
+  Proxy Manager.
+- **Live USB → disk** (booted from the Monarch ISO): partitions the selected
+  disk, copies the live system, installs GRUB (BIOS + UEFI), creates a
+  `monarch` login user, enables DHCP networking, and runs the in-place
+  install inside the new system.
 
-From a checked-out repo on any Debian/Ubuntu box: <br />
-`./scripts/install-arr.sh` <br />
+From a checked-out repo on any Debian/Ubuntu box:
 
-By default it installs to `/opt/arr` and creates a login user `arr` (password `arr`) for disk installs. Override with `ARR_TARGET`, `ARR_USER`, `ARR_PASSWORD`, `ARR_DISK`, `ARR_YES=1` (skip the destructive-disk confirmation). <br />
+```
+./scripts/install-monarch.sh
+```
 
-The installer is idempotent and non-destructive in in-place mode (it excludes `.env` from the payload copy, and never overwrites an existing `.env`). <br />
+By default it installs to `/opt/monarch` and creates a login user `monarch`
+(password `monarch`) for disk installs. Override with `MONARCH_TARGET`,
+`MONARCH_USER`, `MONARCH_PASSWORD`, `MONARCH_DISK`, `MONARCH_YES=1` (skip
+the destructive-disk confirmation). The installer is idempotent and
+non-destructive in in-place mode (it excludes `.env` from the payload copy,
+and never overwrites an existing `.env`).
 
-## Live / install USB <br />
+## Live / install USB
 
-Build the ISO locally (Ubuntu 24.04 "noble" host recommended): <br />
+Build the ISO locally (Ubuntu 24.04 "noble" host recommended):
+
 ```
 sudo apt install -y live-build xorriso mtools genisoimage grub-efi-amd64-bin grub-pc-bin isolinux syslinux-common
 ./scripts/build-live-usb.sh
 ```
-Output: `dist/live-usb/arr-media-live-amd64.iso` plus its `.sha256`. <br />
 
-Write it to a USB stick (replace `/dev/sdX` with the whole device, not a partition): <br />
+Output: `dist/live-usb/monarch-live-amd64.iso` plus its `.sha256`. Write it
+to a USB stick (replace `/dev/sdX` with the whole device):
+
 ```
-sudo dd if=dist/live-usb/arr-media-live-amd64.iso of=/dev/sdX bs=4M status=progress
+sudo dd if=dist/live-usb/monarch-live-amd64.iso of=/dev/sdX bs=4M status=progress
 ```
 
-Boot the target computer from the USB, wait for the Xfce desktop, and launch **Install ARR Media**. For a fully **offline** install, also copy the offline bundle (`arr-deployment.tar.gz`, `docker-images-part*.tar.gz`, `SHA256SUMS`) to a FAT32 partition of the USB stick — the installer detects and stages it automatically. <br />
+Boot the target computer from the USB, wait for the Xfce desktop, and launch
+**Install Monarch**. For a fully **offline** install, also copy the offline
+bundle (`monarch-deployment.tar.gz`, `docker-images-part*.tar.gz`,
+`SHA256SUMS`) to a FAT32 partition of the USB stick. The ISO is BIOS + UEFI
+hybrid (Secure Boot must be disabled); the installed system boots straight
+into the stack via `monarch.service`.
 
-The ISO is BIOS + UEFI hybrid (Secure Boot must be disabled). The **installed system** boots straight into the stack: the `arr.service` systemd unit starts Docker and runs `docker compose up -d` on first boot, and ethernet comes up with DHCP on every interface. Login user is `arr` (password `arr` — change it after first login, or pre-set `ARR_USER`/`ARR_PASSWORD`). <br />
+## Offline bundle
 
-## Offline bundle <br />
-
-The deployment payload + docker image archives are built by: <br />
 ```
 ./scripts/build-offline-bundle.sh            # payload + image bundle + checksums
 ./scripts/build-offline-bundle.sh --deployment-only   # payload + checksums only
 ```
-Output: `dist/offline-bundle/`. The docker image archives are split into <2 GB parts for GitHub release uploads. <br />
 
-Note: the `jellyfin-subscription-platform` image is published from a **private**
-repo, so it is kept commented out of `scripts/offline-images.txt` - uncomment it
-when building a private bundle and make sure the build host can `docker pull`
-it (GHCR token with `read:packages`). <br />
+Output: `dist/offline-bundle/` — the docker image archives are split into
+<2 GB parts for GitHub release uploads. Note: the
+`jellyfin-subscription-platform` image is published from a **private** repo,
+so it is kept commented out of `scripts/offline-images.txt` — uncomment it
+when building a private bundle. To fetch a published release's bundle:
 
-To fetch and unpack a published release's offline bundle: <br />
 ```
-./scripts/fetch-offline-bundle.sh          # -> ~/arr-offline-bundle
+./scripts/fetch-offline-bundle.sh          # -> ~/monarch-offline-bundle
 ```
-This verifies `SHA256SUMS`, unpacks the deployment payload, and reassembles the per-image archives into `dist/docker-images/`. Point `install-arr.sh` at the result (`ARR_ASSET_DIR=~/arr-offline-bundle`) and it loads images locally instead of pulling from the network. <br />
 
-**************************
+***************************
 
-# Building a release <br /> <br />
+# Building a release
 
-Releases are cut automatically by `.github/workflows/release.yml`. The workflow: <br />
-1. Computes the next version (minor/major bump from the last release). <br />
-2. Builds the source bundle and the deployment payload. <br />
-3. Cuts a GitHub release with those artifacts. <br />
-4. Two parallel CI jobs build & upload the **docker image bundle** and the **live ISO**. <br />
+Releases are cut by `.github/workflows/release.yml`. The workflow:
 
-To trigger it: **Actions → Release ARR Media Stack → Run workflow** (optionally pick a `major` bump or `lightweight` to skip the heavy ISO/image builds for a quick test release). Each release publishes: <br />
-- `arr-media-live-amd64.iso` + `.sha256` (bootable live/install ISO) <br />
-- `docker-images-part*.tar.gz` (offline docker image bundle) <br />
-- `arr-deployment.tar.gz` (source + compose + systemd installer payload) <br />
-- `arr-source-bundle.tar.gz` + checksum <br />
-- `SHA256SUMS` <br />
+1. **Tagged release** (`git tag v1.2.0 && git push --tags`) — or manual
+   "Run workflow" (choose a `minor`/`major` bump, or `lightweight` to skip
+   the heavy builds for a quick test).
+2. **build-images** publishes the first-party images to GHCR
+   (`monarch-billing-api`, `monarch-recs`, `monarch-health` — tagged with the
+   release version **and** `latest`).
+3. **release** cuts the GitHub release with the deployment payload + source
+   bundle + checksums.
+4. Two parallel CI jobs build & upload the **docker image bundle** and the
+   **live ISO**.
 
-**************************
+Each release publishes:
 
-# Troubleshooting: <br />
-### arr-init / arr-seed:
-`sudo docker logs arr-init` shows what the automation did. Its per-service
-result and any "MANUAL ACTIONS NEEDED" list is in `/docker/appdata/init/status.json`.
-If a service was mid-startup during the run, just re-run: `sudo docker start arr-init`
-(or `sudo docker-compose up -d` - `arr-init` is idempotent).
+- `monarch-live-amd64.iso` + `.sha256` (bootable live/install ISO)
+- `docker-images-part*.tar.gz` (offline docker image bundle)
+- `monarch-deployment.tar.gz` (source + compose + systemd installer payload)
+- `monarch-source-bundle.tar.gz` + checksum
+- `SHA256SUMS`
+- GHCR images `ghcr.io/innotelinc/monarch-{billing-api,recs,health}`
 
-### qBittorrent WebUI login fails with the configured password:
-The pre-seeded PBKDF2 hash matches stock qBittorrent, but if you run into it:
-grab the temporary password from `sudo docker logs qbittorrent` (search for
+***************************
+
+# Manual setup (without the installer)
+
+```bash
+# Docker
+apt update && apt -y upgrade
+apt -y install ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+apt update
+apt -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+
+# Folder structure (TRASH guide)
+mkdir -p /data/{usenet/{incomplete,complete}/{tv,movies,music,xxx},media/{tv,movies,music,xxx},torrents/{tv,movies,music,xxx}}
+chown -R 1000:1000 /data && chmod -R a=,a+rX,u+w,g+w /data
+
+cd /opt
+git clone https://github.com/innotelinc/monarch-media-platform
+cd monarch-media-platform
+cp .env.sample .env        # then edit MONARCH_USERNAME / MONARCH_PASSWORD etc.
+sudo docker compose up -d
+```
+
+***************************
+
+# Remaining config
+
+Add some indexers to Prowlarr. These tools are powerful automation for
+managing media, and there is a wealth of legal, copyright-free, and
+open-source content you can use them for — e.g. in Radarr you can download
+movies in the Public Domain or released under Creative Commons (Night of the
+Living Dead (1968), His Girl Friday (1940), Charade (1963), The General
+(1926), ...). The "Gold Standard" legal indexer is **Archive.org**, which
+hosts thousands of public domain movies.
+
+***************************
+
+# Troubleshooting
+
+### monarch-init / monarch-seed
+`sudo docker logs monarch-init` shows what the automation did. Its per-service
+result and any "MANUAL ACTIONS NEEDED" list is in
+`/docker/appdata/init/status.json`. If a service was mid-startup during the
+run, just re-run: `sudo docker start monarch-init`
+(or `sudo docker compose up -d` — it is idempotent).
+
+### qBittorrent WebUI login fails with the configured password
+Grab the temporary password from `sudo docker logs qbittorrent` (search for
 "A temporary password is provided for this session"), log in at
 http://localhost:8080, set your password in **Tools > Options > Web UI**, then
-re-run `sudo docker start arr-init` to recreate the categories.
+re-run `sudo docker start monarch-init` to recreate the categories.
 
-### DNS check:
-Test if your containers use CloudFlare DNS (configured in docker-compose.yml file): <br />
-`sudo docker exec -it radarr cat /etc/resolv.conf` <br />
+### DNS check
+`sudo docker exec -it radarr cat /etc/resolv.conf` — the stack pins
+Cloudflare DNS (1.1.1.1 / 1.0.0.1).
 
-### Hardlinks check:<br />
-Check if the hardlinks work as expected: <br />
-Go to `/data` folder on your host and run `tree` and `du -sch *` commands to see the folder structure. <br />
-Find the same file in torrents and media that you have just downloaded and run commands: <br />
-`ls -i /data/media/movies/<your video>` and check its inode id (in first column, like 3881112) <br />
-Then run again the same command but for the torrent folder: <br />
-`ls -i /data/torrents/movies/<your video>` and see if the inode id is the same as above. <br />
-If they are - your hardlinks work as expected. <br />
-If they don't - first go to logs to see what is the problem (for Radarr/Sonarr go to System - Log Files) <br />
-If you have issue where the file is copied rather than hardlinked, then the most probable cause <br />
-is the read/write permission on either source or destination, but that can all be found in those logs so start there. <br />
+### Hardlinks check
+Find the same file in `/data/torrents` and `/data/media` and compare inodes:
+`ls -i /data/media/movies/<your video>` vs
+`ls -i /data/torrents/movies/<your video>`. If they differ, check the
+read/write permissions on source/destination (see Radarr/Sonarr logs).
 
+### Files do not move from torrents to media folder
+Check Activity -> Queue for "Downloaded - Unable to Import Automatically",
+click Manual Import, confirm the correct movie, and import.
 
-### Files do not move from torrents to media folder: <br />
-If the video does not move automatically from torrents to media, then check the Activity - Queue. <br />
-You might have a flag saying: 'Downloaded - Unable to Import Automatically' <br />
-Click the Manual Import (icon that looks like human head on the far right of the item row) <br />
-Confirm the Movie: In the popup, ensure the correct movie is selected in the dropdown. If it is correct, click 'Import' <br />
+### FlareSolverr
+The `flaresolverr` container is already in the stack. In Prowlarr:
+Settings > Indexers > + (Add) under Indexer Proxies, select FlareSolverr,
+Host `http://flaresolverr:8191`, tag `cloudflare`, save.
 
+### Jellyfin hardware acceleration
+Add to the `jellyfin` service:
 
-### FlareSolverr: <br />
-You might want to add FlareSolverr if you find Prowlarr is failing to index some sites due to "Cloudflare" blocks: <br />
-The `flaresolverr` container is already in the stack. In Prowlarr: <br />
-- Open your Prowlarr Web UI (http://localhost:9696) <br />
-- Go to Settings > Indexers. <br />
-- Click the + (Add) button under Indexer Proxies and select FlareSolverr. <br />
-- Fill in the details: <br />
-- Name: FlareSolverr <br />
-- Host: http://flaresolverr:8191 (Note: Using the service name flaresolverr works because they are on the same Docker network). <br />
-- Tags: Give it a tag like cloudflare (this is important). <br />
-- Save the proxy <br /> <br />
-
-
-### Jellyfin hardware acceleration: <br />
-For Jellyfin hardware acceleration you might want to add bottom 2 lines:  <br />
-
-```
-jellyfin:
-    <<: *common-keys
-    <...snip...>
+```yaml
     devices:
-      - /dev/dri:/dev/dri # << container setting to pass through GPU (this requires more steps outside of docker compose though)
+      - /dev/dri:/dev/dri
 ```
 
-### SABnzbd Usenet client <br />
-If you use SABnzbd instead of qBittorrent then you need to add that to your yml file: <br />
-
-```
-  sabnzbd:
-    container_name: sabnzbd
-    image: ghcr.io/hotio/sabnzbd:latest
-    ports:
-      - 8080:8080
-      - 9090:9090
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/sabnzbd:/config
-      - /data:/data
-```
-<br />
-
-Note that if you want to run both - qBittorrent AND sabnzbd - then you will have conflict for port 8080 <br />
-as that port is also utilized by qBittorrent. <br />
-You will need to change the external port for one of the services to something not used, for example: <br />
-
-```
-    ports:
-      - 8081:8080
-```
-<br />
-
-For sabnzbd you can use folder structure shown [HERE](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Docker/) <br />
-and then assign categories (similar to what we did in qbittorrent) following [THIS GUIDE](https://trash-guides.info/Downloaders/SABnzbd/Basic-Setup/) <br />
+### SABnzbd Usenet client
+The `sabnzbd` service is already in the stack on host port 8081 (so it does
+not clash with qBittorrent on 8080). Use the TRASH-guide folder structure and
+categories, and re-run `monarch-init` for downloader wiring.
