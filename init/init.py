@@ -40,6 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from http.cookiejar import CookieJar
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,19 @@ JELLYFIN_LIBRARIES = [
     {"name": "Music", "type": "music", "path": "/data/media/music"},
     {"name": "Other", "type": "mixed", "path": "/data/media/xxx"},
 ]
+
+# Jellyfin LDAP-Auth plugin (authenticates logins against the Authentik LDAP
+# outpost). The bind user/token/group/base DN must match what billing-api
+# provisions in Authentik (same defaults in docker-compose.yml).
+LDAP_PLUGIN_NAME = "LDAP-Auth"
+LDAP_PLUGIN_CATALOG_REPO = "https://repo.jellyfin.org/files/plugin/manifest.json"
+LDAP_PLUGIN_GH_RELEASES = "https://api.github.com/repos/jellyfin/jellyfin-plugin-ldapauth/releases/latest"
+LDAP_SERVER = os.environ.get("AUTHENTIK_LDAP_SERVER", "authentik-ldap")
+LDAP_PORT = os.environ.get("AUTHENTIK_LDAP_PORT", "3389")
+LDAP_BIND_USER = os.environ.get("AUTHENTIK_LDAP_BIND_USER", "authentik-ldap")
+LDAP_BIND_TOKEN = os.environ.get("AUTHENTIK_LDAP_BIND_TOKEN", "")
+LDAP_BIND_GROUP = os.environ.get("AUTHENTIK_LDAP_BIND_GROUP", "paid_users")
+LDAP_BASE_DN = os.environ.get("AUTHENTIK_LDAP_BASE_DN", "dc=innotel,dc=us")
 
 # ---------------------------------------------------------------------------
 # Small HTTP helpers
@@ -141,7 +155,7 @@ def wait_for(base, path, desc, timeout=900, interval=8, method="GET", **kw):
     return False
 
 
-def arrived(base, problem):
+def arrived(problem):
     """Do not treat a failure as fatal; record it and keep going."""
     def deco(fn):
         def wrapper(*a, **k):
@@ -266,6 +280,178 @@ def configure_jellyfin():
 
     _results["jellyfin"] = "configured"
     return True
+
+
+# ---------------------------------------------------------------------------
+# Jellyfin LDAP-Auth plugin (Authentik login gate)
+# ---------------------------------------------------------------------------
+
+
+def jellyfin_headers(token):
+    return {"X-Emby-Token": token}
+
+
+def jellyfin_plugin_installed(token) -> bool:
+    status, _, j = _http(JELLYFIN_BASE, "/Plugins", headers=jellyfin_headers(token))
+    if status == 200 and isinstance(j, list):
+        return any(p.get("Name") == LDAP_PLUGIN_NAME for p in j)
+    return False
+
+
+def install_ldap_plugin_via_catalog(token) -> bool:
+    """Try the official Jellyfin plugin catalog (best effort)."""
+    repo = urllib.parse.quote(LDAP_PLUGIN_CATALOG_REPO, safe="")
+    status, _, entries = _http(
+        JELLYFIN_BASE, f"/Plugins/Repository?repositoryUrl={repo}",
+        headers=jellyfin_headers(token))
+    if status != 200 or not isinstance(entries, list):
+        return False
+    entry = next((e for e in entries if e.get("Name") == LDAP_PLUGIN_NAME), None)
+    if not entry:
+        return False
+    body = {"Name": entry.get("Name"), "Version": entry.get("Version"),
+            "RepositoryUrl": LDAP_PLUGIN_CATALOG_REPO}
+    status, _, _ = _http(
+        JELLYFIN_BASE, f"/Plugins/Install?repositoryUrl={repo}", method="POST",
+        body=body, headers=jellyfin_headers(token))
+    return status in (200, 202, 204)
+
+
+def install_ldap_plugin_via_release(token) -> bool:
+    """Fallback: download the plugin zip straight from the GitHub release."""
+    try:
+        with urllib.request.urlopen(LDAP_PLUGIN_GH_RELEASES, timeout=30) as resp:
+            release = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as exc:  # noqa: BLE001
+        _log(f"WARNING: could not query GitHub for the LDAP plugin release: {exc}")
+        return False
+    asset = next((a for a in release.get("assets", []) if a.get("name", "").endswith(".zip")), None)
+    if not asset:
+        _log("WARNING: no .zip asset on the LDAP plugin GitHub release.")
+        return False
+    plugins_dir = os.path.join(APPDATA, "jellyfin", "config", "plugins")
+    os.makedirs(plugins_dir, exist_ok=True)
+    tmp = os.path.join(plugins_dir, asset["name"])
+    try:
+        urllib.request.urlretrieve(asset["browser_download_url"], tmp)
+        with zipfile.ZipFile(tmp) as zf:
+            zf.extractall(plugins_dir)
+        os.remove(tmp)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _log(f"WARNING: LDAP plugin download/extract failed: {exc}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def write_ldap_plugin_config() -> tuple[str, str]:
+    """Write the LDAP-Auth plugin config file. Returns (path, xml)."""
+    bind_dn = f"cn={LDAP_BIND_USER},ou=users,{LDAP_BASE_DN}"
+    search_filter = f"(memberOf=cn={LDAP_BIND_GROUP},ou=groups,{LDAP_BASE_DN})"
+    xml = f"""<?xml version="1.0"?>
+<PluginConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <LdapUsers />
+  <LdapServer>{LDAP_SERVER}</LdapServer>
+  <LdapPort>{LDAP_PORT}</LdapPort>
+  <UseSsl>false</UseSsl>
+  <UseStartTls>false</UseStartTls>
+  <SkipSslVerify>false</SkipSslVerify>
+  <LdapBindUser>{bind_dn}</LdapBindUser>
+  <LdapBindPassword>{LDAP_BIND_TOKEN}</LdapBindPassword>
+  <LdapBaseDn>{LDAP_BASE_DN}</LdapBaseDn>
+  <LdapSearchFilter>{search_filter}</LdapSearchFilter>
+  <LdapAdminBaseDn />
+  <LdapAdminFilter />
+  <EnableLdapAdminFilterMemberUid>false</EnableLdapAdminFilterMemberUid>
+  <LdapSearchAttributes>uid, cn, mail, displayName</LdapSearchAttributes>
+  <LdapClientCertPath />
+  <LdapClientKeyPath />
+  <LdapRootCaPath />
+  <CreateUsersFromLdap>true</CreateUsersFromLdap>
+  <AllowPassChange>false</AllowPassChange>
+  <LdapUidAttribute>uid</LdapUidAttribute>
+  <LdapUsernameAttribute>cn</LdapUsernameAttribute>
+  <LdapPasswordAttribute>userPassword</LdapPasswordAttribute>
+  <EnableLdapProfileImageSync>false</EnableLdapProfileImageSync>
+  <RemoveImagesNotInLdap>false</RemoveImagesNotInLdap>
+  <LdapProfileImageAttribute>jpegphoto</LdapProfileImageAttribute>
+  <LdapProfileImageFormat>Default</LdapProfileImageFormat>
+  <EnableAllFolders>true</EnableAllFolders>
+  <EnabledFolders />
+  <PasswordResetUrl>http://localhost:9000/if/user/</PasswordResetUrl>
+</PluginConfiguration>
+"""
+    path = os.path.join(APPDATA, "jellyfin", "config", "plugins",
+                        LDAP_PLUGIN_NAME, f"{LDAP_PLUGIN_NAME}.xml")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    return path, xml
+
+
+def _config_unchanged(path: str, xml: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read() == xml
+    except OSError:
+        return False
+
+
+@arrived("jellyfin ldap wiring")
+def configure_jellyfin_ldap():
+    _log("--- Jellyfin LDAP (Authentik login gate) ---")
+    token = ""
+    try:
+        with open(os.path.join(INIT_DIR, "jellyfin-api-key.txt"), "r") as fh:
+            token = fh.read().strip()
+    except OSError:
+        pass
+    if not token:
+        _issues.append("jellyfin-ldap: no Jellyfin admin token available - run Jellyfin setup first")
+        return False
+    if not LDAP_BIND_TOKEN:
+        _issues.append("jellyfin-ldap: AUTHENTIK_LDAP_BIND_TOKEN is not set in docker-compose.yml")
+        return False
+
+    path, xml = write_ldap_plugin_config()
+    _log(f"LDAP-Auth plugin config written -> {path}")
+
+    needs_restart = not _config_unchanged(path, xml)
+    if not jellyfin_plugin_installed(token):
+        _log("Installing the LDAP-Auth plugin (catalog, then GitHub release)...")
+        ok = install_ldap_plugin_via_catalog(token)
+        if not ok:
+            ok = install_ldap_plugin_via_release(token)
+        if not ok:
+            _issues.append("jellyfin-ldap: could not install the LDAP-Auth plugin automatically - "
+                           "install it in Jellyfin Dashboard > Plugins > Catalog (name: LDAP-Auth). "
+                           "The config file is already in place.")
+            return False
+        needs_restart = True
+        _log("LDAP-Auth plugin installed.")
+    else:
+        _log("LDAP-Auth plugin already installed.")
+
+    if needs_restart:
+        _log("Restarting Jellyfin so the plugin loads the new config...")
+        status, _, _ = _http(JELLYFIN_BASE, "/System/Restart", method="POST",
+                             headers=jellyfin_headers(token))
+        _log(f"Jellyfin restart triggered (HTTP {status}).")
+        if not wait_for(JELLYFIN_BASE, "/System/Info/Public", "Jellyfin (after restart)",
+                        timeout=900):
+            return False
+        time.sleep(10)
+
+    if jellyfin_plugin_installed(token):
+        _log("LDAP-Auth plugin loaded. Jellyfin logins now resolve against Authentik LDAP "
+             f"({LDAP_SERVER}:{LDAP_PORT}, group cn={LDAP_BIND_GROUP}).")
+        _results["jellyfin-ldap"] = "configured"
+        return True
+    _issues.append("jellyfin-ldap: plugin not visible after restart - check Dashboard > Plugins")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +938,7 @@ def main() -> int:
     _log("Timeout for each service: up to 15 minutes on first boot while images start.")
 
     configure_jellyfin()
+    configure_jellyfin_ldap()
     configure_arrs()
     configure_prowlarr()
     configure_qbittorrent()

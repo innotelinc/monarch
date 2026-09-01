@@ -24,6 +24,7 @@ ghcr.io/iptv-org/epg:master
 oxygenz/clipbucket-v5:latest
 postgres:17
 ghcr.io/goauthentik/server:latest
+ghcr.io/goauthentik/ldap:latest
 python:3.12-slim
 containrrr/watchtower:latest
 

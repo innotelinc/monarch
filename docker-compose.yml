@@ -426,6 +426,34 @@ services:
       - /docker/appdata/authentik/templates:/templates
 
   ###############################################
+  # AUTHENTIK LDAP OUTPOST - Jellyfin login gate
+  # Serves the LDAP directory the Jellyfin
+  # LDAP-Auth plugin authenticates against, so
+  # Jellyfin logins resolve against Authentik
+  # users directly (disabling a user in
+  # Authentik blocks their Jellyfin login).
+  #
+  # AUTHENTIK_TOKEN is the outpost's API token.
+  # billing-api pins it to this exact value via
+  # the Authentik API on startup (set_key), so
+  # the value here and in billing-api must match.
+  ###############################################
+  authentik-ldap:
+    restart: unless-stopped
+    container_name: authentik-ldap
+    image: ghcr.io/goauthentik/ldap:latest
+    depends_on:
+      authentik-server:
+        condition: service_healthy
+    ports:
+      - 389:3389
+      - 636:6636
+    environment:
+      AUTHENTIK_HOST: http://authentik-server:9000
+      AUTHENTIK_INSECURE: "true"
+      AUTHENTIK_TOKEN: ak-ldap-outpost-2026
+
+  ###############################################
   # BILLING API - Stripe Webhooks
   # Receives the second Stripe webhook and mirrors
   # payment state into Authentik's `paid_users`
@@ -462,6 +490,13 @@ services:
       AUTHENTIK_BASE_URL: http://authentik-server:9000
       AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
       AUTHENTIK_DEFAULT_GROUP: paid_users
+      # LDAP provisioning - billing-api creates the LDAP provider/outpost and
+      # pins these tokens to the values below on startup (see main.py).
+      AUTHENTIK_LDAP_TOKEN: ak-ldap-outpost-2026
+      AUTHENTIK_LDAP_BIND_TOKEN: ak-ldap-bind-2026
+      AUTHENTIK_LDAP_BIND_USER: authentik-ldap
+      AUTHENTIK_LDAP_BIND_GROUP: paid_users
+      AUTHENTIK_LDAP_BASE_DN: dc=innotel,dc=us
       DATABASE_URL: postgresql://billing:BillingDB!2026@billing-postgres:5432/billing
     depends_on:
       billing-postgres:
@@ -555,6 +590,14 @@ services:
       ARR_USERNAME: ${ARR_USERNAME:-admin}
       ARR_PASSWORD: ${ARR_PASSWORD:-arrarr8}
       TZ: ${TZ:-America/New_York}
+      # Jellyfin LDAP-Auth plugin wiring (values must match billing-api's
+      # provisioning - see the README "Authentik LDAP -> Jellyfin" section).
+      AUTHENTIK_LDAP_SERVER: authentik-ldap
+      AUTHENTIK_LDAP_PORT: 3389
+      AUTHENTIK_LDAP_BIND_USER: authentik-ldap
+      AUTHENTIK_LDAP_BIND_TOKEN: ak-ldap-bind-2026
+      AUTHENTIK_LDAP_BIND_GROUP: paid_users
+      AUTHENTIK_LDAP_BASE_DN: dc=innotel,dc=us
     command: ["python", "/init/init.py"]
     volumes:
       - ./init:/init:ro

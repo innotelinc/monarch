@@ -122,6 +122,9 @@ the old manual setup:
   your credentials), adds Media libraries (`/data/media/movies`, `tv`,
   `music`, `xxx`), logs in and exports the admin token to
   `/docker/appdata/init/jellyfin-api-key.txt`
+* **Jellyfin LDAP-Auth plugin** - installs the plugin and writes its config so
+  Jellyfin logins authenticate against the Authentik LDAP outpost (see the
+  dedicated section below)
 * **Sonarr / Radarr / Lidarr / Whisparr** - sets Forms authentication with
   your credentials, adds the correct root folder, adds the **qBittorrent**
   download client (category `tv` / `movies` / `music` / `xxx`) and enables
@@ -169,6 +172,7 @@ touches services that are still unconfigured.
 | autobrr    | http://localhost:7474 | optional; manual setup |
 | Subscription platform | http://localhost:3000 | signup + Stripe Checkout landing page |
 | Authentik  | http://localhost:9000 | SSO + `paid_users` group = user management |
+| Authentik LDAP | localhost:389 / 636 | LDAP outpost - Jellyfin logins authenticate against it |
 | Billing API | http://localhost:8001 | Stripe webhooks -> Authentik paid users + Postgres |
 | Clipbucket | http://localhost:8088 | video platform |
 | Dispatcharr/TVHeadend/NextPVR/IPTV | 9191 / 9981 / 8866 / 3001 | live TV stack |
@@ -289,6 +293,56 @@ Subscribers manage their own password in Authentik's self-service settings
 (`http://localhost:9000/if/user/` - the "account portal" link the landing
 page shows). The platform's own `/admin` panel is separate and signs in with
 `ADMIN_PASSWORD` (defaults to `ARR_PASSWORD`).
+
+### Authentik LDAP -> Jellyfin (login gate)
+
+**Jellyfin logins now authenticate against Authentik directly.** The stack
+ships an Authentik **LDAP outpost** (`authentik-ldap` container) and wires the
+Jellyfin **LDAP-Auth plugin** to it, so there is no separate Jellyfin user
+store for subscribers: users and passwords live in Authentik, and **disabling
+a user in Authentik blocks their Jellyfin login** (the LDAP bind fails).
+
+Everything except adding users is automated:
+
+| Piece | Who sets it up | What it is |
+|-------|----------------|------------|
+| `authentik-ldap` container | `docker-compose.yml` | LDAP outpost (`ghcr.io/goauthentik/ldap`), plain LDAP on 3389 / LDAPS on 6636 inside the network, also mapped to host `389`/`636` for testing |
+| LDAP provider + outpost + app | billing-api on startup (`ensure_ldap_setup`) | base DN `dc=innotel,dc=us`; provider/outpost named `jellyfin-ldap`; the outpost's API token is pinned to `ak-ldap-outpost-2026` (must match the container's `AUTHENTIK_TOKEN`) |
+| Bind service account | billing-api on startup | `authentik-ldap` service account + token pinned to `ak-ldap-bind-2026`; a role grants it "Search full LDAP directory" on the provider |
+| Jellyfin LDAP-Auth plugin | `arr-init` | installs the plugin (catalog, falls back to the GitHub release) and writes its config to `plugins/LDAP-Auth/LDAP-Auth.xml`, then restarts Jellyfin |
+
+**What the Jellyfin plugin is configured with** (values in the config file
+arr-init writes):
+
+| Setting | Value |
+|---------|-------|
+| LDAP Server / Port | `authentik-ldap` / `3389` (plain LDAP on the docker network) |
+| Bind User | `cn=authentik-ldap,ou=users,dc=innotel,dc=us` (password = `ak-ldap-bind-2026`) |
+| Base DN | `dc=innotel,dc=us` |
+| Search Filter | `(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)` |
+| Username attribute | `cn` (users log in with their Authentik username, not email) |
+| Create users | enabled (first successful login auto-creates the Jellyfin account with all libraries) |
+
+**So the full access chain is:** Stripe checkout -> billing-api adds the user
+to `paid_users` (and they are active) -> the LDAP search finds them and the
+bind succeeds -> Jellyfin login works. Subscription cancels -> billing-api
+sets `is_active = false` -> the LDAP bind fails -> Jellyfin login is blocked,
+even though the user is still in the group. Granting access manually is just
+Directory -> Groups -> `paid_users` -> add the user.
+
+Notes:
+
+* The existing Jellyfin admin (`ARR_USERNAME`) is a local account and keeps
+  working - the LDAP plugin is an *additional* authentication provider.
+* LDAP is plaintext **inside the private docker network only** (host ports
+  `389`/`636` are for `ldapsearch` testing). To use LDAPS end-to-end, assign
+a certificate to the provider (Applications -> Providers -> `jellyfin-ldap`
+-> Protocol settings) and change the plugin config to port `6636` with
+`UseSsl` enabled.
+* Test the outpost from the host: `ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,ou=users,dc=innotel,dc=us" -w ak-ldap-bind-2026 '(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)' cn`
+* All the token values above are internal defaults hardcoded in
+  `docker-compose.yml` (same pattern as `AUTHENTIK_BOOTSTRAP_TOKEN`) - keep
+them in sync if you change any of them.
 
 ***************************
 
