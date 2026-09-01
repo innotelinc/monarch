@@ -128,6 +128,19 @@ install_in_place() {
   fi
   install_docker
   create_data_dirs ""
+  # First-run env: create .env from the sample so every ${VAR} default in
+  # docker-compose.yml resolves consistently. Never overwrite an existing .env
+  # (the rsync above already excluded it on purpose). Fill in a SESSION_SECRET
+  # so the subscription platform can boot.
+  if [ ! -f "$TARGET/.env" ] && [ -f "$TARGET/.env.sample" ]; then
+    $SUDO cp "$TARGET/.env.sample" "$TARGET/.env"
+    if grep -q '^SESSION_SECRET=change-me' "$TARGET/.env"; then
+      $SUDO sed -i "s|^SESSION_SECRET=change-me.*|SESSION_SECRET=$(openssl rand -hex 32 2>/dev/null || tr -dc 'a-f0-9' < /dev/urandom | head -c 64)|" "$TARGET/.env"
+    fi
+    echo "Created $TARGET/.env from .env.sample - edit ARR_USERNAME / ARR_PASSWORD and the Stripe keys."
+  else
+    echo ".env already present - leaving it untouched."
+  fi
   load_docker_images "$TARGET/dist/docker-images"
   install_service ""
   echo "ARR Media Stack installed at $TARGET and started."

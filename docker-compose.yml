@@ -9,7 +9,7 @@ x-common-keys: &common-keys
   environment:
     PUID: 1000
     PGID: 1000
-    TZ: America/New_York
+    TZ: ${TZ:-America/New_York}
   dns:
     - 1.1.1.1
     - 1.0.0.1
@@ -30,11 +30,14 @@ services:
       - /data/media:/data/media:ro
 
   ###############################################
-  # SEERR - Request Manager
+  # JELLYSEERR - Request Manager
+  #
+  # Wired to Jellyfin (login + media library) and to
+  # Radarr/Sonarr/Lidarr/Whisparr for requests by arr-init.
   ###############################################
-  seerr:
+  jellyseerr:
     <<: *common-keys
-    container_name: seerr
+    container_name: jellyseerr
     image: ghcr.io/seerr-team/seerr:latest
     init: true
     ports:
@@ -42,11 +45,11 @@ services:
     environment:
       PUID: 1000
       PGID: 1000
-      TZ: America/New_York
+      TZ: ${TZ:-America/New_York}
       PORT: 5055
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/seerr:/app/config
+      - /docker/appdata/jellyseerr:/app/config
 
   ###############################################
   # SONARR - TV Shows
@@ -106,6 +109,9 @@ services:
 
   ###############################################
   # PROWLARR - Indexer Manager
+  # Radarr/Sonarr/Lidarr/Whisparr are registered as
+  # "Apps" here and qBittorrent as the download client
+  # automatically by arr-init.
   ###############################################
   prowlarr:
     <<: *common-keys
@@ -147,12 +153,20 @@ services:
       - /docker/appdata/homarr/data:/data
 
   ###############################################
-  # QBITTORRENT - Downloader
+  # QBITTORRENT - Main Downloader (WebUI on :8080)
+  #
+  # WebUI credentials (ARR_USERNAME / ARR_PASSWORD)
+  # are pre-seeded into its config by arr-seed BEFORE
+  # first start so there is no temporary-password dance.
   ###############################################
   qbittorrent:
     <<: *common-keys
     container_name: qbittorrent
     image: ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
+    stop_grace_period: 30m
+    depends_on:
+      arr-seed:
+        condition: service_completed_successfully
     ports:
       - 8080:8080
       - 6881:6881
@@ -160,7 +174,7 @@ services:
     environment:
       PUID: 1000
       PGID: 1000
-      TZ: America/New_York
+      TZ: ${TZ:-America/New_York}
       QBT_LEGAL_NOTICE: confirm
       WEBUI_PORT: 8080
       TORRENTING_PORT: 6881
@@ -198,9 +212,9 @@ services:
     environment:
       PUID: 1000
       PGID: 1000
-      TZ: America/New_York
-      USER: admin
-      PASS: Tx!2026
+      TZ: ${TZ:-America/New_York}
+      USER: ${ARR_USERNAME:-admin}
+      PASS: ${ARR_PASSWORD:-arrarr8}
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/transmission:/config
@@ -208,7 +222,8 @@ services:
       - /data/watch:/watch
 
   ###############################################
-  # DELUGE - BitTorrent
+  # DELUGE - BitTorrent (WebUI password is set
+  # manually on first login with the default 'deluge')
   ###############################################
   deluge:
     <<: *common-keys
@@ -238,6 +253,8 @@ services:
 
   ###############################################
   # FLARESOLVERR - Cloudflare Bypass
+  # Registered as an indexer proxy in Prowlarr
+  # from Settings > Indexers (manual, one-time).
   ###############################################
   flaresolverr:
     <<: *common-keys
@@ -248,7 +265,7 @@ services:
     environment:
       PUID: 1000
       PGID: 1000
-      TZ: America/New_York
+      TZ: ${TZ:-America/New_York}
       LOG_LEVEL: info
 
   ###############################################
@@ -263,19 +280,6 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/autobrr:/config
-
-  ###############################################
-  # JFA-GO - Account Management
-  ###############################################
-  jfago:
-    <<: *common-keys
-    container_name: jfago
-    image: hrfee/jfa-go:latest
-    ports:
-      - 8056:8056
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/jfago:/data
 
   ###############################################
   # DISPATCHARR - IPTV / Live TV
@@ -320,13 +324,15 @@ services:
 
   ###############################################
   # IPTV - TV Guide
+  # Host port is 3001 so it does not clash with the
+  # subscription platform (which owns :3000).
   ###############################################
   iptv:
     <<: *common-keys
     container_name: iptv
     image: ghcr.io/iptv-org/epg:master
     ports:
-      - 3000:3000
+      - 3001:3000
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /opt/epg:/epg/public/guide.xml
@@ -344,7 +350,7 @@ services:
     environment:
       PUID: 1000
       PGID: 1000
-      TZ: America/New_York
+      TZ: ${TZ:-America/New_York}
       DOMAIN_NAME: tube.innotel.us
       MYSQL_PASSWORD: ClipDB!2026
       UID: 1000
@@ -355,6 +361,9 @@ services:
 
   ###############################################
   # AUTHENTIK - Identity Provider
+  # SSO + user management. billing-api provisions
+  # subscribers into the `paid_users` group; the
+  # bootstrap admin uses the shared initial password.
   ###############################################
   authentik-postgresql:
     restart: unless-stopped
@@ -386,6 +395,14 @@ services:
     volumes:
       - /docker/appdata/authentik/media:/media
       - /docker/appdata/authentik/templates:/templates
+    # billing-api starts only once Authentik is ready (its /-/health/ready/
+    # endpoint returns 200 only after migrations/startup have finished).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/-/health/ready/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
 
   authentik-worker:
     restart: unless-stopped
@@ -399,7 +416,7 @@ services:
       AUTHENTIK_POSTGRESQL__USER: authentik
       AUTHENTIK_POSTGRESQL__PASSWORD: AuthentikDB!2026
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
-      AUTHENTIK_BOOTSTRAP_PASSWORD: InnotelAuth!2026
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${ARR_PASSWORD:-arrarr8}
       AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
       AUTHENTIK_BOOTSTRAP_EMAIL: admin@innotel.us
     depends_on:
@@ -410,6 +427,9 @@ services:
 
   ###############################################
   # BILLING API - Stripe Webhooks
+  # Receives the second Stripe webhook and mirrors
+  # payment state into Authentik's `paid_users`
+  # group (source code lives in ./billing-api).
   ###############################################
   billing-postgres:
     restart: unless-stopped
@@ -428,11 +448,14 @@ services:
     image: python:3.12-slim
     working_dir: /app
     command: >
-      sh -c "pip install --no-cache-dir fastapi uvicorn stripe psycopg[binary] httpx &&
+      sh -c "pip install --no-cache-dir -r /app/requirements.txt &&
              uvicorn main:app --host 0.0.0.0 --port 8001"
     environment:
-      STRIPE_SECRET_KEY: sk_live_replace_me
-      STRIPE_WEBHOOK_SECRET: whsec_replace_me
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_live_replace_me}
+      # Signing secret for the billing-api webhook endpoint. If unset it falls
+      # back to STRIPE_WEBHOOK_SECRET (the platform's endpoint secret).
+      BILLING_WEBHOOK_SECRET: ${BILLING_WEBHOOK_SECRET:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_replace_me}
       STRIPE_PRICE_ID: price_replace_me
       BILLING_BASE_URL: https://billing.innotel.us
       BILLING_API_KEY: innotel-billing-api-key
@@ -441,34 +464,100 @@ services:
       AUTHENTIK_DEFAULT_GROUP: paid_users
       DATABASE_URL: postgresql://billing:BillingDB!2026@billing-postgres:5432/billing
     depends_on:
-      - billing-postgres
-      - authentik-server
+      billing-postgres:
+        condition: service_started
+      authentik-server:
+        condition: service_healthy
     ports:
-      - 8001:8000
+      - 8001:8001
     volumes:
       - ./billing-api:/app
 
   ###############################################
-  # MEDIA INIT - Auto Link ARR Stack
+  # JELLYFIN SUBSCRIPTION PLATFORM - Public signup,
+  # Stripe billing, Jellyfin account provisioning
+  #
+  # https://github.com/innotelinc/jellyfin-subscription-platform
+  # Served on :3000. Set the env vars in .env - most
+  # importantly JELLYFIN_API_KEY (see /docker/appdata/init/
+  # after first boot - arr-init exports the admin token
+  # there) and the Stripe keys.
   ###############################################
-  media-init:
-    container_name: media-init
-    image: alpine:3.20
+  jellyfin-subscription:
+    container_name: jellyfin-subscription
+    image: ghcr.io/innotelinc/jellyfin-subscription-platform:v1.0.0
+    restart: unless-stopped
+    ports:
+      - 3000:3000
+    environment:
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_CURRENCY: ${STRIPE_CURRENCY:-usd}
+      JELLYFIN_URL: ${JELLYFIN_URL:-http://localhost:8096}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      # Account portal link: Authentik self-service user settings (jfa-go removed)
+      JFA_GO_URL: ${JFA_GO_URL:-http://localhost:9000/if/user/}
+      REQUEST_URL: ${REQUEST_URL:-http://localhost:5055}
+      ADMIN_PASSWORD: ${ARR_PASSWORD:-arrarr8}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me}
+    volumes:
+      - /docker/appdata/jellyfin-subscription:/app/data
+
+  ###############################################
+  # ARR-SEED - Pre-seed qBittorrent WebUI credentials
+  # Runs once BEFORE qBittorrent first starts so the
+  # WebUI login is ARR_USERNAME / ARR_PASSWORD from
+  # the very first boot (no temporary password).
+  ###############################################
+  arr-seed:
+    container_name: arr-seed
+    image: python:3.12-slim
+    restart: "no"
+    environment:
+      ARR_USERNAME: ${ARR_USERNAME:-admin}
+      ARR_PASSWORD: ${ARR_PASSWORD:-arrarr8}
+    command: ["python", "/init/seed_qbt.py"]
+    volumes:
+      - ./init:/init:ro
+      - /docker/appdata/qbittorrent:/config
+
+  ###############################################
+  # ARR-INIT - Auto Wire the Whole Stack
+  # Runs once after the stack is up and:
+  #   * creates the Jellyfin admin user (ARR_USERNAME /
+  #     ARR_PASSWORD), logs in and exports the admin
+  #     token to /docker/appdata/init/jellyfin-api-key.txt
+  #   * sets forms-auth + shared credentials on every
+  #     *arr app, root folders and qBittorrent client
+  #   * registers Radarr/Sonarr/Lidarr/Whisparr as
+  #     Prowlarr Apps + qBittorrent download client
+  #   * creates qBittorrent categories + save paths
+  #   * connects Bazarr to Radarr/Sonarr
+  #   * wires Jellyseerr to Jellyfin/Radarr/Sonarr
+  ###############################################
+  arr-init:
+    container_name: arr-init
+    image: python:3.12-slim
     restart: "no"
     depends_on:
+      - jellyfin
+      - jellyseerr
       - prowlarr
-      - radarr
       - sonarr
+      - radarr
       - lidarr
       - whisparr
+      - bazarr
       - qbittorrent
       - sabnzbd
     environment:
-      QBT_USERNAME: admin
-      QBT_PASSWORD: Qbit!2026
-    command: ["/bin/sh", "/init/init.sh"]
+      ARR_USERNAME: ${ARR_USERNAME:-admin}
+      ARR_PASSWORD: ${ARR_PASSWORD:-arrarr8}
+      TZ: ${TZ:-America/New_York}
+    command: ["python", "/init/init.py"]
     volumes:
-      - ./init:/init
+      - ./init:/init:ro
       - /docker/appdata:/docker/appdata
 
   ###############################################

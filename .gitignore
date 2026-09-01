@@ -1,6 +1,7 @@
 # Env / secrets
 .env
 *.env
+!.env.sample
 .env.local
 .env.*.local
 
@@ -12,6 +13,10 @@ dist/offline-bundle/
 
 # Docker
 *.log
+
+# Python
+__pycache__/
+*.pyc
 
 # OS / editors
 .DS_Store

@@ -74,140 +74,226 @@ ls -ln /data <br />
 git clone https://github.com/innotelinc/arr.git <br />
 cd arr <br />
 
+cp .env.sample .env      # then edit ARR_USERNAME / ARR_PASSWORD (see below)
+
 Note that hostnames are not needed here as we have dedicated network for our containers <br />
 
 ***************************
 
 # First run: <br />
 
-You should be able to run all services now with simple `sudo docker-compose up -d`<br />
+You should be able to run all services now with simple `sudo docker-compose up -d`
 
 ***************************
 
-### INITIAL SETUP ###
+# Shared initial credentials
 
-Radarr: /data/media/movies <br />
-Sonarr /data/media/tv <br />
-Lidarr /data/media/music <br />
-Whisparr /data/media/xxx <br />
-qBittorrent /data/torrents <br />
+Edit `.env` (it is gitignored, so your credentials never get committed) - the two
+most important variables are:
 
-sudo docker logs qbittorrent <br />
+```
+ARR_USERNAME=admin        # your username
+ARR_PASSWORD=arrarr8      # your password
+```
 
-The WebUI administrator username is: admin <br />
-The WebUI administrator password was not set. A temporary password is provided for this session: GD84tBRja <br />
+Those same credentials are applied automatically to **every service that
+requires a login**: Jellyfin, Jellyseerr, Sonarr, Radarr, Lidarr, Whisparr,
+Prowlarr, Bazarr, qBittorrent, Transmission, the Authentik bootstrap admin
+(email `admin@innotel.us`) and the subscription platform's `/admin` panel.
+Anything you change in `.env` later is picked up by the automation on the next
+`docker-compose up -d` (the init containers re-run and only touch services
+that still have default/no credentials).
 
-http://localhost:8080 <br />
+***************************
 
-For Radarr: Category: movies <br />
-Save Path: movies <br />
-For Sonarr: Category: tv <br />
-Save Path: tv <br />
-For Lidarr: Category: music <br />
-Save Path: music <br />
-For Whisparr: Category: xxx <br />
-Save Path: xxx <br />
+# Everything is wired for you on first boot
 
-For live TV use this m3u: https://iptv-org.github.io/iptv/index.m3u <br />
+Two one-shot containers do the wiring so you do **not** have to click through
+the old manual setup:
 
-Tools - Options - Downloads and in Saving Management <br />
+| Container    | When            | What it does |
+|--------------|-----------------|--------------|
+| `arr-seed`   | before qBittorrent starts | writes qBittorrent's WebUI login (`ARR_USERNAME`/`ARR_PASSWORD`) into its config - no temporary-password dance |
+| `arr-init`   | after the stack is up | wires the whole stack (below) |
 
-So Default Torrent Management Mode - Automatic <br />
-When Torrent Category changed - Relocate torrent <br />
-When Default Save Path Changed - Switch affected torrents to Manual Mode <br />
-When Category Save Path Changed - Switch affected torrents to Manual Mode <br />
-Tick BOTH BOXES for Use Subcategories and Use Category paths in Manual Mode <br />
-Default Save Path: - set to /data/torrents <br />
+`arr-init` automatically:
 
+* **Jellyfin** - completes the first-run wizard (creates the admin user with
+  your credentials), adds Media libraries (`/data/media/movies`, `tv`,
+  `music`, `xxx`), logs in and exports the admin token to
+  `/docker/appdata/init/jellyfin-api-key.txt`
+* **Sonarr / Radarr / Lidarr / Whisparr** - sets Forms authentication with
+  your credentials, adds the correct root folder, adds the **qBittorrent**
+  download client (category `tv` / `movies` / `music` / `xxx`) and enables
+  hardlinks + extra-file import
+* **Prowlarr** - sets Forms authentication, adds **qBittorrent** as the
+  download client, and registers Radarr, Sonarr, Lidarr and Whisparr as
+  **Apps** (full sync) - so indexers added in Prowlarr flow to all *arr apps
+* **qBittorrent** - verifies the WebUI login and creates the `movies`, `tv`,
+  `music` and `xxx` categories with their save paths under `/data/torrents`
+  (default save path `/data/torrents`, no temp dir)
+* **Bazarr** - sets basic authentication with your credentials and connects
+  Sonarr + Radarr so subtitle syncing works
+* **Jellyseerr** - initializes the request manager against **Jellyfin** and
+  connects Radarr + Sonarr
 
-Now configure Prowlarr service (each of these services will require to set up user/pass): <br />
-Use 'Form (login page) authentication and set your user and pass for all. <br />
+Watch it work / check for problems:
 
-## Prowlarr: <br />
-`http://<host_ip>:9696` <br />
-Go to `Settings - Download Clients` - `+` symbol - Add download client - choose `qBittorrent` (unless you decided touse different download client) <br />
-UNTICK the `Use SSL` (unless you have SSL configured in qBittorrent - Tools - Options -WebUI but by default it is not used) <br />
-Host - use `qbittorrent` and port - put the port id matching the WebUI in docker-compose for qBittorrent (default is `8080`) <br />
-username and password - use the one that you configured for qBittorrent in previous step <br />
-Click little `Test` button at the bottom, make sure you get a green `tick` then `Save`.<br />
+```
+sudo docker logs arr-init
+sudo cat /docker/appdata/init/status.json      # per-service result + any issues list
+```
 
+Everything is idempotent - `arr-init` re-runs safely on every `up -d` and only
+touches services that are still unconfigured.
 
+***************************
 
-## Radarr: <br />
-`http://<host_ip>:7878` <br />
-Go to `Settings - Media Management - Add Root Folder` (scroll down to the bottom) - set  `/data/media/movies` as your root folder <br />
-Still in `Settings - Media Management - click Show Advanced - Importing - Use Hardlinks instead of Copy` - make sure its 'ticked' <br /> <br />
+# Services & ports
 
-Optional - you can also tick `Rename Movies` and `Delete empty movie folders during disk scan` , and in `Import Extra Files` - make sure that box is ticked <br />
-and in `Import Extra files` field type `srt,sub,nfo` (those 3 changes are all optional) <br /><br />
+| Service    | URL                   | Notes |
+|------------|-----------------------|-------|
+| Homarr (dashboard) | http://localhost:7575 | |
+| Jellyfin   | http://localhost:8096 | admin = your `.env` credentials |
+| Jellyseerr | http://localhost:5055 | requests; connected to Jellyfin + Radarr/Sonarr |
+| Prowlarr   | http://localhost:9696 | indexers; all *arr apps pre-registered |
+| Radarr     | http://localhost:7878 | movies |
+| Sonarr     | http://localhost:8989 | tv |
+| Lidarr     | http://localhost:8686 | music |
+| Whisparr   | http://localhost:6969 | xxx |
+| Bazarr     | http://localhost:6767 | subtitles; connected to Sonarr/Radarr |
+| qBittorrent | http://localhost:8080 | WebUI (enabled), login = your credentials, torrent port 6881 |
+| SABnzbd    | http://localhost:8081 | Usenet (optional) |
+| Transmission | http://localhost:9091 | optional extra downloader |
+| Deluge     | http://localhost:8112 | optional; default WebUI password is `deluge` on first login |
+| autobrr    | http://localhost:7474 | optional; manual setup |
+| Subscription platform | http://localhost:3000 | signup + Stripe Checkout landing page |
+| Authentik  | http://localhost:9000 | SSO + `paid_users` group = user management |
+| Billing API | http://localhost:8001 | Stripe webhooks -> Authentik paid users + Postgres |
+| Clipbucket | http://localhost:8088 | video platform |
+| Dispatcharr/TVHeadend/NextPVR/IPTV | 9191 / 9981 / 8866 / 3001 | live TV stack |
 
-Then `Settings- Download clients` - click `plus` symbol, choose `qBittorrent` etc - basically same steps as for Prowlarr <br />
-so Host `qbittorrent`, port `8080`, ,make sure SSL is unticked, username admin and password - one you configured for qBittorrent <br /> 
-and change the Category to `movies` (needs to match qbittorrent Category) <br /> <br />
-Now click the `Test` and if you have green 'tick' - `Save`.<br />
-Now go to `Settings - General` - scroll down to API key - Copy API key - go back to `Prowlarr - Settings - Apps` -click `+` - Radarr - paste  API key. <br />
-Then change `Prowlarr Server` to `http://prowlarr:9696` and `Radarr Server` to `http://radarr:7878` <br />
-Click `Test` and if Green - Save <br /><br />
+***************************
 
-BTW - you can see how to configure each service for  hardlinks [HERE](https://trash-guides.info/File-and-Folder-Structure/Examples/) <br />
-You need to configure SABnzbd / qbittorrent and any other services you run too, not only Radarr or Sonarr <br />
+# What's still manual (one-time, mostly external)
 
+The automation covers app-to-app wiring. These still need you:
 
+1. **Add indexers to Prowlarr** (`http://<host>:9696` -> Settings -> Indexers).
+   They flow automatically to Radarr/Sonarr/Lidarr/Whisparr because they are
+   already registered as Apps. Legal/public-domain sources like
+   **Archive.org** work great (see [Remaining config](#remaining-config)).
+2. **FlareSolverr proxy** - Prowlarr -> Settings -> Indexers -> Indexer Proxies:
+   host `http://flaresolverr:8191`, tag it e.g. `cloudflare` (optional).
+3. **Jellyseerr** - after first login, check Settings -> Users/Plex: enable
+   **Jellyfin** sign-in if you want subscribers to log in with their Jellyfin
+   accounts (the local `ARR_USERNAME` login from the wizard always works).
+4. **Subscription platform + Authentik** - see the dedicated section below.
 
-## Sonarr: <br />
-`http://<host_ip>:8989` <br />
-Go to `Settings - Media Management - Add Root Folder` - set  `/data/media/tv` as your root folder <br />
-Still in `Settings - Media Management - Show Advanced - Importing - Use Hardlinks instead of Copy` - make sure its 'ticked' <br /> <br />
+***************************
 
-Optional - you can also tick `Rename Episodes` and `Delete empty Folders - delete empty series and season folders during disk scan` <br />
-Then in `Import Extra Files` - make sure that box is ticked and in `Import Extra files` field type `srt,sub,nfo` (those 3 changes are all optional) <br /><br />
+# Subscription Landing Page + User Management (Authentik)
 
-Then `Settings- Download clients` - click `plus` symbol, choose `qBittorrent` etc - basically same steps as for previous services<br />
-Host `qbittorrent`, port `8080`, ,make sure SSL is unticked, username admin and password - one you configured for qBittorrent <br /> 
-and change the Category to 'tv' (by default its 'tv-sonarr', but you need to match qbittorrent Category) <br /><br />
-Now click the 'Test' and if you have green 'tick' - Save.<br />
-Now go to `Settings - General` - scroll down to API key - Copy API key - go back to Prowlarr - Settings - Apps -click '+' - Sonarr - paste  API key. <br />
-Then change `Prowlarr Server` to `http://prowlarr:9696` and `Sonarr Server` to `http://sonarr:8989`<br />
-Click `Test` and if Green - `Save`<br />
+The stack's public signup page is [jellyfin-subscription-platform](https://github.com/innotelinc/jellyfin-subscription-platform)
+(`http://<host>:3000`): visitors pick a plan and pay through Stripe Checkout.
+**User management is Authentik-first**: payments made through the landing page
+are mirrored into the `paid_users` group by **billing-api**, and subscribers
+are given access in Authentik (the platform's own checkout/admin plumbing
+still runs - you manage the Jellyfin side from its `/admin` panel).
 
+GitHub Container Registry image (the repo is private, so authenticate first):
 
+```
+echo YOUR_GH_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+```
 
-## Lidarr: <br />
-`http://<host_ip>:8686` <br />
-Go to Settings - Media Management - Add Root Folder - set path to /data/media/music as your root folder, set name to Root or whatever and save <br />
-Then Settings- Download clients - click 'plus' symbol, choose qBittorrent etc - basically same steps as for previous services<br />
-Host 'qbittorrent', port 8080, ,make sure SSL is unticked, username admin and password - one you configured for qBittorrent <br /> 
-and change the Category to 'music' (by default its 'lidarr', but you need to match qbittorrent Category) <br />
-Now click the 'Test' and if you have green 'tick' - Save.
-Now go to Settings - General - scroll down to API key - Copy API key - go back to Prowlarr - Settings - Apps -click '+' - Sonarr - paste  API key. <br />
-Then change `Prowlarr Server` to `http://prowlarr:9696` and `Lidarr Server` to `http://lidarr:8686` <br />
-Click `Test` and if Green - `Save` <br />
+Configure it via `.env` (all variables are documented in `.env.sample`):
 
+| Variable | What it is |
+|----------|------------|
+| `APP_URL` | public URL of the site, e.g. `https://subscribe.innotel.us` (Stripe redirects use it) |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Stripe keys (webhook #1 - the platform) |
+| `BILLING_WEBHOOK_SECRET` | signing secret of webhook #2 (billing-api); optional, falls back to `STRIPE_WEBHOOK_SECRET` |
+| `JELLYFIN_URL` / `JELLYFIN_API_KEY` | Jellyfin server + key (platform's own provisioning) |
+| `JFA_GO_URL` | account portal link shown to users - now Authentik's self-service user settings, e.g. `http://localhost:9000/if/user/` (jfa-go was removed) |
+| `REQUEST_URL` | Jellyseerr request portal shown to Premium users, e.g. `https://req.innotel.us` |
+| `SESSION_SECRET` | long random string (`openssl rand -hex 32`) |
 
+**Getting `JELLYFIN_API_KEY`:** `arr-init` creates the Jellyfin admin and
+exports its token (it is a valid API credential) on first boot to
+`/docker/appdata/init/jellyfin-api-key.txt`. Copy it into `.env`:
 
-## Whisparr: <br />
-`http://<host_ip>:6969` <br />
-Go to Settings - Media Management - Add Root Folder - set path to /data/media/xxx as your root folder, set name to Root or whatever and save <br />
-Then Settings- Download clients - click 'plus' symbol, choose qBittorrent etc - basically same steps as for previous services<br />
-Host 'qbittorrent', port 8080, ,make sure SSL is unticked, username admin and password - one you configured for qBittorrent <br /> 
-and change the Category to 'xxx' (by default its 'whisparr', but you need to match qbittorrent Category) <br />
-Now click the 'Test' and if you have green 'tick' - Save.
-Now go to Settings - General - scroll down to API key - Copy API key - go back to Prowlarr - Settings - Apps -click '+' - Whisparr - paste  API key. <br />
-Then change `Prowlarr Server` to `http://prowlarr:9696` and `Whisparr Server` to `http://whisparr:6969` <br />
-Click `Test` and if Green - `Save` <br />
+```
+sudo cp /docker/appdata/init/jellyfin-api-key.txt /tmp/jfkey.txt
+echo "JELLYFIN_API_KEY=$(cat /tmp/jfkey.txt)" | sudo tee -a /opt/arr/.env
+sudo docker compose up -d
+```
 
+Alternatively create a normal key in Jellyfin Dashboard -> Advanced -> API Keys
+and use that.
 
+**Stripe webhooks:** Stripe dashboard -> Developers -> Webhooks -> add **two**
+endpoints, both with the same six events:
 
-## Bazarr: <br />
-`http://host_ip>:6767` <br />
-Languages: Go to Settings > Languages and create a "Language Profile" (e.g., "English" or "Any"). <br />
-Providers: Go to Settings > Providers and add your subtitle sources (OpenSubtitles.org, Subscene, etc.). Most require a free account. <br />
-Sync: After connecting Radarr/Sonarr, go to the Series or Movies tab and click "Update" to pull in your existing library. <br />
+```
+1. URL:     https://YOUR-DOMAIN/api/webhook      -> platform (checkout UX + admin)
+2. URL:     http://<host>:8001/api/webhook       -> billing-api (Authentik paid_users)
 
-****************************
+Events:  checkout.session.completed
+         customer.subscription.updated
+         customer.subscription.deleted
+         invoice.payment_succeeded
+         invoice.payment_failed
+```
+
+Copy the `whsec_...` signing secret of endpoint 1 into `STRIPE_WEBHOOK_SECRET`
+and endpoint 2's secret into `BILLING_WEBHOOK_SECRET` (or reuse one for both).
+When a checkout completes, billing-api creates (or finds) the subscriber in
+Authentik, adds them to the `paid_users` group and records the subscription
+in Postgres; cancels (`customer.subscription.deleted`) disable their access.
+
+### Authentik setup (one-time)
+
+Authentik boots with a **bootstrap admin** - the `AUTHENTIK_BOOTSTRAP_*` env
+vars on the `authentik-worker` container create it for you, so there is no
+setup wizard to click through:
+
+| What | Value |
+|------|-------|
+| Admin UI | `http://localhost:9000` |
+| Username | `akadmin` |
+| Password | your `ARR_PASSWORD` from `.env` |
+| Email | `admin@innotel.us` |
+
+Bootstrap credentials are applied **only on first boot** (when the Authentik
+database is empty). Changing `ARR_PASSWORD` in `.env` later does **not** reset
+the admin password - change it in the admin UI instead (Directory -> Users ->
+`akadmin`).
+
+**The `paid_users` group is the source of truth for who has access.** billing-api
+talks to Authentik's API with the shared `AUTHENTIK_BOOTSTRAP_TOKEN` from
+`docker-compose.yml` and auto-creates the group on its first successful Stripe
+webhook, so there is nothing to set up manually:
+
+- **Checkout completes** (`checkout.session.completed` / invoice paid) ->
+  billing-api finds or creates the subscriber in Authentik (username/email
+  from the checkout) and adds them to `paid_users`
+- **Subscription cancels** (`customer.subscription.deleted`) -> billing-api
+  sets the user `is_active = false`, so their access is off
+
+To verify or grant access manually: admin UI -> Directory -> Groups ->
+`paid_users`. Anyone in that group counts as a subscriber - add or remove
+users there to grant/revoke access without touching Stripe.
+
+Subscribers manage their own password in Authentik's self-service settings
+(`http://localhost:9000/if/user/` - the "account portal" link the landing
+page shows). The platform's own `/admin` panel is separate and signs in with
+`ADMIN_PASSWORD` (defaults to `ARR_PASSWORD`).
+
+***************************
 
 ## Restart services: <br />
-It might be a good idea to restart all services and see if they come up as expected: <br /> 
+It might be a good idea to restart all services and see if they come up as expected: <br />
 
 ```
 sudo docker-compose down
@@ -231,11 +317,7 @@ Night of the Living Dead (1968), His Girl Friday (1940), Charade (1963), and The
 Configure Prowlarr with The "Gold Standard" Indexer for legal media like The Internet Archive (Archive.org). <br />
 They host thousands of public domain movies. <br />
 
-## Jellyfin <br />
-`http://<host ip address>:8096` <br />
-To watch your movies, just log on to Jellyfin, create user and password and you can `Add Media Library`. <br />
-For Content Type - choose `Movies` and find folder `/data/media/movies`. <br />
-Add more content types like TV or Music accordingly, binding them to correct media folder. <br />
+## For live TV use this m3u: https://iptv-org.github.io/iptv/index.m3u <br />
 
 **************************
 
@@ -248,7 +330,7 @@ This repo mirrors the packaging approach of the [Capstone](https://github.com/in
 ## Installer <br />
 
 `scripts/install-arr.sh` installs the whole ARR Media Stack. It has two modes: <br />
-- **In-place** (already-installed Linux): installs Docker (if missing), creates the `/data` folder layout, loads any offline Docker image archives it finds, installs the `arr.service` systemd unit, and starts the stack via `docker compose up -d`. <br />
+- **In-place** (already-installed Linux): installs Docker (if missing), creates the `/data` folder layout, creates `.env` from `.env.sample` when missing, loads any offline Docker image archives it finds, installs the `arr.service` systemd unit, and starts the stack via `docker compose up -d`. <br />
 - **Live USB → disk** (booted from the ARR ISO): partitions the selected disk, copies the live system, installs GRUB (BIOS + UEFI), creates an `arr` login user, enables DHCP networking, and runs the in-place install inside the new system. <br />
 
 From a checked-out repo on any Debian/Ubuntu box: <br />
@@ -256,7 +338,7 @@ From a checked-out repo on any Debian/Ubuntu box: <br />
 
 By default it installs to `/opt/arr` and creates a login user `arr` (password `arr`) for disk installs. Override with `ARR_TARGET`, `ARR_USER`, `ARR_PASSWORD`, `ARR_DISK`, `ARR_YES=1` (skip the destructive-disk confirmation). <br />
 
-The installer is idempotent and non-destructive in in-place mode (it excludes `.env` from the payload copy). <br />
+The installer is idempotent and non-destructive in in-place mode (it excludes `.env` from the payload copy, and never overwrites an existing `.env`). <br />
 
 ## Live / install USB <br />
 
@@ -285,6 +367,11 @@ The deployment payload + docker image archives are built by: <br />
 ```
 Output: `dist/offline-bundle/`. The docker image archives are split into <2 GB parts for GitHub release uploads. <br />
 
+Note: the `jellyfin-subscription-platform` image is published from a **private**
+repo, so it is kept commented out of `scripts/offline-images.txt` - uncomment it
+when building a private bundle and make sure the build host can `docker pull`
+it (GHCR token with `read:packages`). <br />
+
 To fetch and unpack a published release's offline bundle: <br />
 ```
 ./scripts/fetch-offline-bundle.sh          # -> ~/arr-offline-bundle
@@ -311,6 +398,19 @@ To trigger it: **Actions → Release ARR Media Stack → Run workflow** (optiona
 **************************
 
 # Troubleshooting: <br />
+### arr-init / arr-seed:
+`sudo docker logs arr-init` shows what the automation did. Its per-service
+result and any "MANUAL ACTIONS NEEDED" list is in `/docker/appdata/init/status.json`.
+If a service was mid-startup during the run, just re-run: `sudo docker start arr-init`
+(or `sudo docker-compose up -d` - `arr-init` is idempotent).
+
+### qBittorrent WebUI login fails with the configured password:
+The pre-seeded PBKDF2 hash matches stock qBittorrent, but if you run into it:
+grab the temporary password from `sudo docker logs qbittorrent` (search for
+"A temporary password is provided for this session"), log in at
+http://localhost:8080, set your password in **Tools > Options > Web UI**, then
+re-run `sudo docker start arr-init` to recreate the categories.
+
 ### DNS check:
 Test if your containers use CloudFlare DNS (configured in docker-compose.yml file): <br />
 `sudo docker exec -it radarr cat /etc/resolv.conf` <br />
@@ -337,30 +437,15 @@ Confirm the Movie: In the popup, ensure the correct movie is selected in the dro
 
 ### FlareSolverr: <br />
 You might want to add FlareSolverr if you find Prowlarr is failing to index some sites due to "Cloudflare" blocks: <br />
-```
-###################################
-# FLARESOLVERR - Cloudflare Bypass
-###################################
-
-  flaresolverr:
-    <<: *common-keys
-    container_name: flaresolverr
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    ports:
-      - 8191:8191
-    environment:
-      - LOG_LEVEL=info
-```
-
- Once the container is running, you need to tell Prowlarr to use it: <br />
- - Open your Prowlarr Web UI (http://localhost:9696) <br />
- - Go to Settings > Indexers. <br />
- - Click the + (Add) button under Indexer Proxies and select FlareSolverr. <br />
- - Fill in the details: <br />
- - Name: FlareSolverr <br />
- - Host: http://flaresolverr:8191 (Note: Using the service name flaresolverr works because they are on the same Docker network). <br />
- - Tags: Give it a tag like cloudflare (this is important). <br />
- - Save the proxy <br /> <br />
+The `flaresolverr` container is already in the stack. In Prowlarr: <br />
+- Open your Prowlarr Web UI (http://localhost:9696) <br />
+- Go to Settings > Indexers. <br />
+- Click the + (Add) button under Indexer Proxies and select FlareSolverr. <br />
+- Fill in the details: <br />
+- Name: FlareSolverr <br />
+- Host: http://flaresolverr:8191 (Note: Using the service name flaresolverr works because they are on the same Docker network). <br />
+- Tags: Give it a tag like cloudflare (this is important). <br />
+- Save the proxy <br /> <br />
 
 
 ### Jellyfin hardware acceleration: <br />
@@ -375,7 +460,7 @@ jellyfin:
 ```
 
 ### SABnzbd Usenet client <br />
-If you use SABnzbd instead of qBittorrent then you need to add that to your yml file: 
+If you use SABnzbd instead of qBittorrent then you need to add that to your yml file: <br />
 
 ```
   sabnzbd:
