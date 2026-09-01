@@ -323,7 +323,10 @@ services:
       - /docker/appdata/nextpvr:/config
 
   ###############################################
-  # IPTV - TV Guide
+  # IPTV - EPG guide generator (Live TV guide)
+  # Grabs XMLTV guide data for the channel list in
+  # channels.xml (arr-init writes it on first boot)
+  # and serves it at http://iptv:3000/guide.xml.
   # Host port is 3001 so it does not clash with the
   # subscription platform (which owns :3000).
   ###############################################
@@ -333,9 +336,16 @@ services:
     image: ghcr.io/iptv-org/epg:master
     ports:
       - 3001:3000
+    environment:
+      # Re-grab the guide twice a day; 8 parallel requests speeds it up.
+      CRON_SCHEDULE: "0 0,12 * * *"
+      MAX_CONNECTIONS: "8"
+      RUN_AT_STARTUP: "true"
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /opt/epg:/epg/public/guide.xml
+      # Host /opt/epg holds channels.xml (EPG channel list, written by
+      # arr-init) and receives guide.xml (served at http://iptv:3000/guide.xml).
+      - /opt/epg:/epg/public
 
   ###############################################
   # CLIPBUCKET - Video Platform
@@ -533,11 +543,11 @@ services:
       JELLYFIN_URL: ${JELLYFIN_URL:-http://localhost:8096}
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
       # Authentik - the platform creates/sets the subscriber's password here
-      # (same token billing-api uses; account portal link is Authentik
-      # self-service user settings - jfa-go removed)
+      # (same token billing-api uses). The account portal link defaults to
+      # AUTHENTIK_BASE_URL/if/user/; set ACCOUNT_PORTAL_URL to override it.
       AUTHENTIK_BASE_URL: ${AUTHENTIK_BASE_URL:-http://authentik-server:9000}
       AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-ak-bootstrap-innotel-2026}
-      JFA_GO_URL: ${JFA_GO_URL:-http://localhost:9000/if/user/}
+      ACCOUNT_PORTAL_URL: ${ACCOUNT_PORTAL_URL:-http://localhost:9000/if/user/}
       REQUEST_URL: ${REQUEST_URL:-http://localhost:5055}
       ADMIN_PASSWORD: ${ARR_PASSWORD:-arrarr8}
       SESSION_SECRET: ${SESSION_SECRET:-change-me}
@@ -591,10 +601,15 @@ services:
       - bazarr
       - qbittorrent
       - sabnzbd
+      - iptv
     environment:
       ARR_USERNAME: ${ARR_USERNAME:-admin}
       ARR_PASSWORD: ${ARR_PASSWORD:-arrarr8}
       TZ: ${TZ:-America/New_York}
+      # Live TV - Jellyfin-native M3U tuner + XMLTV guide. arr-init adds the
+      # tuner/guide to Jellyfin and writes the EPG channel list to /opt/epg.
+      LIVETV_M3U_URL: ${LIVETV_M3U_URL:-https://iptv-org.github.io/iptv/countries/us.m3u}
+      LIVETV_GUIDE_URL: ${LIVETV_GUIDE_URL:-http://iptv:3000/guide.xml}
       # Jellyfin LDAP-Auth plugin wiring (values must match billing-api's
       # provisioning - see the README "Authentik LDAP -> Jellyfin" section).
       AUTHENTIK_LDAP_SERVER: authentik-ldap
@@ -608,6 +623,8 @@ services:
     volumes:
       - ./init:/init:ro
       - /docker/appdata:/docker/appdata
+      # lets arr-init drop /opt/epg/channels.xml for the iptv EPG grabber
+      - /opt/epg:/opt/epg
 
   ###############################################
   # WATCHTOWER - Auto Updates
