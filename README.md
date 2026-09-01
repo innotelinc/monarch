@@ -219,6 +219,7 @@ Configure it via `.env` (all variables are documented in `.env.sample`):
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Stripe keys (webhook #1 - the platform) |
 | `BILLING_WEBHOOK_SECRET` | signing secret of webhook #2 (billing-api); optional, falls back to `STRIPE_WEBHOOK_SECRET` |
 | `JELLYFIN_URL` / `JELLYFIN_API_KEY` | Jellyfin server + key (platform's own provisioning) |
+| `AUTHENTIK_BASE_URL` / `AUTHENTIK_BOOTSTRAP_TOKEN` | Authentik API + bootstrap token - the platform creates the subscriber's Authentik account/password here (same token billing-api uses) |
 | `JFA_GO_URL` | account portal link shown to users - now Authentik's self-service user settings, e.g. `http://localhost:9000/if/user/` (jfa-go was removed) |
 | `REQUEST_URL` | Jellyseerr request portal shown to Premium users, e.g. `https://req.innotel.us` |
 | `SESSION_SECRET` | long random string (`openssl rand -hex 32`) |

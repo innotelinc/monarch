@@ -532,7 +532,11 @@ services:
       STRIPE_CURRENCY: ${STRIPE_CURRENCY:-usd}
       JELLYFIN_URL: ${JELLYFIN_URL:-http://localhost:8096}
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
-      # Account portal link: Authentik self-service user settings (jfa-go removed)
+      # Authentik - the platform creates/sets the subscriber's password here
+      # (same token billing-api uses; account portal link is Authentik
+      # self-service user settings - jfa-go removed)
+      AUTHENTIK_BASE_URL: ${AUTHENTIK_BASE_URL:-http://authentik-server:9000}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-ak-bootstrap-innotel-2026}
       JFA_GO_URL: ${JFA_GO_URL:-http://localhost:9000/if/user/}
       REQUEST_URL: ${REQUEST_URL:-http://localhost:5055}
       ADMIN_PASSWORD: ${ARR_PASSWORD:-arrarr8}
