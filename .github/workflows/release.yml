@@ -252,10 +252,6 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           sudo docker system prune -af 2>/dev/null || true
           df -h / | tail -1
-      # The first-party Monarch images are private on GHCR until made public -
-      # authenticate with the run token so the bundle can pull them.
-      - name: Log in to GHCR
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build docker image bundle
         run: ./scripts/build-offline-bundle.sh
       - name: Upload image bundle + refreshed checksums
