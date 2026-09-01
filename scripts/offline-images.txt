@@ -32,5 +32,5 @@ containrrr/watchtower:latest
 # cannot be pulled by the public release CI. Uncomment + add your own pull
 # when building a private/offline bundle, or let users pull it themselves:
 #   echo YOUR_GH_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-#   docker pull ghcr.io/innotelinc/jellyfin-subscription-platform:v1.0.0
-# ghcr.io/innotelinc/jellyfin-subscription-platform:v1.0.0
+#   docker pull ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0
+# ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0

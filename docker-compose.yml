@@ -531,7 +531,7 @@ services:
   ###############################################
   jellyfin-subscription:
     container_name: jellyfin-subscription
-    image: ghcr.io/innotelinc/jellyfin-subscription-platform:v1.0.0
+    image: ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0
     restart: unless-stopped
     ports:
       - 3000:3000
