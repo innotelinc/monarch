@@ -28,9 +28,6 @@ ghcr.io/goauthentik/ldap:latest
 python:3.12-slim
 containrrr/watchtower:latest
 
-# The subscription platform image is published from a PRIVATE repo, so it
-# cannot be pulled by the public release CI. Uncomment + add your own pull
-# when building a private/offline bundle, or let users pull it themselves:
-#   echo YOUR_GH_PAT | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-#   docker pull ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0
-# ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0
+# The subscription platform image is public on GHCR (same org/user), so the
+# release CI can pull it without auth and it ships in the offline bundle.
+ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0
