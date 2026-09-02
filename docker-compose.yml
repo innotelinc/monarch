@@ -386,6 +386,17 @@ services:
     volumes:
       - /docker/appdata/authentik/postgresql:/var/lib/postgresql/data
 
+  # Redis is required by authentik (django cache, sessions, task queue).
+  # Without it the server and worker refuse to start - they default to
+  # connecting to localhost:6379 inside their own containers.
+  authentik-redis:
+    restart: unless-stopped
+    container_name: authentik-redis
+    image: redis:alpine
+    command: --save 60 1
+    volumes:
+      - /docker/appdata/authentik/redis:/data
+
   authentik-server:
     restart: unless-stopped
     container_name: authentik-server
@@ -397,9 +408,11 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
       AUTHENTIK_POSTGRESQL__PASSWORD: AuthentikDB!2026
+      AUTHENTIK_REDIS__HOST: authentik-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
     depends_on:
       - authentik-postgresql
+      - authentik-redis
     ports:
       - 9000:9000
     volumes:
@@ -407,8 +420,11 @@ services:
       - /docker/appdata/authentik/templates:/templates
     # billing-api starts only once Authentik is ready (its /-/health/ready/
     # endpoint returns 200 only after migrations/startup have finished).
+    # The authentik image ships neither curl nor wget, so use Python (always
+    # present) for the health check - urlopen exits non-zero on a 503 while
+    # migrations are still running.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/-/health/ready/ || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:9000/-/health/ready/',timeout=5)\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -425,12 +441,14 @@ services:
       AUTHENTIK_POSTGRESQL__NAME: authentik
       AUTHENTIK_POSTGRESQL__USER: authentik
       AUTHENTIK_POSTGRESQL__PASSWORD: AuthentikDB!2026
+      AUTHENTIK_REDIS__HOST: authentik-redis
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
       AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
       AUTHENTIK_BOOTSTRAP_EMAIL: admin@innotel.us
     depends_on:
       - authentik-postgresql
+      - authentik-redis
     volumes:
       - /docker/appdata/authentik/media:/media
       - /docker/appdata/authentik/templates:/templates

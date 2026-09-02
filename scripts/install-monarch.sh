@@ -118,6 +118,14 @@ create_data_dirs() {
                 "$root/data/torrents/{tv,movies,music,xxx}"
   $SUDO chown -R 1000:1000 "$root/data"
   $SUDO chmod -R a=,a+rX,u+w,g+w "$root/data"
+  # authentik's image runs as a non-root user (UID 1000) and cannot create its
+  # own /media + /templates dirs if the host mounts are root-owned - pre-create
+  # them with the same ownership as the rest of the stack (postgresql data is
+  # handled by its own container and intentionally left alone).
+  $SUDO mkdir -p "$root/docker/appdata/authentik/media" \
+                "$root/docker/appdata/authentik/templates" \
+                "$root/docker/appdata/authentik/redis"
+  $SUDO chown -R 1000:1000 "$root/docker/appdata/authentik"
 }
 
 # ---- Mode 2: install into the running (already-installed) system ----
