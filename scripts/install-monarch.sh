@@ -36,7 +36,7 @@ for cand in "$SCRIPT_DIR" "$(cd "$SCRIPT_DIR/.." && pwd)"; do
 done
 ASSET_DIR="${MONARCH_ASSET_DIR:-$ROOT}"
 RELEASE_TAG="${MONARCH_RELEASE_TAG:-v1.0.0}"
-REPO_SLUG="${MONARCH_REPO:-innotelinc/monarch-media-platform}"
+REPO_SLUG="${MONARCH_REPO:-innotelinc/monarch}"
 MONARCH_DISK="${MONARCH_DISK:-}"
 
 # Local login account for the installed system (documented in the README).

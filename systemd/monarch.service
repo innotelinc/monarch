@@ -1,6 +1,6 @@
 [Unit]
 Description=Monarch Media Platform (Jellyfin, *arr, downloaders, IPTV)
-Documentation=https://github.com/innotelinc/monarch-media-platform
+Documentation=https://github.com/innotelinc/monarch
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

@@ -40,8 +40,8 @@ Besides the manual setup, this repo ships a **one-command setup script**, an
 # Quick start (recommended)
 
 ```bash
-git clone https://github.com/innotelinc/monarch-media-platform
-cd monarch-media-platform
+git clone https://github.com/innotelinc/monarch
+cd monarch
 cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc. (below)
 ./setup.sh
 ```
@@ -530,8 +530,8 @@ mkdir -p /data/{usenet/{incomplete,complete}/{tv,movies,music,xxx},media/{tv,mov
 chown -R 1000:1000 /data && chmod -R a=,a+rX,u+w,g+w /data
 
 cd /opt
-git clone https://github.com/innotelinc/monarch-media-platform
-cd monarch-media-platform
+git clone https://github.com/innotelinc/monarch
+cd monarch
 cp .env.sample .env        # then edit MONARCH_USERNAME / MONARCH_PASSWORD etc.
 sudo docker compose up -d
 ```

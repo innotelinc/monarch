@@ -7,7 +7,7 @@ set -euo pipefail
 #
 # Usage: fetch-offline-bundle.sh [OUT_DIR]   (default: ~/monarch-offline-bundle)
 
-REPO_SLUG="${MONARCH_REPO:-innotelinc/monarch-media-platform}"
+REPO_SLUG="${MONARCH_REPO:-innotelinc/monarch}"
 RELEASE_TAG="${MONARCH_RELEASE_TAG:-v1.0.0}"
 OUT_DIR="${1:-${MONARCH_OUT_DIR:-$HOME/monarch-offline-bundle}}"
 BASE_URL="https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG}"
