@@ -596,17 +596,18 @@ def configure_jellyfin():
          "subscription platform).")
 
     # Add the media libraries (read-only media mount is fine - metadata lives in
-    # the Jellyfin config volume).
+    # the Jellyfin config volume). Jellyfin >= 10.11 takes name, collectionType
+    # and paths as query parameters; only LibraryOptions goes in the body.
     for lib in JELLYFIN_LIBRARIES:
+        qs = urllib.parse.urlencode({
+            "name": lib["name"],
+            "collectionType": lib["type"],
+            "paths": lib["path"],
+            "refreshLibrary": "false",
+        })
         status, _, _ = _http(
-            JELLYFIN_BASE, "/Library/VirtualFolders", method="POST",
-            body={
-                "LibraryOptions": {"EnableInternetProviders": True},
-                "CollectionType": lib["type"],
-                "Name": lib["name"],
-                "RefreshLibrary": False,
-                "Paths": [lib["path"]],
-            },
+            JELLYFIN_BASE, f"/Library/VirtualFolders?{qs}", method="POST",
+            body={"LibraryOptions": {"EnableInternetProviders": True}},
             headers={"X-Emby-Token": token},
         )
         if status in (200, 204):
@@ -665,14 +666,24 @@ def install_ldap_plugin_via_release(token) -> bool:
     if not asset:
         _log("WARNING: no .zip asset on the LDAP plugin GitHub release.")
         return False
+    # Jellyfin discovers plugins by scanning subdirectories of the plugins
+    # folder for meta.json, so the zip must land in plugins/<PluginName>/.
     plugins_dir = os.path.join(APPDATA, "jellyfin", "config", "plugins")
-    os.makedirs(plugins_dir, exist_ok=True)
-    tmp = os.path.join(plugins_dir, asset["name"])
+    plugin_dir = os.path.join(plugins_dir, LDAP_PLUGIN_NAME)
+    os.makedirs(plugin_dir, exist_ok=True)
+    tmp = os.path.join(plugin_dir, asset["name"])
     try:
         urllib.request.urlretrieve(asset["browser_download_url"], tmp)
         with zipfile.ZipFile(tmp) as zf:
-            zf.extractall(plugins_dir)
+            zf.extractall(plugin_dir)
         os.remove(tmp)
+        # Jellyfin runs as uid/gid 1000; the plugin must be readable (and
+        # writable for its config) by that user.
+        for root, _dirs, files in os.walk(plugin_dir):
+            for name in files:
+                ensure_owner(os.path.join(root, name))
+            ensure_owner(root)
+        ensure_owner(plugin_dir)
         return True
     except Exception as exc:  # noqa: BLE001
         _log(f"WARNING: LDAP plugin download/extract failed: {exc}")
