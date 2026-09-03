@@ -11,8 +11,8 @@ streaming with user profiles, **AI-powered recommendations and smart search**, l
 native M3U tuner and XMLTV guide, and one-command installs — including a bootable
 **live/install ISO** and an **offline bundle** for air-gapped deployment.
 
-[![Release](https://innotelinc.github.io/monarch/actions/workflows/release.yml/badge.svg)](https://innotelinc.github.io/monarch/actions/workflows/release.yml)
-[![Fresh install check](https://innotelinc.github.io/monarch/actions/workflows/fresh-install.yml/badge.svg)](https://innotelinc.github.io/monarch/actions/workflows/fresh-install.yml)
+[![Release](https://github.com/innotelinc/monarch/actions/workflows/release.yml/badge.svg)](https://github.com/innotelinc/monarch/actions/workflows/release.yml)
+[![Fresh install check](https://github.com/innotelinc/monarch/actions/workflows/fresh-install.yml/badge.svg)](https://github.com/innotelinc/monarch/actions/workflows/fresh-install.yml)
 [![Latest release](https://img.shields.io/github/v/release/innotelinc/monarch?color=8b5cf6)](https://innotelinc.github.io/monarch/releases)
 
 *One script, and your library gets a brain — with wings.*
