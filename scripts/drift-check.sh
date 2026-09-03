@@ -39,6 +39,9 @@ set -uo pipefail
 #     - API key readable, basic auth configured
 #   Authentik:
 #     - LDAP outpost provisioned (when AUTHENTIK_BASE_URL is set)
+#   Nginx Proxy Manager (only when the local NPM container runs):
+#     - live proxy hosts match scripts/npm-hosts.conf (npm-proxy-hosts.py
+#       --check: subdomain, forward host, port and websocket support)
 #   Infra (host, only when the docker CLI works):
 #     - /data and /docker/appdata disk usage below DRIFT_DISK_MAX_PCT (90)
 #     - each probed container not crash-looping (RestartCount below
@@ -464,6 +467,36 @@ except Exception:
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
+# Nginx Proxy Manager (local container or NPM_MODE=remote + credentials)
+# ───────────────────────────────────────────────────────────────────────────
+# Verifies the live NPM proxy hosts match scripts/npm-hosts.conf via
+# npm-proxy-hosts.py --check (read-only, exit 1 on drift). Runs when the
+# local NPM container is up, or when NPM_MODE=remote points at an external
+# server with NPM_ADMIN_* credentials set; skipped otherwise.
+npm_container=0
+if command -v docker >/dev/null 2>&1 \
+   && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx nginx-proxy-manager; then
+  npm_container=1
+fi
+if [ "$npm_container" -eq 1 ] \
+   || { [ "${NPM_MODE:-local}" = "remote" ] \
+        && [ -n "${NPM_ADMIN_EMAIL:-}" ] && [ -n "${NPM_ADMIN_PASSWORD:-}" ]; }; then
+  if [ -z "${NPM_ADMIN_EMAIL:-}" ] || [ -z "${NPM_ADMIN_PASSWORD:-}" ]; then
+    say "ok: npm (skipped - NPM_ADMIN_EMAIL/PASSWORD not set)"
+  else
+    if npm_out=$(python3 scripts/npm-proxy-hosts.py --check 2>&1); then
+      say "ok: npm proxy hosts match npm-hosts.conf"
+      [ "$QUIET" -eq 0 ] && echo "$npm_out" | sed 's/^/  /'
+    else
+      fail "npm: proxy hosts drifted from npm-hosts.conf"
+      echo "$npm_out" | sed 's/^/  /' >&2
+    fi
+  fi
+else
+  say "ok: npm (skipped - no local NPM container and NPM_MODE!=remote)"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # Infra (host-level, only when the docker CLI works)
 # ───────────────────────────────────────────────────────────────────────────
 DRIFT_DISK_MAX_PCT="${DRIFT_DISK_MAX_PCT:-90}"
@@ -499,7 +532,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       fi
     fi
     say "ok: infra container $cname (restarts=$rc)"
-  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo qbittorrent; echo jellyfin; echo jellyseerr; echo bazarr; } | sort -u)
+  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo qbittorrent; echo jellyfin; echo jellyseerr; echo bazarr; echo homarr; echo nginx-proxy-manager; } | sort -u)
 fi
 
 rm -f /tmp/drift-body.$$

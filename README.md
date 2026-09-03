@@ -416,6 +416,7 @@ against the services:
 | Jellyseerr | initialized, Jellyfin sign-in enabled |
 | Bazarr | API key readable, basic auth configured |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
+| Nginx Proxy Manager (local mode) | live proxy hosts match `scripts/npm-hosts.conf` — subdomain, forward host/port and websocket support (`npm-proxy-hosts.py --check`); skipped when the NPM container isn't running or no `NPM_ADMIN_*` credentials are set |
 | Infra (host) | `/data` + `/docker/appdata` disk usage below 90%, probed containers not crash-looping (restart count), no stale images (recreate needed) |
 
 **Single source of truth:** what to check comes from
@@ -463,10 +464,12 @@ Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
 
 The **full-stack CI workflow** (`.github/workflows/full-stack-drift.yml`)
 boots the real stack (jellyfin, *arrs, prowlarr, qBittorrent, bazarr,
-jellyseerr) + `monarch-init` on a disposable runner and runs the actual
-drift check against it — the closest CI gets to a live deployment. It runs
-on PRs touching `init/`, `docker-compose.yml`, the drift check, or the
-fresh-install check; nightly; and on demand (`workflow_dispatch`):
+jellyseerr, Nginx Proxy Manager) + `monarch-init` on a disposable runner,
+provisions the NPM proxy hosts for the test domain, and runs the actual
+drift check against it — so the proxy-host verification is exercised for
+real on every run. It runs on PRs touching `init/`, `docker-compose.yml`,
+the drift check, or the fresh-install check; nightly; and on demand
+(`workflow_dispatch`):
 
 ```
 ./scripts/fresh-install-check.sh --full-stack     # boot + init + real drift check

@@ -29,11 +29,14 @@ set -euo pipefail
 #     down afterwards (keep it running with MONARCH_CHECK_KEEP=1).
 #   Stage 3 (--full-stack, DISPOSABLE host/VM with Docker + sudo): boots the
 #     probe-able stack (jellyfin, *arrs, prowlarr, qBittorrent, bazarr,
-#     jellyseerr) + monarch-init, waits for init to wire everything, then
-#     runs the REAL drift check (scripts/drift-check.sh) against it - the
-#     closest CI gets to a live deployment. Authentik is not booted (heavy,
-#     needs migrations); both init.py and the drift check skip it when
-#     AUTHENTIK_BOOTSTRAP_TOKEN is empty, which the stage blanks in its env.
+#     jellyseerr, nginx-proxy-manager) + monarch-init, waits for init to
+#     wire everything, provisions the NPM proxy hosts for the test domain
+#     (--hosts-only --skip-ssl), then runs the REAL drift check
+#     (scripts/drift-check.sh) against it - including the NPM proxy-host
+#     verification - the closest CI gets to a live deployment. Authentik is
+#     not booted (heavy, needs migrations); both init.py and the drift check
+#     skip it when AUTHENTIK_BOOTSTRAP_TOKEN is empty, which the stage
+#     blanks in its env.
 #
 # Stages 2/3 write to the real /docker/appdata and start containers, so they
 # refuse to run when a live stack is detected unless the host is explicitly
@@ -226,6 +229,11 @@ if grep -q "__DOMAIN__" "$plan" || grep -Eq "(^|[^a-z0-9-])monarch\.innotel\.us"
 else
   ok "plan uses only the test domain"
 fi
+# Drop the throwaway NPM credentials exported for the dry run - they are
+# check@$TEST_DOMAIN, not the real sample credentials, and stage 3 must
+# provision NPM with the latter (npm-proxy-hosts.py prefers exported vars
+# over .env, so leftovers here would silently create the wrong admin).
+unset NPM_ADMIN_EMAIL NPM_ADMIN_PASSWORD NPM_DNS_PROVIDER
 
 # ── Stage 1d: compose file interpolation (docker CLI, no daemon needed) ────
 if command -v docker > /dev/null 2>&1 && docker compose version > /dev/null 2>&1; then
@@ -433,17 +441,21 @@ EOF
 
   echo "  Starting the probe-able stack (image pulls may take a while)..."
   # Start ONLY the services the drift check probes (qbittorrent pulls in
-  # monarch-seed via depends_on). sabnzbd + iptv are monarch-init's deps but
-  # are NOT probed and iptv's RUN_AT_STARTUP EPG grab spikes memory on a
-  # small CI runner - keep them out and run init with --no-deps.
+  # monarch-seed via depends_on), plus the local NPM reverse proxy so the
+  # drift check's proxy-host verification has something to verify against.
+  # sabnzbd + iptv are monarch-init's deps but are NOT probed and iptv's
+  # RUN_AT_STARTUP EPG grab spikes memory on a small CI runner - keep them
+  # out and run init with --no-deps.
   if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
-       --env-file "$SCRATCH/.env" up -d jellyfin sonarr radarr lidarr whisparr \
-       prowlarr qbittorrent bazarr jellyseerr > "$SCRATCH/up.log" 2>&1; then
+       --profile npm \
+       --env-file "$SCRATCH/.env" up -d nginx-proxy-manager jellyfin sonarr \
+       radarr lidarr whisparr prowlarr qbittorrent bazarr jellyseerr \
+       > "$SCRATCH/up.log" 2>&1; then
     bad "docker compose up -d (probe-able services) failed:"
     tail -20 "$SCRATCH/up.log" | sed 's/^/    /'
     exit 1
   fi
-  ok "stack started (jellyfin, *arrs, prowlarr, qBittorrent, bazarr, jellyseerr)"
+  ok "stack started (jellyfin, *arrs, prowlarr, qBittorrent, bazarr, jellyseerr, NPM)"
 
   echo "  Running monarch-init to wire the stack..."
   if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
@@ -469,6 +481,23 @@ EOF
     if curl -sf -o /dev/null http://127.0.0.1:8096/System/Info/Public 2>/dev/null; then break; fi
     n=$((n + 1)); sleep 5
   done
+  echo "  Provisioning NPM proxy hosts for the test domain..."
+  # The drift check verifies the live hosts, so create them first (no cert -
+  # a Let's Encrypt wildcard can't be issued for the throwaway test domain).
+  # The sample .env's NPM admin creds are used; on a first-boot NPM the
+  # script creates that account itself. Source the scratch .env in a
+  # subshell: stage 1c exported check@monarch-check.test for its dry run,
+  # and exported vars win over load_env - without this, provisioning would
+  # create a DIFFERENT admin than the drift check later logs in as.
+  if ! ( set -a; . "$SCRATCH/.env"; set +a; \
+         MONARCH_DOMAIN="$TEST_DOMAIN" python3 scripts/npm-proxy-hosts.py \
+           --hosts-only --skip-ssl ) > "$SCRATCH/npm.log" 2>&1; then
+    bad "npm-proxy-hosts.py provisioning failed:"
+    tail -20 "$SCRATCH/npm.log" | sed 's/^/    /'
+    exit 1
+  fi
+  ok "NPM proxy hosts provisioned from npm-hosts.conf"
+
   echo "  Running the real drift check..."
   sleep 10
   if MONARCH_ENV="$SCRATCH/.env" bash scripts/drift-check.sh --quiet; then
@@ -476,7 +505,7 @@ EOF
   else
     bad "real drift check FAILED against the booted stack"
     echo "  Diagnosing the failing services (logs below):"
-    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr qbittorrent bazarr; do
+    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr qbittorrent bazarr nginx-proxy-manager; do
       st="$(docker inspect -f '{{.State.Status}} (restarts={{.RestartCount}})' "$c" 2>/dev/null || echo down)"
       echo "    $c: $st"
     done

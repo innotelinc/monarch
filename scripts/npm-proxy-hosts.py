@@ -456,6 +456,9 @@ def main():
                         help="skip wildcard certificate creation")
     parser.add_argument("--hosts-only", action="store_true",
                         help="manage proxy hosts only (no certificate work)")
+    parser.add_argument("--check", action="store_true",
+                        help="verify live NPM proxy hosts match npm-hosts.conf "
+                             "(read-only; exit 1 on any drift)")
     args = parser.parse_args()
 
     load_env(os.path.join(REPO_ROOT, ".env"))
@@ -499,7 +502,7 @@ def main():
               f"caching={host_fields['caching']}).")
 
     # ---- wildcard certificate -----------------------------------------
-    if not args.skip_ssl and not args.hosts_only:
+    if not args.check and not args.skip_ssl and not args.hosts_only:
         if args.dry_run:
             print(f"  [dry-run] would request wildcard cert for *.{domain} "
                   f"via {env('NPM_DNS_PROVIDER', 'cloudflare')}")
@@ -543,6 +546,57 @@ def main():
         existing_hosts = client.get_proxy_hosts(token)
     else:
         existing_hosts = []
+
+    # --check: diff the live hosts against npm-hosts.conf and report drift.
+    # The forward host resolves exactly like the upsert loop below, so the
+    # check validates what a run of this script would actually configure.
+    if args.check:
+        drifted = matched = 0
+        desired = {h["domain"] for h in hosts}
+        for host in hosts:
+            domain_name = host["domain"]
+            forward_host = host["forward"] if forward_mode == "container" \
+                else forward_mode
+            existing = client.find_host(existing_hosts, domain_name)
+            if existing is None:
+                print(f"  DRIFT: {domain_name} -> missing in NPM "
+                      f"(expected {forward_host}:{host['port']} "
+                      f"ws={host['websockets']})")
+                drifted += 1
+                continue
+            problems = []
+            got_fwd = existing.get("forward_host")
+            got_port = existing.get("forward_port")
+            got_ws = existing.get(host_fields["websockets"])
+            if got_fwd != forward_host:
+                problems.append(f"forward_host={got_fwd!r} "
+                                f"(expected {forward_host!r})")
+            if str(got_port) != str(host["port"]):
+                problems.append(f"forward_port={got_port!r} "
+                                f"(expected {host['port']})")
+            if bool(got_ws) != bool(host["websockets"]):
+                problems.append(f"websockets={bool(got_ws)} "
+                                f"(expected {bool(host['websockets'])})")
+            if problems:
+                print(f"  DRIFT: {domain_name} -> " + "; ".join(problems))
+                drifted += 1
+            else:
+                print(f"  ok: {domain_name} -> {got_fwd}:{got_port} "
+                      f"(ws={bool(got_ws)})")
+                matched += 1
+        extra = sorted(
+            (h.get("domain_names") or [""])[0] for h in existing_hosts
+            if not any(d in desired for d in (h.get("domain_names") or [])))
+        print("")
+        if drifted:
+            print(f"  CHECK FAILED: {drifted} proxy host(s) drifted from "
+                  f"npm-hosts.conf ({matched} match)")
+            sys.exit(1)
+        print(f"  CHECK OK: all {matched} proxy hosts match npm-hosts.conf")
+        if extra:
+            print(f"  (note: {len(extra)} extra host(s) in NPM not in "
+                  f"npm-hosts.conf: {', '.join(extra)})")
+        sys.exit(0)
 
     for host in hosts:
         domain_name = host["domain"]
