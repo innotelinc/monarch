@@ -1448,9 +1448,20 @@ def _jellyseerr_opener():
 
 
 def _jellyseerr_login(opener):
-    """Sign in as the admin user so the settings endpoints accept the session."""
-    status, _, j = _http(JELLYSEERR_BASE, "/api/v1/auth/login", method="POST",
-                         body={"username": USER, "password": PASS}, opener=opener)
+    """Sign in via Jellyfin (creates the admin user + Jellyfin connection on
+    first run and sets the session cookie)."""
+    status, _, j = _http(JELLYSEERR_BASE, "/api/v1/auth/jellyfin", method="POST",
+                         body={
+                             "username": USER,
+                             "password": PASS,
+                             "hostname": "jellyfin",
+                             "port": 8096,
+                             "useSsl": False,
+                             "urlBase": "",
+                             "email": "admin@innotel.us",
+                             "serverType": 2,  # MediaServerType.JELLYFIN
+                         },
+                         opener=opener)
     return status == 200 and isinstance(j, dict) and bool(j.get("id"))
 
 
@@ -1492,43 +1503,24 @@ def configure_jellyseerr():
         _results["jellyseerr"] = "already initialized"
         return True
 
-    jellyfin_token = ""
-    try:
-        with open(os.path.join(INIT_DIR, "jellyfin-api-key.txt"), "r") as fh:
-            jellyfin_token = fh.read().strip()
-    except OSError:
-        pass
-    if not jellyfin_token:
-        _issues.append("jellyseerr: no Jellyfin token available to connect - "
-                       "finish Jellyfin setup first.")
+    # Sign in via Jellyfin: this creates the admin user (id=1) and stores the
+    # Jellyfin connection (host/port/api key) in one call. The endpoint needs
+    # the Jellyfin server itself, so Jellyfin must be set up first.
+    if not _jellyseerr_login(opener):
+        _issues.append("jellyseerr: could not sign in via Jellyfin (check the "
+                       "Jellyfin admin credentials) - finish the wizard manually "
+                       "at http://<host>:5055.")
         return False
+    _log("Jellyseerr: signed in via Jellyfin (admin user + connection set).")
 
-    # mediaServerType: Jellyfin is 2 in the Jellyfin branch of jellyseerr and
-    # 3 in some forks - try the idempotent one first, then the alternative.
-    payload = {
-        "username": USER,
-        "password": PASS,
-        "email": "admin@innotel.us",
-        "main": {
-            "name": "Jellyfin",
-            "mediaServerType": 2,
-            "url": "http://jellyfin:8096",
-            "externalUrl": "http://localhost:8096",
-            "apiKey": jellyfin_token,
-        },
-    }
-    status = 0
-    for server_type in (2, 3):
-        payload["main"]["mediaServerType"] = server_type
-        status, _, _ = _http(JELLYSEERR_BASE, "/api/v1/settings/initialize",
-                             method="POST", body=payload, opener=opener)
-        if status in (200, 201, 204):
-            _log(f"Jellyseerr initialized against Jellyfin (mediaServerType={server_type}).")
-            break
+    # With the admin session in place, mark the setup wizard as complete.
+    status, _, _ = _http(JELLYSEERR_BASE, "/api/v1/settings/initialize",
+                         method="POST", body={}, opener=opener)
     if status not in (200, 201, 204):
-        _issues.append("jellyseerr: /settings/initialize failed - finish the wizard "
-                       "manually at http://<host>:5055, then connect Jellyfin.")
+        _issues.append(f"jellyseerr: /settings/initialize failed (HTTP {status}) - "
+                       "finish the wizard manually at http://<host>:5055.")
         return False
+    _log("Jellyseerr initialized against Jellyfin.")
 
     # Connect Radarr + Sonarr so requests land in the *arr apps.
     for app, impl in (({"svc": "radarr", "port": 7878, "api": "v3"}, "radarr"),
