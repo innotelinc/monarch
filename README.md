@@ -400,6 +400,53 @@ curl http://localhost:8003/api/analytics | python3 -m json.tool
 
 ***************************
 
+# Live-stack drift check (monarch-drift-check)
+
+`scripts/drift-check.sh` is a **read-only** probe that verifies the running
+stack still matches what `monarch-init` is supposed to maintain. It never
+writes anything — it only reads API keys from `/docker/appdata` and issues
+checks against the services:
+
+| Checked service | Invariants verified |
+|-----------------|---------------------|
+| Sonarr / Radarr / Lidarr / Whisparr | API reachable, forms auth configured, expected media root folder, qBittorrent download client |
+| Prowlarr | qBittorrent download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
+| qBittorrent | WebUI login with the shared credentials, `movies`/`tv`/`music`/`xxx` categories |
+| Jellyfin | admin login, media libraries (Movies / TV Shows / Music / Other) |
+| Jellyseerr | initialized, Jellyfin sign-in enabled |
+| Bazarr | API key readable, basic auth configured |
+| Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
+
+Each failure is printed as a `DRIFT-FAIL:` line and the script **exits
+non-zero**, so it can be run from cron or a systemd timer to alert on drift:
+
+```
+# check once, human-readable
+./scripts/drift-check.sh
+
+# quiet (only DRIFT-FAIL lines on stderr) - for cron/timers
+./scripts/drift-check.sh --quiet
+```
+
+`install-monarch.sh` also installs a **systemd timer** that runs the check
+quietly every 6 hours (with a randomized delay; `Persistent=true` catches up
+after downtime):
+
+```
+sudo systemctl status monarch-drift-check.timer
+journalctl -u monarch-drift-check.service      # last run + any DRIFT-FAIL lines
+```
+
+Drift happens when a container is recreated without the seed (e.g. an app
+reset its own config, or a volume was restored from a stale backup). Re-run
+`monarch-init` to repair it:
+
+```
+sudo docker compose run --rm init
+```
+
+***************************
+
 # Watch parties & offline downloads
 
 Both are **native Jellyfin features**, enabled out of the box:
