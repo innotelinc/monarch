@@ -63,6 +63,9 @@ REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 
 DEFAULT_HOSTS = [
     # subdomain  forward (container name or host port)  port  websockets
+    # "@" is the apex — the base MONARCH_DOMAIN itself, which is the main
+    # interface users log into (the Homarr dashboard).
+    ("@",         "homarr",                   7575, True),
     ("app",       "homarr",                   7575, True),
     ("api",       "billing-api",              8001, False),
     ("auth",      "authentik-server",         9000, False),
@@ -101,8 +104,9 @@ def load_hosts(domain):
     """Subdomain map from npm-hosts.conf (or built-in defaults).
 
     Conf format: one host per line - `<sub> <forward> <port> [websockets]`
-    where forward is the container name (or a host name/port for custom rows).
-    Lines starting with '#' are comments.
+    where forward is the container name (or a host name/port for custom rows)
+    and `@` means the apex (MONARCH_DOMAIN itself — the main interface users
+    log into). Lines starting with '#' are comments.
     """
     hosts_src = os.path.isfile(HOSTS_CONF) and HOSTS_CONF or "built-in defaults"
     if os.path.isfile(HOSTS_CONF):
@@ -123,8 +127,12 @@ def load_hosts(domain):
 
     result = []
     for sub, forward, port, ws in hosts:
+        if sub == "@":
+            host_domain = domain
+        else:
+            host_domain = f"{sub}.{domain}" if sub else domain
         result.append({
-            "domain": f"{sub}.{domain}" if sub else domain,
+            "domain": host_domain,
             "forward": forward,
             "port": int(port),
             "websockets": ws,
@@ -167,6 +175,14 @@ class NpmClient:
                                      {"identity": email, "secret": password})
         if status == 200 and isinstance(body, dict) and body.get("token"):
             return body["token"]
+        if status in (401, 403):
+            print(f"  ERROR: NPM rejected the admin login ({status}).")
+            print("  If this is the first run, open http://<host>:81 once, set your")
+            print("  admin email + password (default admin@example.com / changeme),")
+            print("  then re-run setup.sh.")
+        else:
+            print(f"  ERROR: NPM login failed (HTTP {status}): {body}")
+        return None
 
     def get_schema(self, token=None):
         """Fetch the OpenAPI schema exposed by newer NPM versions (legacy
@@ -201,14 +217,6 @@ class NpmClient:
                            else "websockets_support"),
             "caching": "caching_enabled" if "caching_enabled" in props else "caching",
         }
-        if status in (401, 403):
-            print(f"  ERROR: NPM rejected the admin login ({status}).")
-            print("  If this is the first run, open http://<host>:81 once, set your")
-            print("  admin email + password (default admin@example.com / changeme),")
-            print("  then re-run setup.sh.")
-        else:
-            print(f"  ERROR: NPM login failed (HTTP {status}): {body}")
-        return None
 
     def get_certificates(self, token):
         status, body = self._request("GET", "/api/nginx/certificates", token=token)
@@ -514,8 +522,10 @@ def main():
                          dry_run=args.dry_run)
 
     print("")
-    print("Done. First point DNS at this host:  *.%s  ->  <public IP>" % domain)
-    print("Then open https://app.%s (Homarr) and the rest of the subdomains." % domain)
+    print("Done. First point DNS at this host:  *.%s  and %s  ->  <public IP>"
+          % (domain, domain))
+    print("Then open https://%s (main interface) or https://app.%s (Homarr)"
+          % (domain, domain))
     print("NPM admin UI: https://admin.%s  (or http://<host>:81)" % domain)
 
 

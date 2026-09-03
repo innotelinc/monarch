@@ -46,19 +46,41 @@ cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc. (below)
 ./setup.sh
 ```
 
-`setup.sh` is idempotent and does three things:
+`setup.sh` is idempotent and does four things:
 
 1. Creates `.env` from `.env.sample` when missing (never overwrites).
 2. Installs the stack via `scripts/install-monarch.sh` (Docker, `/data`
    layout, `monarch.service` systemd unit, `docker compose up -d`).
    `setup.sh` deploys in place from this checkout; set `MONARCH_TARGET`
    (e.g. `/opt/monarch`) to install elsewhere.
-3. Auto-configures **Nginx Proxy Manager** through its API
-   (`scripts/npm-proxy-hosts.py`): creates the subdomain proxy hosts and
-   requests a **wildcard Let's Encrypt certificate** via a DNS challenge.
+3. Seeds the **Homarr landing board** (`homarr/board.default.json`) so the
+   apex `MONARCH_DOMAIN` shows the Monarch main interface linking to every
+   subdomain. Boards you have already customized are left untouched.
+4. Auto-configures **Nginx Proxy Manager** through its API
+   (`scripts/npm-proxy-hosts.py`): creates the proxy hosts for the apex
+   (`MONARCH_DOMAIN` itself) plus every subdomain, and requests a
+   **wildcard Let's Encrypt certificate** via a DNS challenge.
 
 Re-run `./setup.sh` any time you change `.env` or `scripts/npm-hosts.conf` —
 the proxy hosts are reconciled in place and the certificate is reused.
+
+**DNS prerequisite (one-time, outside the script):** users reach the stack
+through the apex `https://<MONARCH_DOMAIN>` and its subdomains, so point both
+at this host's public IP before/after running setup (a **wildcard** record
+covers every `*.domain` subdomain; the **apex** record covers the main
+interface). When the BIND/TSIG dynamic DNS options are configured in `.env`
+(`DNS_TSIG_*`), the NPM script writes both A records itself instead:
+
+```
+*.monarch.innotel.us   A   <this host's public IP>
+monarch.innotel.us     A   <this host's public IP>
+```
+
+For Cloudflare the API token in `NPM_DNS_CREDENTIALS` needs
+**Zone:DNS:Edit** permission on the zone (needed for both the DNS A records
+above and the wildcard certificate's DNS challenge). See [Subdomains &
+Nginx Proxy Manager](#subdomains--nginx-proxy-manager-automatic) for the
+full subdomain map.
 
 **Migration note:** the old *arr stack used `ARR_USERNAME` / `ARR_PASSWORD`.
 Monarch uses `MONARCH_USERNAME` / `MONARCH_PASSWORD` — if you have an
@@ -181,10 +203,13 @@ Manager entirely through its API. Two modes (`.env`):
   hostname (instead of `container`). The ports in `npm-hosts.conf` are
   this host's published ports, so they work in both modes.
 
-Either way the script creates (or reconciles) one proxy host per subdomain:
+Either way the script creates (or reconciles) one proxy host per entry. `@`
+is the **apex** — the base domain itself, which is the **main interface**
+users log into (the Homarr dashboard). Everything else is a subdomain:
 
 | Subdomain | Service | Port | WebSockets |
 |-----------|---------|------|------------|
+| `monarch.innotel.us` (apex, `@`) | Homarr dashboard — main login | 7575 | yes |
 | `app.monarch.innotel.us` | Homarr dashboard | 7575 | yes |
 | `api.monarch.innotel.us` | billing-api | 8001 | - |
 | `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
@@ -214,10 +239,13 @@ NPM_DNS_PROVIDER=cloudflare
 NPM_DNS_CREDENTIALS={"auth_token":"your-cloudflare-api-token"}
 ```
 
-One-time DNS prerequisite (outside the script): a wildcard A record
+One-time DNS prerequisite (outside the script): a wildcard A record plus the
+apex A record (when BIND/TSIG dynamic DNS is configured — `DNS_TSIG_*` — the
+script writes both itself):
 
 ```
 *.monarch.innotel.us   A   <this host's public IP>
+monarch.innotel.us     A   <this host's public IP>
 ```
 
 For Cloudflare the API token needs **Zone:DNS:Edit** permission on the zone.
@@ -459,6 +487,40 @@ By default it installs to `/opt/monarch` and creates a login user `monarch`
 the destructive-disk confirmation). The installer is idempotent and
 non-destructive in in-place mode (it excludes `.env` from the payload copy,
 and never overwrites an existing `.env`).
+
+## Fresh-install check
+
+`scripts/fresh-install-check.sh` smoke-checks the fresh-install path — the
+pieces `./setup.sh` runs on a brand-new box — without touching a real
+deployment:
+
+1. Renders a throwaway `.env` from `.env.sample` (random credentials, never
+your real `.env`).
+2. Renders the Homarr landing board (`homarr/board.default.json`) and asserts
+it is valid JSON with no leftover `__DOMAIN__` placeholders, that every tile
+links to the apex or a subdomain declared in `npm-hosts.conf`, and that the
+main-interface (apex) tile is present.
+3. Dry-runs `scripts/npm-proxy-hosts.py` and asserts the apex host
+(`MONARCH_DOMAIN` → Homarr) is planned alongside the subdomains.
+4. Validates `docker-compose.yml` interpolation with the throwaway `.env`
+(uses the docker CLI; no daemon needed).
+
+```
+./scripts/fresh-install-check.sh          # safe anywhere - no Docker needed
+```
+
+Add `--full` to also boot the real `homarr` container on a **disposable
+host/VM** (Docker + sudo required), seed its board exactly like `setup.sh`
+does, and verify it serves the board at `http://127.0.0.1:7575`:
+
+```
+./scripts/fresh-install-check.sh --full
+```
+
+The `--full` stage refuses to run while a live Monarch stack or existing
+`/docker/appdata/homarr` state is detected, and shuts the test container down
+when it finishes (keep it running with `MONARCH_CHECK_KEEP=1`). Override the
+test domain with `MONARCH_CHECK_DOMAIN` (default `monarch-check.test`).
 
 ## Live / install USB
 

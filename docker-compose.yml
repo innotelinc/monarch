@@ -373,7 +373,7 @@ services:
       PUID: 1000
       PGID: 1000
       TZ: ${TZ:-America/New_York}
-      DOMAIN_NAME: tube.innotel.us
+      DOMAIN_NAME: ${CLIPBUCKET_DOMAIN:-tube.${MONARCH_DOMAIN:-monarch.innotel.us}}
       MYSQL_PASSWORD: ClipDB!2026
       UID: 1000
       GID: 1000
@@ -457,7 +457,7 @@ services:
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
       AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
-      AUTHENTIK_BOOTSTRAP_EMAIL: admin@innotel.us
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-admin@${MONARCH_DOMAIN:-monarch.innotel.us}}
     depends_on:
       - authentik-postgresql
       - authentik-redis
@@ -524,7 +524,7 @@ services:
       BILLING_WEBHOOK_SECRET: ${BILLING_WEBHOOK_SECRET:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_replace_me}
       STRIPE_PRICE_ID: price_replace_me
-      BILLING_BASE_URL: https://api.monarch.innotel.us
+      BILLING_BASE_URL: ${BILLING_BASE_URL:-https://api.${MONARCH_DOMAIN:-monarch.innotel.us}}
       BILLING_API_KEY: innotel-billing-api-key
       AUTHENTIK_BASE_URL: http://authentik-server:9000
       AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026

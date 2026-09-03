@@ -7,7 +7,10 @@ set -euo pipefail
 #   1. Creates .env from .env.sample when missing (never overwrites).
 #   2. Installs the stack: Docker (if needed), /data layout, systemd service
 #      and `docker compose up -d` (via scripts/install-monarch.sh).
-#   3. Auto-configures Nginx Proxy Manager through its API
+#   3. Seeds the Homarr landing board (homarr/board.default.json) so the
+#      apex MONARCH_DOMAIN shows the Monarch main interface linking to every
+#      subdomain (skips boards that were already customized).
+#   4. Auto-configures Nginx Proxy Manager through its API
 #      (scripts/npm-proxy-hosts.py): subdomain proxy hosts + wildcard
 #      Let's Encrypt certificate via DNS challenge.
 #
@@ -49,7 +52,27 @@ export MONARCH_NPM_LOCAL=1
 [ "$npm_mode" = "remote" ] && export MONARCH_NPM_LOCAL=0
 bash scripts/install-monarch.sh
 
-# 3. Configure Nginx Proxy Manager (proxy hosts + wildcard SSL)
+# 3. Seed the Homarr landing board (Monarch main interface)
+# Renders homarr/board.default.json (a __DOMAIN__ template) into the Homarr
+# configs dir that docker-compose mounts. Never overwrites a board that was
+# already customized away from the stock Homarr welcome screen.
+homarr_conf="/docker/appdata/homarr/configs/default.json"
+if [ -f "$ROOT/homarr/board.default.json" ]; then
+  if [ -f "$homarr_conf" ] && ! grep -q 'Welcome to Homarr' "$homarr_conf" 2>/dev/null; then
+    echo ""
+    echo "Homarr board already customized - leaving it as-is."
+    echo "  (template: homarr/board.default.json - copy it over $homarr_conf to re-seed)"
+  else
+    mkdir -p "$(dirname "$homarr_conf")"
+    sed "s/__DOMAIN__/${MONARCH_DOMAIN:-monarch.innotel.us}/g" \
+      "$ROOT/homarr/board.default.json" > "$homarr_conf"
+    echo ""
+    echo "Seeded Homarr landing board -> $homarr_conf"
+    docker restart homarr >/dev/null 2>&1 || true
+  fi
+fi
+
+# 4. Configure Nginx Proxy Manager (proxy hosts + wildcard SSL)
 if command -v python3 >/dev/null 2>&1; then
   echo ""
   echo "=== Configuring Nginx Proxy Manager ==="
@@ -62,4 +85,5 @@ fi
 
 echo ""
 echo "Setup finished. The stack is running; open the dashboard:"
+echo "  https://${MONARCH_DOMAIN:-monarch.innotel.us}   (main interface)"
 echo "  https://app.${MONARCH_DOMAIN:-monarch.innotel.us}"
