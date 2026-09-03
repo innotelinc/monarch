@@ -290,7 +290,9 @@ if [ "$FULL" = "1" ]; then
     bad "homarr not healthy after restart"; exit 1
   fi
 
-  code="$(curl -sS -o "$SCRATCH/page.html" -w '%{http_code}' http://127.0.0.1:7575/ || true)"
+  # Homarr redirects / to the active board (e.g. /board/default), so follow
+  # redirects and require a final 200 from the board page.
+  code="$(curl -sSL -o "$SCRATCH/page.html" -w '%{http_code}' http://127.0.0.1:7575/ || true)"
   if [ "$code" = "200" ] && [ -s "$SCRATCH/page.html" ]; then
     ok "homarr serves HTTP 200 at http://127.0.0.1:7575 (board page)"
   else

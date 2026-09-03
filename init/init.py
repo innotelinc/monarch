@@ -12,13 +12,15 @@ python:3.12-slim, stdlib only - no pip packages needed). It configures:
   * Sonarr/Radarr/
     Lidarr/Whisparr - forms authentication with the shared credentials, root
                     folder, qBittorrent download client, hardlink settings
-  * Prowlarr      - forms authentication, qBittorrent download client, and
-                    registers the four *arr apps (full sync)
+  * Prowlarr      - forms authentication, qBittorrent download client,
+                    registers the four *arr apps (full sync), and adds a
+                    FlareSolverr indexer proxy (tag indexers 'cloudflare'
+                    to route them through it)
   * qBittorrent   - verifies the pre-seeded WebUI login, creates the
                     movies/tv/music/xxx categories with save paths
   * Bazarr        - sets auth + connects Sonarr and Radarr (best effort)
-  * Jellyseerr    - initializes against Jellyfin and connects Radarr/Sonarr
-                    (best effort)
+  * Jellyseerr    - initializes against Jellyfin, connects Radarr/Sonarr and
+                    enables Jellyfin sign-in (best effort)
 
 Everything is idempotent - re-running is safe. Problems never kill the
 stack: each step is wrapped, failures are collected and printed at the end
@@ -873,6 +875,59 @@ def configure_prowlarr():
         else:
             _issues.append(f"prowlarr: registering {impl} app failed (HTTP {st})")
 
+    # FlareSolverr indexer proxy (README: tag indexers 'cloudflare' to route
+    # them through it). Creates the proxy + tag on first run - idempotent, and
+    # a no-op for indexers until one is tagged.
+    try:
+        status, _, proxies = _http(PROWLARR_BASE, "/api/v1/indexerproxy",
+                                   headers={"X-Api-Key": key})
+        if status == 200 and isinstance(proxies, list) and any(
+                p.get("implementation") == "FlareSolverr" for p in proxies):
+            _log("Prowlarr: FlareSolverr proxy already exists - skipping.")
+        else:
+            payload = None
+            status, _, schema = _http(PROWLARR_BASE, "/api/v1/indexerproxy/schema",
+                                      headers={"X-Api-Key": key})
+            if status == 200 and isinstance(schema, list):
+                for entry in schema:
+                    if entry.get("implementation") == "FlareSolverr":
+                        payload = entry
+                        break
+            if not payload:
+                _issues.append("prowlarr: no FlareSolverr proxy schema found")
+            else:
+                values = {"host": "http://flaresolverr:8191/", "requestTimeout": 60}
+                for field in payload.get("fields", []):
+                    if field.get("name") in values:
+                        field["value"] = values[field["name"]]
+                # The proxy only routes indexers tagged 'cloudflare'.
+                tag_id = None
+                status, _, tags = _http(PROWLARR_BASE, "/api/v1/tag",
+                                        headers={"X-Api-Key": key})
+                if status == 200 and isinstance(tags, list):
+                    for tag in tags:
+                        if tag.get("label") == "cloudflare":
+                            tag_id = tag.get("id")
+                            break
+                if tag_id is None:
+                    status, _, created = _http(PROWLARR_BASE, "/api/v1/tag",
+                                               method="POST",
+                                               body={"label": "cloudflare"},
+                                               headers={"X-Api-Key": key})
+                    if status in (200, 201) and isinstance(created, dict):
+                        tag_id = created.get("id")
+                payload["name"] = "FlareSolverr"
+                payload["tags"] = [tag_id] if tag_id else []
+                payload["enable"] = True
+                st = prowlarr_post("/api/v1/indexerproxy", payload, key)
+                if st in (200, 201):
+                    _log("Prowlarr: FlareSolverr proxy added - tag an indexer "
+                         "'cloudflare' to route it through the proxy.")
+                else:
+                    _issues.append(f"prowlarr: adding FlareSolverr proxy failed (HTTP {st})")
+    except Exception as exc:  # noqa: BLE001 - best effort
+        _issues.append(f"prowlarr: FlareSolverr proxy setup failed: {exc}")
+
     _results["prowlarr"] = "configured"
     return True
 
@@ -993,6 +1048,37 @@ def _jellyseerr_opener():
     return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
 
 
+def _jellyseerr_login(opener):
+    """Sign in as the admin user so the settings endpoints accept the session."""
+    status, _, j = _http(JELLYSEERR_BASE, "/api/v1/auth/login", method="POST",
+                         body={"username": USER, "password": PASS}, opener=opener)
+    return status == 200 and isinstance(j, dict) and bool(j.get("id"))
+
+
+def _jellyseerr_enable_jellyfin_login(opener):
+    """Settings -> Users: let subscribers sign in with their Jellyfin accounts."""
+    if not _jellyseerr_login(opener):
+        _issues.append("jellyseerr: admin login failed - Jellyfin sign-in was not "
+                       "enabled (set it under Settings -> Users).")
+        return False
+    status, _, main = _http(JELLYSEERR_BASE, "/api/v1/settings/main", opener=opener)
+    if status != 200 or not isinstance(main, dict):
+        _issues.append("jellyseerr: /settings/main unreachable - Jellyfin sign-in "
+                       "was not enabled.")
+        return False
+    if main.get("mediaServerLogin"):
+        _log("Jellyseerr: Jellyfin sign-in already enabled.")
+        return True
+    main["mediaServerLogin"] = True
+    status, _, _ = _http(JELLYSEERR_BASE, "/api/v1/settings/main",
+                         method="PUT", body=main, opener=opener)
+    if status in (200, 201, 204):
+        _log("Jellyseerr: enabled Jellyfin sign-in under Settings -> Users.")
+        return True
+    _issues.append(f"jellyseerr: enabling Jellyfin sign-in failed (HTTP {status}).")
+    return False
+
+
 @arrived("jellyseerr setup")
 def configure_jellyseerr():
     _log("--- Jellyseerr ---")
@@ -1003,6 +1089,7 @@ def configure_jellyseerr():
     status, _, pub = _http(JELLYSEERR_BASE, "/api/v1/settings/public", opener=opener)
     if status == 200 and isinstance(pub, dict) and pub.get("initialized"):
         _log("Jellyseerr already initialized - skipped (it keeps its settings).")
+        _jellyseerr_enable_jellyfin_login(opener)
         _results["jellyseerr"] = "already initialized"
         return True
 
@@ -1092,8 +1179,7 @@ def configure_jellyseerr():
         else:
             _issues.append(f"jellyseerr: connecting {impl} failed (HTTP {st})")
 
-    _log("Jellyseerr: enable 'Jellyfin' as a login method in Settings if you want "
-         "subscribers to sign in with their Jellyfin accounts.")
+    _jellyseerr_enable_jellyfin_login(opener)
     _results["jellyseerr"] = "configured"
     return True
 

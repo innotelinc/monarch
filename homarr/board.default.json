@@ -22,7 +22,7 @@
         "tooltipDescription": "Main interface - your dashboard"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -96,7 +96,7 @@
         "tooltipDescription": "Homarr dashboard"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -170,7 +170,7 @@
         "tooltipDescription": "Jellyfin - stream movies & TV"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -244,7 +244,7 @@
         "tooltipDescription": "Jellyseerr - request movies & shows"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -318,7 +318,7 @@
         "tooltipDescription": "Authentik - sign in & manage your account"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -392,7 +392,7 @@
         "tooltipDescription": "Platform API - billing & provisioning"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -466,7 +466,7 @@
         "tooltipDescription": "Sign up & manage your plan"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -540,7 +540,7 @@
         "tooltipDescription": "IPTV guide - XMLTV listings"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",
@@ -614,7 +614,7 @@
         "tooltipDescription": "Nginx Proxy Manager - admin UI"
       },
       "network": {
-        "enabledStatusChecker": false,
+        "enabledStatusChecker": true,
         "statusCodes": [
           "200",
           "201",

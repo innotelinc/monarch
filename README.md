@@ -135,14 +135,17 @@ the manual setup:
   download client (category `tv` / `movies` / `music` / `xxx`) and enables
   hardlinks + extra-file import
 * **Prowlarr** - sets Forms authentication, adds **qBittorrent** as the
-  download client, and registers Radarr, Sonarr, Lidarr and Whisparr as
-  **Apps** (full sync) - so indexers added in Prowlarr flow to all *arr apps
+  download client, registers Radarr, Sonarr, Lidarr and Whisparr as
+  **Apps** (full sync) - so indexers added in Prowlarr flow to all *arr apps -
+  and adds a **FlareSolverr proxy** (tag an indexer `cloudflare` to route it
+  through the proxy)
 * **qBittorrent** - verifies the WebUI login and creates the `movies`, `tv`,
   `music` and `xxx` categories with their save paths under `/data/torrents`
 * **Bazarr** - sets basic authentication with your credentials and connects
   Sonarr + Radarr so subtitle syncing works
-* **Jellyseerr** - initializes the request manager against **Jellyfin** and
-  connects Radarr + Sonarr
+* **Jellyseerr** - initializes the request manager against **Jellyfin**,
+  connects Radarr + Sonarr, and enables **Jellyfin sign-in** (Settings >
+  Users) so subscribers can log in with their Jellyfin accounts
 
 Watch it work / check for problems:
 
@@ -440,16 +443,12 @@ sudo docker compose up -d
 1. **Add indexers to Prowlarr** (`http://<host>:9696` -> Settings ->
    Indexers) — they flow automatically to Radarr/Sonarr/Lidarr/Whisparr.
    Legal/public-domain sources like **Archive.org** work great
-   (see [Remaining config](#remaining-config)).
-2. **FlareSolverr proxy** - Prowlarr -> Settings -> Indexers -> Indexer
-   Proxies: host `http://flaresolverr:8191`, tag it e.g. `cloudflare`
-   (optional).
-3. **NPM admin password** — set it once in the NPM UI before (re)running
+   (see [Remaining config](#remaining-config)). Tag an indexer `cloudflare`
+   to route it through the **FlareSolverr proxy** that `monarch-init`
+   already registered.
+2. **NPM admin password** — set it once in the NPM UI before (re)running
    `./setup.sh`.
-4. **Jellyseerr** - after first login, check Settings -> Users/Plex: enable
-   **Jellyfin** sign-in if you want subscribers to log in with their Jellyfin
-   accounts.
-5. **Stripe webhooks** — two endpoints, six events each (see
+3. **Stripe webhooks** — two endpoints, six events each (see
    `.env.sample`).
 
 ***************************
@@ -658,9 +657,12 @@ Check Activity -> Queue for "Downloaded - Unable to Import Automatically",
 click Manual Import, confirm the correct movie, and import.
 
 ### FlareSolverr
-The `flaresolverr` container is already in the stack. In Prowlarr:
-Settings > Indexers > + (Add) under Indexer Proxies, select FlareSolverr,
-Host `http://flaresolverr:8191`, tag `cloudflare`, save.
+The `flaresolverr` container is already in the stack and `monarch-init`
+registers a **FlareSolverr proxy** in Prowlarr automatically (tagged
+`cloudflare`). To use it, tag an indexer `cloudflare` in Prowlarr (Settings
+> Indexers > edit indexer > Tags) — indexers without the tag are never
+routed through the proxy. To change its settings manually: Prowlarr >
+Settings > Indexers > Indexer Proxies > edit **FlareSolverr**.
 
 ### Jellyfin hardware acceleration
 Add to the `jellyfin` service:
