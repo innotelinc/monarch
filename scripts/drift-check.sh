@@ -2,16 +2,23 @@
 set -uo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════
-# drift-check.sh - live-stack health check (read-only)
+# drift-check.sh - live-stack health check
 #
 # Probes the running Monarch stack and verifies the invariants monarch-init
 # is supposed to maintain. It NEVER writes anything - it only reads API keys
 # from /docker/appdata and issues GET/POST checks against the services.
 #
+# Single source of truth: what to check comes from
+# /docker/appdata/init/invariants.json, which monarch-init emits from the
+# same constants it configures with (init/init.py build_invariants()). The
+# check can therefore never diverge from what init actually sets up - if an
+# app, root folder, category or library is added there, it is checked here
+# automatically.
+#
 # Exits non-zero when drift is found, so it can be run from a systemd timer
 # (systemd/monarch-drift-check.{service,timer}) or cron to alert on drift.
 #
-# Checks:
+# Checks (all driven by the invariants manifest):
 #   *arr (sonarr/radarr/lidarr/whisparr):
 #     - API reachable
 #     - forms authentication configured (authMethod = forms)
@@ -33,24 +40,104 @@ set -uo pipefail
 #   Authentik:
 #     - LDAP outpost provisioned (when AUTHENTIK_BASE_URL is set)
 #
+# Modes:
+#   (default)            check the live stack, read-only
+#   --quiet              only print DRIFT-FAIL lines (for cron/timers)
+#   --heal               when drift is found, re-run monarch-init, then
+#                        re-verify and report whether the stack healed
+#   --check-manifest     validate a manifest file's schema only (no network) -
+#                        used by fresh-install-check.sh in CI; pass the file
+#                        with MONARCH_INVARIANTS=<path>
+#   --test-telegram      send a test Telegram message (needs .env vars)
+#
 # Usage:
-#   scripts/drift-check.sh            # check the live stack
-#   scripts/drift-check.sh --quiet    # only print drift lines (for cron)
+#   scripts/drift-check.sh
+#   scripts/drift-check.sh --quiet --heal
+#   MONARCH_INVARIANTS=/tmp/inv.json scripts/drift-check.sh --check-manifest
 # ═══════════════════════════════════════════════════════════════════════════
 
 cd "$(dirname "$0")/.." || exit 1
 
 QUIET=0
+HEAL=0
+CHECK_MANIFEST=0
 TEST_TG=0
 for arg in "$@"; do
   case "$arg" in
     --quiet) QUIET=1 ;;
+    --heal) HEAL=1 ;;
+    --check-manifest) CHECK_MANIFEST=1 ;;
     --test-telegram) TEST_TG=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 
 ENV_FILE="${MONARCH_ENV:-.env}"
+MANIFEST="${MONARCH_INVARIANTS:-/docker/appdata/init/invariants.json}"
+
+# ── --check-manifest: validate schema only (no .env, no network) ──────────
+if [ "$CHECK_MANIFEST" -eq 1 ]; then
+  if [ ! -f "$MANIFEST" ]; then
+    echo "DRIFT-FAIL: manifest not found at $MANIFEST" >&2
+    exit 1
+  fi
+  python3 - "$MANIFEST" <<'PYEOF'
+import json, sys
+
+with open(sys.argv[1]) as fh:
+    m = json.load(fh)
+
+errors = []
+if m.get("version") != 1:
+    errors.append("version != 1")
+
+arr = m.get("arr_apps")
+if not isinstance(arr, list) or not arr:
+    errors.append("arr_apps missing/empty")
+else:
+    for a in arr:
+        for key in ("svc", "port", "api", "category", "media", "root_folder"):
+            if key not in a:
+                errors.append(f"arr_apps entry missing '{key}': {a}")
+
+pw = m.get("prowlarr", {})
+if not isinstance(pw.get("apps"), list) or not pw["apps"]:
+    errors.append("prowlarr.apps missing/empty")
+if not isinstance(pw.get("port"), int):
+    errors.append("prowlarr.port missing")
+if not pw.get("download_client"):
+    errors.append("prowlarr.download_client missing")
+
+qbt = m.get("qbt", {})
+if not isinstance(qbt.get("categories"), list) or not qbt["categories"]:
+    errors.append("qbt.categories missing/empty")
+if not isinstance(qbt.get("port"), int):
+    errors.append("qbt.port missing")
+
+jf = m.get("jellyfin", {})
+if not isinstance(jf.get("libraries"), list) or not jf["libraries"]:
+    errors.append("jellyfin.libraries missing/empty")
+if not isinstance(jf.get("port"), int):
+    errors.append("jellyfin.port missing")
+
+for key in ("jellyseerr", "bazarr"):
+    if not isinstance(m.get(key), dict) or not isinstance(m[key].get("port"), int):
+        errors.append(f"{key}.port missing")
+if not isinstance(m.get("bazarr", {}).get("auth_type"), str):
+    errors.append("bazarr.auth_type missing")
+if not m.get("authentik", {}).get("ldap_outpost"):
+    errors.append("authentik.ldap_outpost missing")
+
+if errors:
+    for e in errors:
+        print(f"DRIFT-FAIL: manifest schema: {e}", file=sys.stderr)
+    sys.exit(1)
+print(f"ok: manifest {sys.argv[1]} schema valid")
+sys.exit(0)
+PYEOF
+  exit $?
+fi
+
 if [ ! -f "$ENV_FILE" ]; then
   echo "DRIFT-FAIL: $ENV_FILE not found - cannot read credentials" >&2
   exit 1
@@ -60,6 +147,11 @@ fi
 set -a; source "$ENV_FILE"; set +a
 USER="${MONARCH_USERNAME:-admin}"
 PASS="${MONARCH_PASSWORD:-monarch8}"
+
+if [ ! -f "$MANIFEST" ]; then
+  echo "DRIFT-FAIL: invariants manifest $MANIFEST not found - run monarch-init first" >&2
+  exit 1
+fi
 
 FAILS=0
 FAIL_LINES=()
@@ -106,18 +198,31 @@ api_key_for() {  # api_key_for <svc> -> echoes api key
   return 1
 }
 
+# ── Load the invariants manifest (single source of truth) ─────────────────
+# Each extractor prints rows consumed by the loops below.
+arr_rows()    { python3 -c "
+import json, sys
+m = json.load(open('$MANIFEST'))
+for a in m['arr_apps']:
+    print(f\"{a['svc']}|{a['port']}|{a['api']}|{a['root_folder']}|{a['media']}\")
+"; }
+manifest_val()  { python3 -c "
+import json, sys
+m = json.load(open('$MANIFEST'))
+print(m$1)
+"; }
+manifest_list() { python3 -c "
+import json, sys
+m = json.load(open('$MANIFEST'))
+for x in m$1:
+    print(x)
+"; }
+
 # ───────────────────────────────────────────────────────────────────────────
 # *arr apps
 # ───────────────────────────────────────────────────────────────────────────
-arr_apps=(
-  "sonarr|8989|v3|/data/media/tv|tv"
-  "radarr|7878|v3|/data/media/movies|movies"
-  "lidarr|8686|v1|/data/media/music|music"
-  "whisparr|6969|v3|/data/media/xxx|xxx"
-)
-
-for entry in "${arr_apps[@]}"; do
-  IFS='|' read -r svc port api root media <<< "$entry"
+while IFS='|' read -r svc port api root media; do
+  [ -n "$svc" ] || continue
   key=$(api_key_for "$svc")
   if [ -z "$key" ]; then
     fail "$svc: API key not found in /docker/appdata/$svc/config.xml"
@@ -164,12 +269,12 @@ except Exception:
   [ "$has_qbt" = "1" ] || fail "$svc: qBittorrent download client missing"
 
   say "ok: $svc (auth=$method, root=$([ "$found" = 1 ] && echo yes || echo no), qbt=$([ "$has_qbt" = 1 ] && echo yes || echo no))"
-done
+done < <(arr_rows)
 
 # ───────────────────────────────────────────────────────────────────────────
 # Prowlarr
 # ───────────────────────────────────────────────────────────────────────────
-PROW_PORT=9696
+PROW_PORT=$(manifest_val "['prowlarr']['port']")
 pkey=$(api_key_for "prowlarr")
 if [ -n "$pkey" ]; then
   phdr=(-H "X-Api-Key: $pkey")
@@ -199,12 +304,13 @@ except Exception:
     print('')
 " 2>/dev/null)
   fi
-  for want in Sonarr Radarr Lidarr Whisparr; do
+  while IFS= read -r want; do
+    [ -n "$want" ] || continue
     case ",$apps," in
       *",$want,"*) : ;;
       *) fail "prowlarr: app $want not registered (have: '$apps')" ;;
     esac
-  done
+  done < <(manifest_list "['prowlarr']['apps']")
   say "ok: prowlarr (qbt=$([ "$has_qbt" = 1 ] && echo yes || echo no), apps='$apps')"
 else
   fail "prowlarr: API key not found"
@@ -213,7 +319,7 @@ fi
 # ───────────────────────────────────────────────────────────────────────────
 # qBittorrent (login + categories)
 # ───────────────────────────────────────────────────────────────────────────
-QBT_PORT=8080
+QBT_PORT=$(manifest_val "['qbt']['port']")
 qbt_cj=/tmp/drift-qbt.$$.cookies
 rm -f "$qbt_cj"
 qbt_code=$(curl -s -o /dev/null -w "%{http_code}" -c "$qbt_cj" \
@@ -233,12 +339,13 @@ except Exception:
     print('')
 " 2>/dev/null)
   missing=""
-  for want in movies tv music xxx; do
+  while IFS= read -r want; do
+    [ -n "$want" ] || continue
     case ",$cats," in
       *",$want,"*) : ;;
       *) missing="$missing $want" ;;
     esac
-  done
+  done < <(manifest_list "['qbt']['categories']")
   [ -z "$missing" ] || fail "qbittorrent: categories missing:$missing (have: '$cats')"
   say "ok: qbittorrent (login ok, categories='$cats')"
   rm -f "$qbt_cj"
@@ -247,7 +354,7 @@ fi
 # ───────────────────────────────────────────────────────────────────────────
 # Jellyfin (admin login + libraries)
 # ───────────────────────────────────────────────────────────────────────────
-JF_PORT=8096
+JF_PORT=$(manifest_val "['jellyfin']['port']")
 jf_auth='MediaBrowser Client="Drift Check", Device="Linux", DeviceId="drift-check-001", Version="1.0.0"'
 jf_code=$(curl -s -o /tmp/drift-jf.$$ -w "%{http_code}" \
   -X POST "http://localhost:$JF_PORT/Users/AuthenticateByName" \
@@ -270,12 +377,13 @@ except Exception:
     print('')
 " 2>/dev/null)
     missing=""
-    for want in Movies "TV Shows" Music Other; do
+    while IFS= read -r want; do
+      [ -n "$want" ] || continue
       case ",$libs," in
         *",$want,"*) : ;;
         *) missing="$missing '$want'" ;;
       esac
-    done
+    done < <(manifest_list "['jellyfin']['libraries']")
     [ -z "$missing" ] || fail "jellyfin: libraries missing:$missing (have: '$libs')"
     say "ok: jellyfin (login ok, libraries='$libs')"
   fi
@@ -285,7 +393,7 @@ rm -f /tmp/drift-jf.$$
 # ───────────────────────────────────────────────────────────────────────────
 # Jellyseerr (initialized + Jellyfin sign-in)
 # ───────────────────────────────────────────────────────────────────────────
-JSERR_PORT=5055
+JSERR_PORT=$(manifest_val "['jellyseerr']['port']")
 js_body=$(json_get "http://localhost:$JSERR_PORT/api/v1/settings/public")
 if [ -z "$js_body" ]; then
   fail "jellyseerr: /api/v1/settings/public unreachable"
@@ -300,7 +408,8 @@ fi
 # ───────────────────────────────────────────────────────────────────────────
 # Bazarr (auth configured)
 # ───────────────────────────────────────────────────────────────────────────
-BZ_PORT=6767
+BZ_PORT=$(manifest_val "['bazarr']['port']")
+BZ_AUTH_TYPE=$(manifest_val "['bazarr']['auth_type']")
 bz_key=""
 if [ -f /docker/appdata/bazarr/config/config.yaml ]; then
   bz_key=$(grep -oP '^\s*apikey:\s*\K[^\s]+' /docker/appdata/bazarr/config/config.yaml 2>/dev/null | head -1)
@@ -313,7 +422,7 @@ else
     fail "bazarr: /api/system/settings unreachable with API key"
   else
     bz_type=$(echo "$bz_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('type') or '')" 2>/dev/null)
-    [ "$bz_type" = "basic" ] || fail "bazarr: basic auth not configured (type='$bz_type')"
+    [ "$bz_type" = "$BZ_AUTH_TYPE" ] || fail "bazarr: basic auth not configured (type='$bz_type')"
     say "ok: bazarr (auth type='$bz_type')"
   fi
 fi
@@ -321,6 +430,7 @@ fi
 # ───────────────────────────────────────────────────────────────────────────
 # Authentik LDAP outpost (only when the API is reachable/configured)
 # ───────────────────────────────────────────────────────────────────────────
+AK_OUTPOST=$(manifest_val "['authentik']['ldap_outpost']")
 if [ -n "${AUTHENTIK_BASE_URL:-}" ] && [ -n "${AUTHENTIK_BOOTSTRAP_TOKEN:-}" ]; then
   ak_base="${AUTHENTIK_BASE_URL%/}"
   ak_code=$(curl -s -o /tmp/drift-ak.$$ -w "%{http_code}" \
@@ -331,12 +441,12 @@ if [ -n "${AUTHENTIK_BASE_URL:-}" ] && [ -n "${AUTHENTIK_BOOTSTRAP_TOKEN:-}" ]; 
 import sys, json
 try:
     d = json.load(open('/tmp/drift-ak.$$'))
-    hits = [o.get('name','') for o in d.get('results',[]) if o.get('name') == '${AUTHENTIK_LDAP_OUTPOST:-jellyfin-ldap}']
+    hits = [o.get('name','') for o in d.get('results',[]) if o.get('name') == '$AK_OUTPOST']
     print('yes' if hits else 'no')
 except Exception:
     print('no')
 " 2>/dev/null)
-    [ "$ak_outpost" = "yes" ] || fail "authentik: LDAP outpost ${AUTHENTIK_LDAP_OUTPOST:-jellyfin-ldap} not found"
+    [ "$ak_outpost" = "yes" ] || fail "authentik: LDAP outpost $AK_OUTPOST not found"
     say "ok: authentik (LDAP outpost present)"
   else
     fail "authentik: outposts API unreachable (HTTP $ak_code)"
@@ -346,6 +456,7 @@ fi
 
 rm -f /tmp/drift-body.$$
 
+# ── --test-telegram: verify the bot without waiting for drift ─────────────
 if [ "$TEST_TG" -eq 1 ]; then
   if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
     echo "DRIFT-FAIL: --test-telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env" >&2
@@ -356,6 +467,30 @@ if [ "$TEST_TG" -eq 1 ]; then
     exit 0
   fi
   exit 1
+fi
+
+# ── --heal: re-run monarch-init on drift, then re-verify ──────────────────
+if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
+  echo "drift-check: $FAILS issue(s) found - re-running monarch-init to heal..." >&2
+  if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx monarch-init; then
+    # Re-run the existing one-shot container (created by `docker compose up`)
+    # and wait for it to exit. init waits up to 15 min per service on first
+    # boot; on a warm stack it exits in a minute or two.
+    docker start monarch-init >/dev/null 2>&1 || true
+    for _ in $(seq 1 450); do
+      st=$(docker inspect -f '{{.State.Status}}' monarch-init 2>/dev/null || echo gone)
+      [ "$st" = "exited" ] && break
+      sleep 2
+    done
+  else
+    # No container yet (fresh stack): docker compose run is synchronous, so
+    # this blocks until init finishes on its own.
+    docker compose -f docker-compose.yml run --rm monarch-init >/dev/null 2>&1 || true
+  fi
+  echo "drift-check: monarch-init finished - re-verifying..." >&2
+  # Re-run the check suite WITHOUT --heal (avoids a heal loop). The exit code
+  # of that run reports whether the stack healed.
+  exec bash "$0" --quiet
 fi
 
 if [ "$FAILS" -gt 0 ]; then

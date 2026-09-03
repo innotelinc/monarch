@@ -6,7 +6,10 @@
 # (a disposable host, exactly what the --full stage requires):
 #   • stage 1 (offline rehearsal) — throwaway .env rendering, Homarr board
 #     template validation + proxy-map cross-check, NPM dry-run (apex host),
-#     and docker-compose.yml interpolation with no .env present.
+#     docker-compose.yml interpolation with no .env present, and the
+#     drift-check <-> monarch-init invariants lockstep (builds the manifest
+#     from init.py and validates it with drift-check --check-manifest, so the
+#     drift check can never diverge from what init configures).
 #   • stage 2 (live) — boots the real homarr container, seeds its board the
 #     same way setup.sh does, and verifies it serves HTTP 200 at :7575.
 #

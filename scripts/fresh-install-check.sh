@@ -233,6 +233,48 @@ else
   echo "  (skipped - docker CLI or the compose plugin not found; install docker-compose-v2 to enable this check)"
 fi
 
+# ── Stage 1e: drift-check <-> monarch-init lockstep ───────────────────────
+# The drift check is driven by the invariants manifest that monarch-init
+# emits (init/init.py build_invariants()). Build that manifest here from
+# init.py itself and validate it with drift-check --check-manifest, so the
+# check and the configurator can never diverge: if init.py adds/renames an
+# app, category, library or port, this stage fails until the check agrees.
+echo ""
+echo "--- drift-check <-> monarch-init invariants lockstep ---"
+if python3 - "$SCRATCH/invariants.json" <<'PYEOF'
+import json, os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "init"))
+import init as monarch_init
+with open(sys.argv[1], "w") as fh:
+    json.dump(monarch_init.build_invariants(), fh, indent=2)
+PYEOF
+then
+  ok "monarch-init build_invariants() emits a manifest"
+else
+  bad "could not import init.py / build_invariants():"
+fi
+if MONARCH_INVARIANTS="$SCRATCH/invariants.json" bash scripts/drift-check.sh --check-manifest; then
+  ok "drift-check accepts the emitted manifest (lockstep held)"
+else
+  bad "drift-check rejected the manifest monarch-init emits - the two have diverged"
+fi
+if python3 - "$SCRATCH/invariants.json" <<'PYEOF'
+import json, sys
+m = json.load(open(sys.argv[1]))
+for a in m["arr_apps"]:
+    port = a["port"]
+    media = a["media"]
+    root = a["root_folder"]
+    assert root == f"/data/media/{media}", f"{a['svc']}: root {root} != /data/media/{media}"
+    assert isinstance(port, int) and 1024 <= port <= 65535, f"{a['svc']}: bad port {port}"
+print(f"ok: {len(m['arr_apps'])} *arr apps, {len(m['qbt']['categories'])} qbt categories, {len(m['jellyfin']['libraries'])} jellyfin libraries")
+PYEOF
+then
+  ok "manifest content is internally consistent"
+else
+  bad "manifest content inconsistent (root folders / ports / counts)"
+fi
+
 # ── Stage 2 (--full): live Homarr boot + render check ─────────────────────
 if [ "$FULL" = "1" ]; then
   echo ""

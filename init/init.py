@@ -31,6 +31,8 @@ Secrets/state written under /docker/appdata/init/:
   * jellyfin-api-key.txt  - Jellyfin admin token (use as JELLYFIN_API_KEY in
                             .env for the subscription platform)
   * status.json           - per-service result of the last run
+  * invariants.json       - what monarch-init is supposed to maintain (the
+                            drift check asserts against this)
 """
 
 import base64
@@ -81,6 +83,24 @@ JELLYFIN_LIBRARIES = [
     {"name": "Music", "type": "music", "path": "/data/media/music"},
     {"name": "Other", "type": "mixed", "path": "/data/media/xxx"},
 ]
+
+# qBittorrent categories matching each *arr root folder (hardlinks-friendly
+# layout). Shared with configure_qbittorrent() AND emitted in the invariants
+# manifest so the drift check asserts the exact same categories.
+QBT_CATEGORIES = {
+    "movies": "/data/torrents/movies",
+    "tv": "/data/torrents/tv",
+    "music": "/data/torrents/music",
+    "xxx": "/data/torrents/xxx",
+}
+
+# Host-published ports (must match docker-compose.yml) - used for the
+# invariants manifest the drift check probes on localhost.
+PORTS = {
+    "sonarr": 8989, "radarr": 7878, "lidarr": 8686, "whisparr": 6969,
+    "prowlarr": 9696, "qbt": 8080, "jellyfin": 8096,
+    "jellyseerr": 5055, "bazarr": 6767,
+}
 
 # Authentik connection (used to provision the LDAP outpost Jellyfin logins
 # authenticate against, and the paid_users access gate).
@@ -1353,12 +1373,7 @@ def configure_qbittorrent():
         return False
 
     # Categories matching each *arr root folder (hardlinks-friendly layout).
-    categories = {
-        "movies": "/data/torrents/movies",
-        "tv": "/data/torrents/tv",
-        "music": "/data/torrents/music",
-        "xxx": "/data/torrents/xxx",
-    }
+    categories = QBT_CATEGORIES
     status, _, existing = _http(QBT_BASE, "/api/v2/torrents/categories", opener=opener)
     if status == 200 and isinstance(existing, dict):
         have = set(existing.keys())
@@ -1615,6 +1630,47 @@ def configure_jellyseerr():
 # Main
 # ---------------------------------------------------------------------------
 
+def build_invariants() -> dict:
+    """The invariants monarch-init is supposed to maintain, as data.
+
+    Written to /docker/appdata/init/invariants.json so scripts/drift-check.sh
+    asserts against EXACTLY what monarch-init configures - one source of
+    truth means the two can never drift apart. Ports are the host-published
+    ones (drift-check probes localhost).
+    """
+    arr_apps = []
+    for app in MONARCH_APPS:
+        arr_apps.append({
+            "svc": app["svc"],
+            "port": PORTS[app["svc"]],
+            "api": app["api"],
+            "category": app["category"],
+            "media": app["media"],
+            "root_folder": f"/data/media/{app['media']}",
+        })
+    return {
+        "version": 1,
+        "arr_apps": arr_apps,
+        "prowlarr": {
+            "port": PORTS["prowlarr"],
+            "apps": [PROWLARR_APP_IMPLS[app["svc"]] for app in MONARCH_APPS],
+            "download_client": "QBittorrent",
+        },
+        "qbt": {
+            "port": PORTS["qbt"],
+            "categories": sorted(QBT_CATEGORIES.keys()),
+            "save_path": "/data/torrents",
+        },
+        "jellyfin": {
+            "port": PORTS["jellyfin"],
+            "libraries": [lib["name"] for lib in JELLYFIN_LIBRARIES],
+        },
+        "jellyseerr": {"port": PORTS["jellyseerr"]},
+        "bazarr": {"port": PORTS["bazarr"], "auth_type": "basic"},
+        "authentik": {"ldap_outpost": LDAP_OUTPOST_NAME},
+    }
+
+
 def main() -> int:
     _log(f"monarch-init starting (user '{USER}').")
     _log("Timeout for each service: up to 15 minutes on first boot while images start.")
@@ -1634,8 +1690,12 @@ def main() -> int:
         with open(os.path.join(INIT_DIR, "status.json"), "w", encoding="utf-8") as fh:
             json.dump({"user": USER, "results": _results, "issues": _issues}, fh, indent=2)
         ensure_owner(os.path.join(INIT_DIR, "status.json"))
+        with open(os.path.join(INIT_DIR, "invariants.json"), "w", encoding="utf-8") as fh:
+            json.dump(build_invariants(), fh, indent=2)
+        ensure_owner(os.path.join(INIT_DIR, "invariants.json"))
+        _log(f"invariants manifest written to {INIT_DIR}/invariants.json")
     except OSError as exc:
-        _log(f"WARNING: could not write {INIT_DIR}/status.json: {exc}")
+        _log(f"WARNING: could not write {INIT_DIR}/status.json or invariants.json: {exc}")
 
     _log("=" * 60)
     _log("SUMMARY")

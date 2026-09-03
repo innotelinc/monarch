@@ -12,10 +12,13 @@ WorkingDirectory=/opt/monarch
 # Probes the running stack and verifies monarch-init's invariants without
 # writing anything. Exits non-zero with DRIFT-FAIL lines on the journal when
 # something drifted (e.g. a container was recreated without the seed, or an
-# app's auth got reset). See scripts/drift-check.sh. The script path is
-# relative to WorkingDirectory (rewritten to the install target by
+# app's auth got reset). --heal re-runs monarch-init automatically when
+# drift is found, then re-verifies. See scripts/drift-check.sh. The script
+# path is relative to WorkingDirectory (rewritten to the install target by
 # install-monarch.sh).
-ExecStart=/usr/bin/bash ./scripts/drift-check.sh --quiet
+ExecStart=/usr/bin/bash ./scripts/drift-check.sh --quiet --heal
+# --heal re-runs monarch-init, which can take a while on a cold stack.
+TimeoutStartSec=1800s
 
 StandardOutput=journal
 StandardError=journal

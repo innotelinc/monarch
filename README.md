@@ -402,10 +402,10 @@ curl http://localhost:8003/api/analytics | python3 -m json.tool
 
 # Live-stack drift check (monarch-drift-check)
 
-`scripts/drift-check.sh` is a **read-only** probe that verifies the running
-stack still matches what `monarch-init` is supposed to maintain. It never
-writes anything — it only reads API keys from `/docker/appdata` and issues
-checks against the services:
+`scripts/drift-check.sh` probes the running stack and verifies it still
+matches what `monarch-init` is supposed to maintain. It never writes
+anything — it only reads API keys from `/docker/appdata` and issues checks
+against the services:
 
 | Checked service | Invariants verified |
 |-----------------|---------------------|
@@ -417,6 +417,15 @@ checks against the services:
 | Bazarr | API key readable, basic auth configured |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
 
+**Single source of truth:** what to check comes from
+`/docker/appdata/init/invariants.json`, which `monarch-init` emits from the
+same constants it configures with (`init/init.py` → `build_invariants()`).
+The check therefore can never diverge from what init actually sets up — if
+an app, root folder, category or library is added there, it is checked here
+automatically. The fresh-install CI check builds that manifest from `init.py`
+and validates it against `drift-check --check-manifest` on every PR, so the
+lockstep is enforced before merge.
+
 Each failure is printed as a `DRIFT-FAIL:` line and the script **exits
 non-zero**, so it can be run from cron or a systemd timer to alert on drift:
 
@@ -426,11 +435,16 @@ non-zero**, so it can be run from cron or a systemd timer to alert on drift:
 
 # quiet (only DRIFT-FAIL lines on stderr) - for cron/timers
 ./scripts/drift-check.sh --quiet
+
+# when drift is found, re-run monarch-init automatically, then re-verify
+./scripts/drift-check.sh --quiet --heal
 ```
 
 `install-monarch.sh` also installs a **systemd timer** that runs the check
 quietly every 6 hours (with a randomized delay; `Persistent=true` catches up
-after downtime):
+after downtime), **auto-healing**: the service runs with `--heal`, so a
+drifted stack repairs itself by re-running `monarch-init` and only alerts
+(Telegram) if the re-verify still finds problems:
 
 ```
 sudo systemctl status monarch-drift-check.timer
@@ -449,10 +463,11 @@ Telegram message listing every `DRIFT-FAIL` line when drift is found:
 
 Drift happens when a container is recreated without the seed (e.g. an app
 reset its own config, or a volume was restored from a stale backup). Re-run
-`monarch-init` to repair it:
+`monarch-init` to repair it (the timer's `--heal` mode does this
+automatically):
 
 ```
-sudo docker compose run --rm init
+sudo docker start monarch-init        # re-runs the one-shot init container
 ```
 
 ***************************
