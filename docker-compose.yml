@@ -99,7 +99,10 @@ services:
   whisparr:
     <<: *common-keys
     container_name: whisparr
-    image: ghcr.io/hotio/whisparr:latest
+    # v2-develop (not latest): hotio's `latest` is frozen at v2.2.0-release.231,
+    # which predates Whisparr's qBittorrent 5.2.x support (empty 204 login body
+    # is treated as a failed auth). v2-develop includes that fix.
+    image: ghcr.io/hotio/whisparr:v2-develop
     ports:
       - 6969:6969
     volumes:

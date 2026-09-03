@@ -882,6 +882,9 @@ def set_monarch_app_auth(base, api, key):
     j["authenticationMethod"] = "forms"
     j["username"] = USER
     j["password"] = PASS
+    # Newer *arr versions require passwordConfirmation to match password or
+    # the PUT is rejected with HTTP 400 (and an empty body).
+    j["passwordConfirmation"] = PASS
     status, _, _ = _http(base, f"/api/{api}/config/host", method="PUT", body=j,
                          headers={"X-Api-Key": key})
     if status in (200, 202):
@@ -889,7 +892,7 @@ def set_monarch_app_auth(base, api, key):
     return False, f"auth not applied (HTTP {status})"
 
 
-def ensure_root_folder(base, api, key, path, want_name=None):
+def ensure_root_folder(base, api, key, path, want_name=None, extra=None):
     status, _, j = _http(base, f"/api/{api}/rootfolder", headers={"X-Api-Key": key})
     if status == 200 and isinstance(j, list):
         if any(str(rf.get("path", "")).rstrip("/") == path.rstrip("/") for rf in j):
@@ -897,11 +900,25 @@ def ensure_root_folder(base, api, key, path, want_name=None):
     body = {"path": path}
     if want_name:
         body["name"] = want_name
+    if extra:
+        body.update(extra)
     status, _, _ = _http(base, f"/api/{api}/rootfolder", method="POST", body=body,
                          headers={"X-Api-Key": key})
     if status in (200, 201):
         return True, "added"
     return False, f"could not add (HTTP {status})"
+
+
+def lidarr_root_folder_defaults(base, key):
+    """Lidarr v2 rejects rootfolder POSTs without profile IDs."""
+    extra = {}
+    st, _, profs = _http(base, "/api/v1/qualityprofile", headers={"X-Api-Key": key})
+    if st == 200 and isinstance(profs, list) and profs:
+        extra["defaultQualityProfileId"] = profs[0]["id"]
+    st, _, profs = _http(base, "/api/v1/metadataprofile", headers={"X-Api-Key": key})
+    if st == 200 and isinstance(profs, list) and profs:
+        extra["defaultMetadataProfileId"] = profs[0]["id"]
+    return extra
 
 
 def ensure_qbt_client(base, api, key, category):
@@ -990,7 +1007,8 @@ def configure_monarch_apps():
 
         media_root = f"/data/media/{app['media']}"
         want_name = "Music" if svc == "lidarr" else None
-        ok, msg = ensure_root_folder(base, api, key, media_root, want_name)
+        extra = lidarr_root_folder_defaults(base, key) if svc == "lidarr" else None
+        ok, msg = ensure_root_folder(base, api, key, media_root, want_name, extra)
         _log(f"{svc}: root folder {media_root} -> {msg}")
         if not ok and "exists" not in msg:
             _issues.append(f"{svc}: root folder {media_root} {msg}")
@@ -1038,6 +1056,9 @@ def configure_prowlarr():
         j["authenticationMethod"] = "forms"
         j["username"] = USER
         j["password"] = PASS
+        # Newer versions require passwordConfirmation to match password or
+        # the PUT is rejected with HTTP 400.
+        j["passwordConfirmation"] = PASS
         status, _, _ = _http(PROWLARR_BASE, "/api/v1/config/host", method="PUT",
                              body=j, headers={"X-Api-Key": key})
         _log(f"Prowlarr: forms auth set (HTTP {status})")

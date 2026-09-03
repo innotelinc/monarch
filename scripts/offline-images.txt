@@ -6,7 +6,7 @@ ghcr.io/seerr-team/seerr:latest
 ghcr.io/hotio/sonarr:latest
 ghcr.io/hotio/radarr:latest
 ghcr.io/hotio/lidarr:latest
-ghcr.io/hotio/whisparr:latest
+ghcr.io/hotio/whisparr:v2-develop
 ghcr.io/hotio/prowlarr:latest
 ghcr.io/hotio/bazarr:latest
 ghcr.io/ajnart/homarr:latest

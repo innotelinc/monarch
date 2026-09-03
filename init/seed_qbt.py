@@ -87,6 +87,10 @@ def main() -> int:
     salt = os.urandom(SALT_LEN)
     password_line = f'WebUI\\Password_PBKDF2="{pbkdf2_hash(PASS, salt)}"'
     username_line = f"WebUI\\Username={USER}"
+    # The *arr apps connect to qBittorrent by container name (qbittorrent:8080),
+    # which fails qBittorrent's default Host-header validation. Keep it off so
+    # their download-client connection tests / API calls are accepted.
+    host_header_line = "WebUI\\HostHeaderValidation=false"
 
     if existing:
         # Merge into the file: keep the rest of the user's preferences and make
@@ -95,7 +99,7 @@ def main() -> int:
         lines = existing.splitlines()
 
         # Replace any existing WebUI keys wherever they sit.
-        replaced_user = replaced_pass = False
+        replaced_user = replaced_pass = replaced_host = False
         for i, line in enumerate(lines):
             if re.match(r"WebUI\\Password_PBKDF2\s*=", line):
                 lines[i] = password_line
@@ -103,6 +107,9 @@ def main() -> int:
             elif re.match(r"WebUI\\Username\s*=", line):
                 lines[i] = username_line
                 replaced_user = True
+            elif re.match(r"WebUI\\HostHeaderValidation\s*=", line):
+                lines[i] = host_header_line
+                replaced_host = True
 
         prefs_at = next(
             (i for i, line in enumerate(lines) if line.startswith("[Preferences]")), None
@@ -112,13 +119,15 @@ def main() -> int:
             lines = ["[Preferences]"] + lines
             prefs_at = 0
 
-        if not (replaced_user and replaced_pass):
+        if not (replaced_user and replaced_pass and replaced_host):
             # Slot the missing keys in right after the [Preferences] header.
             additions = []
             if not replaced_user:
                 additions.append(username_line)
             if not replaced_pass:
                 additions.append(password_line)
+            if not replaced_host:
+                additions.append(host_header_line)
             lines = lines[: prefs_at + 1] + additions + lines[prefs_at + 1:]
         body = "\n".join(lines) + "\n"
     else:
@@ -127,6 +136,7 @@ def main() -> int:
             "WebUI\\Address=*\n"
             f"{username_line}\n"
             f"{password_line}\n"
+            f"{host_header_line}\n"
         )
 
     try:
