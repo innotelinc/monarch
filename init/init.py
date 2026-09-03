@@ -1030,12 +1030,20 @@ def configure_monarch_apps():
 # ---------------------------------------------------------------------------
 
 def prowlarr_post(path, body, key):
-    """POST with fallback for the renamed applications/downloadclients endpoints."""
+    """POST with fallback for the renamed applications/downloadclients endpoints.
+
+    Newer Prowlarr versions renamed /api/v1/apps to /api/v1/applications; the
+    old name answers 405 (not 404), so treat both as "try the next candidate".
+    """
+    seen = set()
     for cand in (path, path.replace("/apps", "/applications"),
                  path.replace("/downloadclient", "/downloadclients")):
+        if cand in seen:
+            continue
+        seen.add(cand)
         status, _, _ = _http(PROWLARR_BASE, cand, method="POST", body=body,
                              headers={"X-Api-Key": key})
-        if status != 404:
+        if status not in (404, 405):
             return status
     return 404
 
@@ -1065,40 +1073,53 @@ def configure_prowlarr():
     else:
         _log("Prowlarr: auth already configured")
 
-    # qBittorrent download client.
-    status, _, schema = _http(PROWLARR_BASE, "/api/v1/downloadclient/schema",
-                              headers={"X-Api-Key": key})
-    if status == 200 and isinstance(schema, list):
-        payload = None
-        for entry in schema:
-            if entry.get("implementation") == "QBittorrent":
-                payload = entry
-                break
-        if payload:
-            values = {"host": "qbittorrent", "port": 8080, "useSsl": False,
-                      "username": USER, "password": PASS, "category": "", "urlBase": ""}
-            for field in payload.get("fields", []):
-                if field.get("name") in values:
-                    field["value"] = values[field["name"]]
-            payload["name"] = "qBittorrent"
-            payload["enable"] = True
-            st = prowlarr_post("/api/v1/downloadclient", payload, key)
-            _log(f"Prowlarr: qBittorrent download client -> HTTP {st}")
-        else:
-            _issues.append("prowlarr: no QBittorrent schema found")
+    # qBittorrent download client (skip if one already exists).
+    status, _, clients = _http(PROWLARR_BASE, "/api/v1/downloadclient",
+                               headers={"X-Api-Key": key})
+    if status == 200 and isinstance(clients, list) and any(
+            c.get("implementation") == "QBittorrent" for c in clients):
+        _log("Prowlarr: qBittorrent download client already exists - skipping.")
     else:
-        _issues.append(f"prowlarr: downloadclient schema unreachable (HTTP {status})")
-
-    # Register the *arr apps.
-    status, _, apps = _http(PROWLARR_BASE, "/api/v1/apps", headers={"X-Api-Key": key})
-    if status == 200 and isinstance(apps, list):
-        existing = {a.get("implementation") for a in apps}
-    else:
-        existing = set()
-    status, _, schema = _http(PROWLARR_BASE, "/api/v1/apps/schema", headers={"X-Api-Key": key})
-    if status != 200 or not isinstance(schema, list):
-        status, _, schema = _http(PROWLARR_BASE, "/api/v1/applications/schema",
+        status, _, schema = _http(PROWLARR_BASE, "/api/v1/downloadclient/schema",
                                   headers={"X-Api-Key": key})
+        if status == 200 and isinstance(schema, list):
+            payload = None
+            for entry in schema:
+                if entry.get("implementation") == "QBittorrent":
+                    payload = entry
+                    break
+            if payload:
+                values = {"host": "qbittorrent", "port": 8080, "useSsl": False,
+                          "username": USER, "password": PASS, "category": "", "urlBase": ""}
+                for field in payload.get("fields", []):
+                    if field.get("name") in values:
+                        field["value"] = values[field["name"]]
+                payload["name"] = "qBittorrent"
+                payload["enable"] = True
+                st = prowlarr_post("/api/v1/downloadclient", payload, key)
+                _log(f"Prowlarr: qBittorrent download client -> HTTP {st}")
+            else:
+                _issues.append("prowlarr: no QBittorrent schema found")
+        else:
+            _issues.append(f"prowlarr: downloadclient schema unreachable (HTTP {status})")
+
+    # Register the *arr apps. Newer Prowlarr renamed the resource to
+    # /api/v1/applications; try the modern name first, fall back to /apps.
+    def prowlarr_list(path):
+        for cand in (path, path.replace("/applications", "/apps")):
+            status, _, j = _http(PROWLARR_BASE, cand, headers={"X-Api-Key": key})
+            if status == 200 and isinstance(j, list):
+                return j
+        return None
+
+    apps = prowlarr_list("/api/v1/applications")
+    existing = {a.get("implementation") for a in apps} if apps else set()
+    schema = None
+    for cand in ("/api/v1/applications/schema", "/api/v1/apps/schema"):
+        status, _, j = _http(PROWLARR_BASE, cand, headers={"X-Api-Key": key})
+        if status == 200 and isinstance(j, list):
+            schema = j
+            break
     if not isinstance(schema, list):
         _issues.append("prowlarr: apps schema unreachable")
         return False
