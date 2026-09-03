@@ -11,6 +11,16 @@ qBittorrent.conf *before* the container first starts.
 This container is gated by `qbittorrent -> depends_on monarch-seed
 (service_completed_successfully)` so the config always lands first.
 
+The stack uses the official `ghcr.io/qbittorrent/docker-qbittorrent-nox`
+image, which launches qBittorrent with `--profile=/config`. qBittorrent 5.x
+resolves that profile to the nested config path:
+
+    /config/qBittorrent/config/qBittorrent.conf
+
+(not the flat `/config/qBittorrent/qBittorrent.conf` that the linuxserver
+image used). The entrypoint creates that file on first boot, so seeding it
+beforehand is what makes the known login stick.
+
 The WebUI password is stored as a PBKDF2-HMAC-SHA512 hash (16-byte salt,
 64-byte digest, 100 000 iterations), formatted as:
 
@@ -33,7 +43,9 @@ import sys
 USER = os.environ.get("MONARCH_USERNAME", "admin")
 PASS = os.environ.get("MONARCH_PASSWORD", "monarch8")
 
-CONFIG_DIR = "/config/qBittorrent"
+# qBittorrent launched with --profile=/config resolves its 5.x config here.
+# (The linuxserver image used the flat CONFIG_DIR/qBittorrent.conf instead.)
+CONFIG_DIR = "/config/qBittorrent/config"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "qBittorrent.conf")
 
 PBKDF2_ITERATIONS = 100_000
@@ -78,11 +90,11 @@ def main() -> int:
 
     if existing:
         # Merge into the file: keep the rest of the user's preferences and make
-        # sure the WebUI keys land inside the [Preferences] section (before the
-        # first other section header), not at the end of the file.
+        # sure the WebUI keys land inside the [Preferences] section, not at the
+        # end of the file (QSettings would ignore keys in the wrong section).
         lines = existing.splitlines()
-        if not lines or not lines[0].startswith("[Preferences]"):
-            lines = ["[Preferences]"] + lines
+
+        # Replace any existing WebUI keys wherever they sit.
         replaced_user = replaced_pass = False
         for i, line in enumerate(lines):
             if re.match(r"WebUI\\Password_PBKDF2\s*=", line):
@@ -91,18 +103,23 @@ def main() -> int:
             elif re.match(r"WebUI\\Username\s*=", line):
                 lines[i] = username_line
                 replaced_user = True
+
+        prefs_at = next(
+            (i for i, line in enumerate(lines) if line.startswith("[Preferences]")), None
+        )
+        if prefs_at is None:
+            # No [Preferences] section yet: open one at the very top.
+            lines = ["[Preferences]"] + lines
+            prefs_at = 0
+
         if not (replaced_user and replaced_pass):
-            insert_at = len(lines)
-            for i, line in enumerate(lines):
-                if i > 0 and line.startswith("[") and not line.startswith("[Preferences]"):
-                    insert_at = i
-                    break
+            # Slot the missing keys in right after the [Preferences] header.
             additions = []
             if not replaced_user:
                 additions.append(username_line)
             if not replaced_pass:
                 additions.append(password_line)
-            lines = lines[:insert_at] + additions + lines[insert_at:]
+            lines = lines[: prefs_at + 1] + additions + lines[prefs_at + 1:]
         body = "\n".join(lines) + "\n"
     else:
         body = (
