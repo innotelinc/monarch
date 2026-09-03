@@ -666,9 +666,11 @@ def install_ldap_plugin_via_release(token) -> bool:
     if not asset:
         _log("WARNING: no .zip asset on the LDAP plugin GitHub release.")
         return False
-    # Jellyfin discovers plugins by scanning subdirectories of the plugins
-    # folder for meta.json, so the zip must land in plugins/<PluginName>/.
-    plugins_dir = os.path.join(APPDATA, "jellyfin", "config", "plugins")
+    # Jellyfin's data dir is /config/data (JELLYFIN_DATA_DIR), so plugins
+    # live under data/plugins/, NOT config/plugins/. It discovers plugins by
+    # scanning subdirectories for meta.json, so the zip must land in
+    # plugins/<PluginName>/.
+    plugins_dir = os.path.join(APPDATA, "jellyfin", "data", "plugins")
     plugin_dir = os.path.join(plugins_dir, LDAP_PLUGIN_NAME)
     os.makedirs(plugin_dir, exist_ok=True)
     tmp = os.path.join(plugin_dir, asset["name"])
@@ -732,11 +734,17 @@ def write_ldap_plugin_config() -> tuple[str, str]:
   <PasswordResetUrl>http://localhost:9000/if/user/</PasswordResetUrl>
 </PluginConfiguration>
 """
-    path = os.path.join(APPDATA, "jellyfin", "config", "plugins",
-                        LDAP_PLUGIN_NAME, f"{LDAP_PLUGIN_NAME}.xml")
+    # Plugin configs live in {data}/plugins/configurations/ (same as the
+    # bundled TMDb/MusicBrainz configs), named after the assembly.
+    path = os.path.join(APPDATA, "jellyfin", "data", "plugins", "configurations",
+                        f"{LDAP_PLUGIN_NAME}.xml")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(xml)
+    try:
+        ensure_owner(path)
+    except Exception:
+        pass
     return path, xml
 
 
