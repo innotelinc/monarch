@@ -11,9 +11,9 @@ streaming with user profiles, **AI-powered recommendations and smart search**, l
 native M3U tuner and XMLTV guide, and one-command installs — including a bootable
 **live/install ISO** and an **offline bundle** for air-gapped deployment.
 
-[![Release](https://github.com/innotelinc/monarch/actions/workflows/release.yml/badge.svg)](https://github.com/innotelinc/monarch/actions/workflows/release.yml)
-[![Fresh install check](https://github.com/innotelinc/monarch/actions/workflows/fresh-install.yml/badge.svg)](https://github.com/innotelinc/monarch/actions/workflows/fresh-install.yml)
-[![Latest release](https://img.shields.io/github/v/release/innotelinc/monarch?color=8b5cf6)](https://github.com/innotelinc/monarch/releases)
+[![Release](https://innotelinc.github.io/monarch/actions/workflows/release.yml/badge.svg)](https://innotelinc.github.io/monarch/actions/workflows/release.yml)
+[![Fresh install check](https://innotelinc.github.io/monarch/actions/workflows/fresh-install.yml/badge.svg)](https://innotelinc.github.io/monarch/actions/workflows/fresh-install.yml)
+[![Latest release](https://img.shields.io/github/v/release/innotelinc/monarch?color=8b5cf6)](https://innotelinc.github.io/monarch/releases)
 
 *One script, and your library gets a brain — with wings.*
 
@@ -22,7 +22,7 @@ native M3U tuner and XMLTV guide, and one-command installs — including a boota
 > **About Monarch** — a premium, self-hosted media platform that turns a plain server into a
 > streaming service with AI recommendations, live TV, per-user profiles, and fully automated
 > media acquisition. Jellyfin is the streaming core; Authentik owns the users; the *arr stack
-> finds, downloads, and subtitles the content. **Landing page:** [github.com/innotelinc/monarch](https://github.com/innotelinc/monarch)
+> finds, downloads, and subtitles the content. **Landing page:** [innotelinc.github.io/monarch](https://innotelinc.github.io/monarch)
 
 **Non-negotiables:** 100% self-hosted · Docker Compose stack · Authentik-first
 authentication (no separate user stores) · every service wired automatically on first boot ·
@@ -48,7 +48,7 @@ release artifacts on every tagged release.
 ## 🚀 Quick start (recommended)
 
 ```bash
-git clone https://github.com/innotelinc/monarch
+git clone https://innotelinc.github.io/monarch
 cd monarch
 cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc.
 ./setup.sh
