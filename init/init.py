@@ -1394,48 +1394,78 @@ def configure_qbittorrent():
 # Bazarr (best effort)
 # ---------------------------------------------------------------------------
 
+def bazarr_api_key() -> str:
+    """Bazarr's API key from its config.yaml (auth section)."""
+    try:
+        with open(f"{APPDATA}/bazarr/config/config.yaml", "r",
+                  encoding="utf-8") as fh:
+            text = fh.read()
+        m = re.search(r"^\s*apikey:\s*(\S+)\s*$", text, re.MULTILINE)
+        if m:
+            return m.group(1).strip()
+    except OSError:
+        pass
+    return ""
+
+
 @arrived("bazarr setup")
 def configure_bazarr():
     _log("--- Bazarr ---")
     if not wait_for(BAZARR_BASE, "/api/system/status", "Bazarr"):
         return False
 
-    status, _, settings = _http(BAZARR_BASE, "/api/system/settings")
+    key = bazarr_api_key()
+    if not key:
+        _issues.append("bazarr: API key not found in config.yaml - configure manually")
+        return False
+    auth_hdr = {"X-API-KEY": key}
+
+    status, _, settings = _http(BAZARR_BASE, "/api/system/settings", headers=auth_hdr)
     if status != 200 or not isinstance(settings, dict):
         _issues.append("bazarr: /api/system/settings unreachable - configure manually")
         _log("WARNING: Bazarr settings are not readable via API yet - manual setup needed.")
         return False
 
-    general = settings.get("general", {}) or {}
-    if general.get("auth") not in (None, "", "none"):
-        _log("Bazarr already has authentication configured - skipped (re-run reset it).")
+    auth = settings.get("auth", {}) or {}
+    if auth.get("type") not in (None, "", "none"):
+        _log("Bazarr already has authentication configured - skipped.")
         return False
 
-    general["username"] = USER
-    general["password"] = PASS
-    general["auth"] = "basic"
-
+    # Bazarr's settings API takes form fields named settings-<section>-<key>;
+    # the password is stored MD5-hashed by the server.
+    form = {
+        "settings-auth-type": "basic",
+        "settings-auth-username": USER,
+        "settings-auth-password": PASS,
+        "settings-general-use_sonarr": "true",
+        "settings-general-use_radarr": "true",
+    }
     sonarr_key = api_key_for("sonarr")
     radarr_key = api_key_for("radarr")
     if sonarr_key:
-        settings["sonarr"] = [{
-            "name": "Sonarr", "host": "sonarr", "port": 8989,
-            "api_key": sonarr_key, "base_url": "", "ssl": False,
-        }]
+        form.update({
+            "settings-sonarr-ip": "sonarr",
+            "settings-sonarr-port": "8989",
+            "settings-sonarr-apikey": sonarr_key,
+            "settings-sonarr-ssl": "false",
+            "settings-sonarr-base_url": "/",
+        })
     if radarr_key:
-        settings["radarr"] = [{
-            "name": "Radarr", "host": "radarr", "port": 7878,
-            "api_key": radarr_key, "base_url": "", "ssl": False,
-        }]
+        form.update({
+            "settings-radarr-ip": "radarr",
+            "settings-radarr-port": "7878",
+            "settings-radarr-apikey": radarr_key,
+            "settings-radarr-ssl": "false",
+            "settings-radarr-base_url": "/",
+        })
 
-    for method in ("PUT", "POST"):
-        st, _, _ = _http(BAZARR_BASE, "/api/system/settings", method=method,
-                         body=settings)
-        if st in (200, 201, 202):
-            _log(f"Bazarr: auth + Sonarr/Radarr connections saved (via {method}).")
-            _results["bazarr"] = "configured"
-            return True
-    _issues.append("bazarr: settings could not be saved via API - configure manually")
+    st, _, _ = _http(BAZARR_BASE, "/api/system/settings", method="POST",
+                     body=form, headers=auth_hdr, raw_form=True)
+    if st in (200, 201, 202, 204):
+        _log("Bazarr: basic auth + Sonarr/Radarr connections saved via API.")
+        _results["bazarr"] = "configured"
+        return True
+    _issues.append(f"bazarr: settings could not be saved via API (HTTP {st}) - configure manually")
     return False
 
 
