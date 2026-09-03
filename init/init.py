@@ -1228,7 +1228,9 @@ def configure_qbittorrent():
     status, text, _ = _http(QBT_BASE, "/api/v2/auth/login", method="POST",
                             body={"username": USER, "password": PASS},
                             opener=opener, raw_form=True)
-    if status == 200 and text.strip() == "Ok.":
+    # qBittorrent >= 5.2 returns 204 with an empty body on success (older
+    # versions returned 200 with "Ok."). Either means the cookie is valid.
+    if (status in (200, 204) and text.strip() in ("", "Ok.")):
         _log("qBittorrent WebUI login with the shared credentials: OK")
     else:
         _issues.append("qBittorrent WebUI login failed with the shared credentials. "
