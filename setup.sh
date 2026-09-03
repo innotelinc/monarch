@@ -33,6 +33,13 @@ cd "$ROOT"
 
 echo "=== Monarch Media Platform setup ==="
 
+# Enable the version-controlled commit-guard hooks (.githooks) if this is a
+# git checkout (blocks attribution to anyone but Darnel Hunter).
+if [ -d "$ROOT/.githooks" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git config core.hooksPath "$ROOT/.githooks"
+  echo "commit guard hook enabled (core.hooksPath -> .githooks)"
+fi
+
 # 1. .env from sample
 if [ ! -f .env ] && [ -f .env.sample ]; then
   cp .env.sample .env
