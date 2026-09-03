@@ -2,29 +2,27 @@
 set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════
-# stripe-webhooks.sh - provision the Monarch Stripe webhook endpoints.
+# stripe-webhooks.sh - ensure the Magnate Stripe webhook endpoint exists.
 #
-# Replaces the manual "two Stripe webhooks, six events each" step. Reads .env
-# and uses the Stripe API to create (never duplicate) two endpoints:
+# Magnate is the source billing platform for all projects, so there is a
+# single webhook endpoint - the subscribe app's - subscribed to the five
+# events Magnate's handler processes:
 #
-#   1. Subscription platform : ${APP_URL}/api/webhook   -> STRIPE_WEBHOOK_SECRET
-#   2. billing-api (paid gating): ${BILLING_BASE_URL}/api/webhook -> BILLING_WEBHOOK_SECRET
+#   https://subscribe.innotel.us/api/webhook  -> STRIPE_WEBHOOK_SECRET
 #
-# Each endpoint subscribes to the same six events:
-#   checkout.session.completed, customer.subscription.created,
-#   customer.subscription.updated, customer.subscription.deleted,
-#   invoice.paid, invoice.payment_failed
-# (override with STRIPE_EVENTS="a,b,c"). billing-api can also reactivate on
-# invoice.payment_succeeded - append it to STRIPE_EVENTS if you rely on that.
+#   checkout.session.completed, customer.subscription.updated,
+#   customer.subscription.deleted, invoice.payment_succeeded,
+#   invoice.payment_failed
+# (override with STRIPE_EVENTS="a,b,c").
 #
-# The returned webhook signing secrets are written into .env - and only when
-# the variable is empty or still a placeholder - so re-running is safe and
-# existing secrets are never overwritten or printed. Run `docker compose up -d`
-# afterwards so the containers reload .env.
+# The script creates (never duplicates) the endpoint if it does not exist and
+# writes the returned signing secret into .env - only when the variable is
+# empty or still a placeholder - so re-running is safe and existing secrets
+# are never overwritten or printed.
 #
 # Usage:
 #   ./scripts/stripe-webhooks.sh [--dry-run]
-#   STRIPE_EVENTS="checkout.session.completed,invoice.paid" ./scripts/stripe-webhooks.sh
+#   STRIPE_EVENTS="checkout.session.completed,invoice.payment_succeeded" ./scripts/stripe-webhooks.sh
 #
 # Requires STRIPE_SECRET_KEY in .env (sk_test_... / sk_live_...).
 # ═══════════════════════════════════════════════════════════════════════════
@@ -58,19 +56,16 @@ if [ -z "$STRIPE_SECRET_KEY" ] || [ "$STRIPE_SECRET_KEY" = "sk_live_replace_me" 
 fi
 
 domain="${MONARCH_DOMAIN:-monarch.innotel.us}"
-app_url="${APP_URL:-https://subscribe.$domain}"
-billing_base="${BILLING_BASE_URL:-https://api.$domain}"
+app_url="${APP_URL:-https://subscribe.innotel.us}"
 url_platform="${app_url%/}/api/webhook"
-url_billing="${billing_base%/}/api/webhook"
 
-# Six default events; override wholesale with STRIPE_EVENTS.
-IFS=',' read -r -a EVENTS <<< "${STRIPE_EVENTS:-checkout.session.completed,customer.subscription.created,customer.subscription.updated,customer.subscription.deleted,invoice.paid,invoice.payment_failed}"
+# Five default events (Magnate's handler); override wholesale with STRIPE_EVENTS.
+IFS=',' read -r -a EVENTS <<< "${STRIPE_EVENTS:-checkout.session.completed,customer.subscription.updated,customer.subscription.deleted,invoice.payment_succeeded,invoice.payment_failed}"
 
 api="https://api.stripe.com/v1"
 
-echo "=== Monarch Stripe webhook provisioning ==="
-echo "  platform endpoint : $url_platform"
-echo "  billing endpoint  : $url_billing"
+echo "=== Magnate Stripe webhook provisioning ==="
+echo "  endpoint : $url_platform"
 echo "  events (${#EVENTS[@]}): ${EVENTS[*]}"
 
 # Idempotence: skip endpoints that already exist with the same URL.
@@ -131,25 +126,22 @@ set_secret() {
   fi
 }
 
-for pair in "$url_platform:STRIPE_WEBHOOK_SECRET" "$url_billing:BILLING_WEBHOOK_SECRET"; do
-  # Split on the LAST colon so URLs containing "://" aren't truncated.
-  url="${pair%:*}"; var="${pair##*:}"
-  echo ""
-  echo "--- $url ---"
-  if [ "$DRY_RUN" = "1" ]; then
-    echo "  [dry-run] would create endpoint for $url (events: ${EVENTS[*]})"
-    continue
-  fi
+url="$url_platform"; var="STRIPE_WEBHOOK_SECRET"
+echo ""
+echo "--- $url ---"
+if [ "$DRY_RUN" = "1" ]; then
+  echo "  [dry-run] would create endpoint for $url (events: ${EVENTS[*]})"
+else
   existing_id="$(existing "$url")"
   if [ -n "$existing_id" ]; then
     echo "  endpoint $existing_id already exists - skipping."
-    continue
+  else
+    out="$(create_endpoint "$url")"
+    id="${out%% *}"; secret="${out#* }"
+    echo "  created endpoint $id"
+    [ -n "$secret" ] && set_secret "$var" "$secret" "$env_file"
   fi
-  out="$(create_endpoint "$url")"
-  id="${out%% *}"; secret="${out#* }"
-  echo "  created endpoint $id"
-  [ -n "$secret" ] && set_secret "$var" "$secret" "$env_file"
-done
+fi
 
 echo ""
 echo "Done. Reload the services so they pick up the new secrets:"

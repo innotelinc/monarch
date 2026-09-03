@@ -81,8 +81,13 @@ JELLYFIN_LIBRARIES = [
     {"name": "Other", "type": "mixed", "path": "/data/media/xxx"},
 ]
 
+# Authentik connection (used to provision the LDAP outpost Jellyfin logins
+# authenticate against, and the paid_users access gate).
+AUTHENTIK_BASE_URL = os.environ.get("AUTHENTIK_BASE_URL", "http://authentik-server:9000").strip().rstrip("/")
+AUTHENTIK_BOOTSTRAP_TOKEN = os.environ.get("AUTHENTIK_BOOTSTRAP_TOKEN", "").strip()
+
 # Jellyfin LDAP-Auth plugin (authenticates logins against the Authentik LDAP
-# outpost). The bind user/token/group/base DN must match what billing-api
+# outpost). The bind user/token/group/base DN must match what Magnate
 # provisions in Authentik (same defaults in docker-compose.yml).
 LDAP_PLUGIN_NAME = "LDAP-Auth"
 LDAP_PLUGIN_CATALOG_REPO = "https://repo.jellyfin.org/files/plugin/manifest.json"
@@ -94,6 +99,12 @@ LDAP_BIND_TOKEN = os.environ.get("AUTHENTIK_LDAP_BIND_TOKEN", "")
 LDAP_BIND_GROUP = os.environ.get("AUTHENTIK_LDAP_BIND_GROUP", "paid_users")
 LDAP_ADMIN_GROUP = os.environ.get("AUTHENTIK_LDAP_ADMIN_GROUP", "jellyfin_admins")
 LDAP_BASE_DN = os.environ.get("AUTHENTIK_LDAP_BASE_DN", "dc=innotel,dc=us")
+LDAP_OUTPOST_NAME = os.environ.get("AUTHENTIK_LDAP_OUTPOST", "jellyfin-ldap")
+LDAP_APP_SLUG = os.environ.get("AUTHENTIK_LDAP_APP_SLUG", "jellyfin-ldap")
+LDAP_OUTPOST_TOKEN = os.environ.get("AUTHENTIK_LDAP_TOKEN", "ak-ldap-outpost-2026")
+LDAP_SEARCH_ROLE = "jellyfin-ldap-search"
+LDAP_BIND_FLOW_SLUG = "default-provider-authorization-implicit-consent"
+LDAP_INVALIDATION_FLOW_SLUG = "default-provider-invalidation-flow"
 
 # ---------------------------------------------------------------------------
 # Small HTTP helpers
@@ -195,6 +206,235 @@ def ensure_owner(path: str, uid: int = 1000, gid: int = 1000) -> None:
         os.chown(path, uid, gid)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Authentik (LDAP outpost provisioning - Jellyfin login gate)
+# ---------------------------------------------------------------------------
+
+def ak_request(method, path, body=None, params=None):
+    """Authentik API call; returns (status, text, json)."""
+    if not AUTHENTIK_BASE_URL or not AUTHENTIK_BOOTSTRAP_TOKEN:
+        return 0, "Authentik not configured", None
+    headers = {"Authorization": f"Bearer {AUTHENTIK_BOOTSTRAP_TOKEN}"}
+    qs = ("?" + urllib.parse.urlencode(params)) if params else ""
+    return _http(AUTHENTIK_BASE_URL, f"/api/v3{path}{qs}",
+                 method=method, body=body, headers=headers)
+
+
+def ak_find_user(username=None):
+    status, _, j = ak_request("GET", "/core/users/",
+                              params={"username": username} if username else None)
+    if status == 200 and isinstance(j, dict):
+        results = j.get("results", [])
+        return results[0] if results else None
+    return None
+
+
+def ak_group(name: str):
+    status, _, j = ak_request("GET", "/core/groups/", params={"name": name})
+    if status == 200 and isinstance(j, dict) and j.get("results"):
+        return j["results"][0]
+    status, _, j = ak_request("POST", "/core/groups/", body={"name": name})
+    if status in (200, 201) and isinstance(j, dict):
+        return j
+    return {}
+
+
+def ak_flow_pk(slug: str):
+    # Newer Authentik versions serve flow instances under /flows/instances/
+    # (the legacy /flows/ path returns the web UI shell, not JSON).
+    for path in ("/flows/instances/", "/flows/"):
+        status, _, j = ak_request("GET", path, params={"slug": slug})
+        if status == 200 and isinstance(j, dict) and j.get("results"):
+            return j["results"][0].get("pk")
+    return None
+
+
+def ak_ensure_service_account(username: str):
+    """Ensure the LDAP bind service account exists; return (user, token_identifier)."""
+    existing = ak_find_user(username=username)
+    if existing:
+        return existing, f"service-account-{username}-password"
+    status, _, j = ak_request("POST", "/core/users/service_account/", body={
+        "name": username, "create_group": False, "expiring": False})
+    if status not in (200, 201):
+        raise RuntimeError(f"service account creation failed ({status})")
+    return j, f"service-account-{username}-password"
+
+
+def ak_token(identifier: str):
+    status, _, j = ak_request("GET", "/core/tokens/", params={"identifier": identifier})
+    if status == 200 and isinstance(j, dict) and j.get("results"):
+        return j["results"][0]
+    return None
+
+
+def ak_ensure_token(identifier, user_pk, key_value, description="", intent="app_password"):
+    """Ensure a token exists and pin its key to key_value (idempotent)."""
+    if not ak_token(identifier):
+        body = {"identifier": identifier, "intent": intent, "expiring": False,
+                "description": description}
+        if user_pk is not None:
+            body["user"] = int(user_pk)
+        status, _, _ = ak_request("POST", "/core/tokens/", body=body)
+        if status not in (200, 201):
+            raise RuntimeError(f"token creation failed ({status})")
+    status, _, _ = ak_request("POST", f"/core/tokens/{identifier}/set_key/",
+                              body={"key": key_value})
+    if status not in (200, 204):
+        raise RuntimeError(f"token set_key failed ({status})")
+
+
+def ak_find_provider(name: str):
+    # Some Authentik versions ignore the ?name= filter and return every
+    # provider, so match client-side by exact name instead.
+    status, _, j = ak_request("GET", "/providers/ldap/", params={"page_size": 200})
+    if status == 200 and isinstance(j, dict):
+        for provider in j.get("results", []):
+            if provider.get("name") == name:
+                return provider
+    return None
+
+
+def ak_ensure_ldap_provider() -> dict:
+    existing = ak_find_provider(LDAP_OUTPOST_NAME)
+    if existing:
+        return existing
+    body = {"name": LDAP_OUTPOST_NAME, "base_dn": LDAP_BASE_DN}
+    auth_flow = ak_flow_pk(LDAP_BIND_FLOW_SLUG)
+    inv_flow = ak_flow_pk(LDAP_INVALIDATION_FLOW_SLUG)
+    if auth_flow:
+        body["authorization_flow"] = auth_flow
+    if inv_flow:
+        body["invalidation_flow"] = inv_flow
+    status, _, j = ak_request("POST", "/providers/ldap/", body=body)
+    if status not in (200, 201):
+        raise RuntimeError(f"LDAP provider creation failed ({status})")
+    return j
+
+
+def ak_find_application(slug: str):
+    # Same as ak_find_provider: the ?slug= filter is ignored by some
+    # Authentik versions, so match client-side by exact slug.
+    status, _, j = ak_request("GET", "/core/applications/", params={"page_size": 200})
+    if status == 200 and isinstance(j, dict):
+        for app in j.get("results", []):
+            if app.get("slug") == slug:
+                return app
+    return None
+
+
+def ak_ensure_application(provider_pk: str) -> dict:
+    existing = ak_find_application(LDAP_APP_SLUG)
+    if existing:
+        return existing
+    status, _, j = ak_request("POST", "/core/applications/", body={
+        "name": "Jellyfin LDAP", "slug": LDAP_APP_SLUG,
+        "backchannel_providers": [str(provider_pk)]})
+    if status not in (200, 201):
+        raise RuntimeError(f"application creation failed ({status})")
+    return j
+
+
+def ak_find_outpost(name: str):
+    # The ?name= filter is ignored by some Authentik versions (it returns
+    # every outpost, including the embedded one), so match client-side by
+    # exact name - otherwise the LDAP outpost would never be created.
+    status, _, j = ak_request("GET", "/outposts/instances/", params={"page_size": 200})
+    if status == 200 and isinstance(j, dict):
+        for outpost in j.get("results", []):
+            if outpost.get("name") == name:
+                return outpost
+    return None
+
+
+def ak_ensure_outpost(provider_pk: str) -> dict:
+    existing = ak_find_outpost(LDAP_OUTPOST_NAME)
+    if existing:
+        return existing
+    status, _, j = ak_request("POST", "/outposts/instances/", body={
+        "name": LDAP_OUTPOST_NAME, "type": "ldap",
+        "providers": [str(provider_pk)],
+        "config": {"authentik_host": AUTHENTIK_BASE_URL,
+                    "authentik_host_insecure": True}})
+    if status not in (200, 201):
+        raise RuntimeError(f"LDAP outpost creation failed ({status})")
+    return j
+
+
+def ak_ensure_role(name: str) -> dict:
+    status, _, j = ak_request("GET", "/rbac/roles/", params={"name": name})
+    if status == 200 and isinstance(j, dict) and j.get("results"):
+        return j["results"][0]
+    status, _, j = ak_request("POST", "/rbac/roles/", body={"name": name})
+    if status not in (200, 201):
+        raise RuntimeError(f"role creation failed ({status})")
+    return j
+
+
+def ak_role_assign_permission(role_pk, permission, model=None, object_pk=None) -> bool:
+    body = {"permissions": [permission]}
+    if model and object_pk:
+        body["model"] = model
+        body["object_pk"] = str(object_pk)
+    status, _, _ = ak_request(
+        "POST", f"/rbac/permissions/assigned_by_roles/{role_pk}/assign/", body=body)
+    return status in (200, 201, 204)
+
+
+def ak_role_add_user(role_pk: str, user_pk: int) -> bool:
+    status, _, _ = ak_request("POST", f"/rbac/roles/{role_pk}/add_user/",
+                              body={"pk": int(user_pk)})
+    return status in (200, 204)
+
+
+@arrived("authentik ldap provisioning")
+def configure_authentik_ldap():
+    """Idempotently provision the LDAP provider/outpost for Jellyfin logins.
+
+    This used to live in billing-api; with Magnate now the source billing
+    platform, monarch-init owns it so fresh installs stay self-wiring.
+    """
+    _log("--- Authentik LDAP outpost ---")
+    if not AUTHENTIK_BASE_URL or not AUTHENTIK_BOOTSTRAP_TOKEN:
+        _log("WARNING: Authentik not configured - skipping LDAP provisioning.")
+        return False
+    if not wait_for(AUTHENTIK_BASE_URL, "/-/health/ready/", "Authentik"):
+        return False
+
+    sa, bind_token_id = ak_ensure_service_account(LDAP_BIND_USER)
+    sa_pk = sa.get("user_pk") or sa.get("pk")
+    ak_ensure_token(bind_token_id, sa_pk, LDAP_BIND_TOKEN,
+                    "Jellyfin LDAP bind user (monarch stack)")
+
+    provider = ak_ensure_ldap_provider()
+    provider_pk = provider.get("pk")
+    ak_ensure_application(provider_pk)
+
+    outpost = ak_ensure_outpost(provider_pk)
+    outpost_pk = outpost.get("pk")
+    # The outpost's own API token (auto-created with the outpost) is pinned
+    # to the value the `authentik-ldap` container uses as AUTHENTIK_TOKEN.
+    ak_ensure_token(f"ak-outpost-{outpost_pk}-api", None, LDAP_OUTPOST_TOKEN,
+                    "LDAP outpost API token (monarch stack)", intent="api")
+
+    role = ak_ensure_role(LDAP_SEARCH_ROLE)
+    role_pk = role.get("pk")
+    ok = ak_role_assign_permission(
+        role_pk, "authentik_providers_ldap.search_full_directory",
+        model="authentik_providers_ldap.ldapprovider", object_pk=provider_pk)
+    if not ok:
+        # Some versions only expose it as a global permission.
+        ak_role_assign_permission(role_pk, "authentik_providers_ldap.search_full_directory")
+    ak_role_add_user(role_pk, sa_pk)
+
+    admin_group = ak_group(LDAP_ADMIN_GROUP)
+    _log(f"LDAP provisioning OK: provider={provider_pk} outpost={outpost_pk} "
+         f"bind={LDAP_BIND_USER} group={LDAP_BIND_GROUP} "
+         f"admin_group={admin_group.get('name')}")
+    _results["authentik-ldap"] = "configured"
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1433,7 @@ def main() -> int:
     _log("Timeout for each service: up to 15 minutes on first boot while images start.")
 
     configure_jellyfin()
+    configure_authentik_ldap()
     configure_jellyfin_ldap()
     configure_livetv()
     configure_monarch_apps()

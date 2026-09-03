@@ -45,7 +45,6 @@ MEDIA_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv",
                     ".ts", ".mpg", ".mpeg", ".flv", ".iso", ".m2ts"}
 SERVICE_ENDPOINTS = {
     "jellyfin": (f"{JELLYFIN_URL}/System/Info/Public", "GET"),
-    "billing-api": ("http://billing-api:8001/health", "GET"),
     "monarch-recs": ("http://monarch-recs:8002/health", "GET"),
     "monarch-health": ("http://monarch-health:8003/health", "GET"),
     "authentik": ("http://authentik-server:9000/-/health/ready/", "GET"),

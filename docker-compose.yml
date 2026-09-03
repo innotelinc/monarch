@@ -383,9 +383,10 @@ services:
 
   ###############################################
   # AUTHENTIK - Identity Provider
-  # SSO + user management. billing-api provisions
-  # subscribers into the `paid_users` group; the
-  # bootstrap admin uses the shared initial password.
+  # SSO + user management. The Magnate billing
+  # platform provisions subscribers into the
+  # `paid_users` group; the bootstrap admin uses
+  # the shared initial password.
   ###############################################
   authentik-postgresql:
     restart: unless-stopped
@@ -430,8 +431,6 @@ services:
     volumes:
       - /docker/appdata/authentik/media:/media
       - /docker/appdata/authentik/templates:/templates
-    # billing-api starts only once Authentik is ready (its /-/health/ready/
-    # endpoint returns 200 only after migrations/startup have finished).
     # The authentik image ships neither curl nor wget, so use Python (always
     # present) for the health check - urlopen exits non-zero on a 503 while
     # migrations are still running.
@@ -474,9 +473,6 @@ services:
   # Authentik blocks their Jellyfin login).
   #
   # AUTHENTIK_TOKEN is the outpost's API token.
-  # billing-api pins it to this exact value via
-  # the Authentik API on startup (set_key), so
-  # the value here and in billing-api must match.
   ###############################################
   authentik-ldap:
     restart: unless-stopped
@@ -492,61 +488,6 @@ services:
       AUTHENTIK_HOST: http://authentik-server:9000
       AUTHENTIK_INSECURE: "true"
       AUTHENTIK_TOKEN: ak-ldap-outpost-2026
-
-  ###############################################
-  # BILLING API - Stripe Webhooks
-  # Receives the second Stripe webhook and mirrors
-  # payment state into Authentik's `paid_users`
-  # group (source code lives in ./billing-api).
-  ###############################################
-  billing-postgres:
-    restart: unless-stopped
-    container_name: billing-postgres
-    image: postgres:17
-    environment:
-      POSTGRES_DB: billing
-      POSTGRES_USER: billing
-      POSTGRES_PASSWORD: BillingDB!2026
-    volumes:
-      - /docker/appdata/billing/postgres:/var/lib/postgresql/data
-
-  billing-api:
-    restart: unless-stopped
-    container_name: billing-api
-    image: ghcr.io/innotelinc/monarch-billing-api:latest
-    build: ./billing-api
-    working_dir: /app
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
-    environment:
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_live_replace_me}
-      # Signing secret for the billing-api webhook endpoint. If unset it falls
-      # back to STRIPE_WEBHOOK_SECRET (the platform's endpoint secret).
-      BILLING_WEBHOOK_SECRET: ${BILLING_WEBHOOK_SECRET:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_replace_me}
-      STRIPE_PRICE_ID: price_replace_me
-      BILLING_BASE_URL: ${BILLING_BASE_URL:-https://api.${MONARCH_DOMAIN:-monarch.innotel.us}}
-      BILLING_API_KEY: innotel-billing-api-key
-      AUTHENTIK_BASE_URL: http://authentik-server:9000
-      AUTHENTIK_BOOTSTRAP_TOKEN: ak-bootstrap-innotel-2026
-      AUTHENTIK_DEFAULT_GROUP: paid_users
-      # LDAP provisioning - billing-api creates the LDAP provider/outpost and
-      # pins these tokens to the values below on startup (see main.py).
-      AUTHENTIK_LDAP_TOKEN: ak-ldap-outpost-2026
-      AUTHENTIK_LDAP_BIND_TOKEN: ak-ldap-bind-2026
-      AUTHENTIK_LDAP_BIND_USER: authentik-ldap
-      AUTHENTIK_LDAP_BIND_GROUP: paid_users
-      AUTHENTIK_LDAP_ADMIN_GROUP: jellyfin_admins
-      AUTHENTIK_LDAP_BASE_DN: dc=innotel,dc=us
-      DATABASE_URL: postgresql://billing:BillingDB!2026@billing-postgres:5432/billing
-    depends_on:
-      billing-postgres:
-        condition: service_started
-      authentik-server:
-        condition: service_healthy
-    ports:
-      - 8001:8001
-    volumes:
-      - ./billing-api:/app
 
   ###############################################
   # MONARCH-RECS - AI recommendations + smart search
@@ -614,41 +555,6 @@ services:
       - /docker/appdata/monarch-health:/app/data
 
   ###############################################
-  # JELLYFIN SUBSCRIPTION PLATFORM - Public signup,
-  # Stripe billing, Jellyfin account provisioning
-  #
-  # https://github.com/innotelinc/jellyfin-subscription-platform
-  # Served on :3000. Set the env vars in .env - most
-  # importantly JELLYFIN_API_KEY (see /docker/appdata/init/
-  # after first boot - monarch-init exports the admin token
-  # there) and the Stripe keys.
-  ###############################################
-  jellyfin-subscription:
-    container_name: jellyfin-subscription
-    image: ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0
-    restart: unless-stopped
-    ports:
-      - 3000:3000
-    environment:
-      APP_URL: ${APP_URL:-http://localhost:3000}
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
-      STRIPE_CURRENCY: ${STRIPE_CURRENCY:-usd}
-      JELLYFIN_URL: ${JELLYFIN_URL:-http://localhost:8096}
-      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
-      # Authentik - the platform creates/sets the subscriber's password here
-      # (same token billing-api uses). The account portal link defaults to
-      # AUTHENTIK_BASE_URL/if/user/; set ACCOUNT_PORTAL_URL to override it.
-      AUTHENTIK_BASE_URL: ${AUTHENTIK_BASE_URL:-http://authentik-server:9000}
-      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-ak-bootstrap-innotel-2026}
-      ACCOUNT_PORTAL_URL: ${ACCOUNT_PORTAL_URL:-http://localhost:9000/if/user/}
-      REQUEST_URL: ${REQUEST_URL:-http://localhost:5055}
-      ADMIN_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
-      SESSION_SECRET: ${SESSION_SECRET:-change-me}
-    volumes:
-      - /docker/appdata/jellyfin-subscription:/app/data
-
-  ###############################################
   # MONARCH-SEED - Pre-seed qBittorrent WebUI credentials
   # Runs once BEFORE qBittorrent first starts so the
   # WebUI login is MONARCH_USERNAME / MONARCH_PASSWORD from
@@ -704,8 +610,11 @@ services:
       # tuner/guide to Jellyfin and writes the EPG channel list to /opt/epg.
       LIVETV_M3U_URL: ${LIVETV_M3U_URL:-https://iptv-org.github.io/iptv/countries/us.m3u}
       LIVETV_GUIDE_URL: ${LIVETV_GUIDE_URL:-http://iptv:3000/guide.xml}
-      # Jellyfin LDAP-Auth plugin wiring (values must match billing-api's
-      # provisioning - see the README "Authentik LDAP -> Jellyfin" section).
+      # Authentik connection (LDAP outpost provisioning + Jellyfin LDAP-Auth
+      # plugin wiring). Values must match what magnate's billing provisions -
+      # see the README "Authentik LDAP -> Jellyfin" section.
+      AUTHENTIK_BASE_URL: http://authentik-server:9000
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-ak-bootstrap-innotel-2026}
       AUTHENTIK_LDAP_SERVER: authentik-ldap
       AUTHENTIK_LDAP_PORT: 3389
       AUTHENTIK_LDAP_BIND_USER: authentik-ldap
@@ -713,6 +622,7 @@ services:
       AUTHENTIK_LDAP_BIND_GROUP: paid_users
       AUTHENTIK_LDAP_ADMIN_GROUP: jellyfin_admins
       AUTHENTIK_LDAP_BASE_DN: dc=innotel,dc=us
+      AUTHENTIK_LDAP_TOKEN: ak-ldap-outpost-2026
     command: ["python", "/init/init.py"]
     volumes:
       - ./init:/init:ro

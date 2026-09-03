@@ -382,88 +382,14 @@
       }
     },
     {
-      "id": "1a2b3c4d-0006-4a06-8006-000000000006",
-      "name": "API",
-      "url": "https://api.__DOMAIN__",
-      "behaviour": {
-        "onClickUrl": "https://api.__DOMAIN__",
-        "externalUrl": "https://api.__DOMAIN__",
-        "isOpeningNewTab": true,
-        "tooltipDescription": "Platform API - billing & provisioning"
-      },
-      "network": {
-        "enabledStatusChecker": true,
-        "statusCodes": [
-          "200",
-          "201",
-          "202",
-          "204",
-          "301",
-          "302",
-          "307",
-          "308",
-          "401",
-          "403"
-        ]
-      },
-      "appearance": {
-        "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons@master/png/code.png",
-        "appNameStatus": "normal",
-        "positionAppName": "column",
-        "lineClampAppName": 1
-      },
-      "integration": {
-        "type": null,
-        "properties": []
-      },
-      "area": {
-        "type": "wrapper",
-        "properties": {
-          "id": "default"
-        }
-      },
-      "shape": {
-        "sm": {
-          "location": {
-            "x": 0,
-            "y": 6
-          },
-          "size": {
-            "width": 1,
-            "height": 1
-          }
-        },
-        "md": {
-          "location": {
-            "x": 4,
-            "y": 2
-          },
-          "size": {
-            "width": 2,
-            "height": 1
-          }
-        },
-        "lg": {
-          "location": {
-            "x": 0,
-            "y": 2
-          },
-          "size": {
-            "width": 2,
-            "height": 1
-          }
-        }
-      }
-    },
-    {
       "id": "1a2b3c4d-0007-4a07-8007-000000000007",
       "name": "Subscribe",
-      "url": "https://subscribe.__DOMAIN__",
+      "url": "https://subscribe.innotel.us",
       "behaviour": {
-        "onClickUrl": "https://subscribe.__DOMAIN__",
-        "externalUrl": "https://subscribe.__DOMAIN__",
+        "onClickUrl": "https://subscribe.innotel.us",
+        "externalUrl": "https://subscribe.innotel.us",
         "isOpeningNewTab": true,
-        "tooltipDescription": "Sign up & manage your plan"
+        "tooltipDescription": "Magnate - sign up & manage your plan (billing platform for all projects)"
       },
       "network": {
         "enabledStatusChecker": true,

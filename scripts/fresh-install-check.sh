@@ -163,10 +163,14 @@ for app in board.get("apps", []):
         if isinstance(value, str) and value.startswith("https://"):
             urls.append(value)
 
+# External hosts the board may link to that are NOT proxied by monarch's
+# own NPM (e.g. Magnate, the source billing platform at subscribe.innotel.us).
+external_hosts = {"subscribe.innotel.us"}
+
 problems = []
 for u in sorted(set(urls)):
     host = u.split("/", 3)[2]
-    if host not in hosts:
+    if host not in hosts and host not in external_hosts:
         problems.append(f"{u} -> host '{host}' is not in npm-hosts.conf")
 if not any(u.split("/", 3)[2] == domain for u in urls):
     problems.append("board has no tile for the apex (main interface)")

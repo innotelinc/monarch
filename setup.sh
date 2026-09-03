@@ -88,16 +88,18 @@ else
   echo "Install python3 and re-run:  python3 scripts/npm-proxy-hosts.py"
 fi
 
-# 5. Stripe webhooks (optional) - only when a real STRIPE_SECRET_KEY is in
-# .env and the signing secrets are still placeholders (first configure).
+# 5. Stripe webhook (optional) - only when a real STRIPE_SECRET_KEY is in
+# .env and the signing secret is still a placeholder (first configure).
+# Magnate is the source billing platform, so this just ensures the single
+# subscribe.innotel.us webhook endpoint exists.
 if [ -f .env ] && grep -Eq '^STRIPE_SECRET_KEY=(sk_(test|live)_.+)$' .env; then
-  if grep -Eq '^(STRIPE_WEBHOOK_SECRET|BILLING_WEBHOOK_SECRET)=(|whsec_replace_me)$' .env; then
+  if grep -Eq '^STRIPE_WEBHOOK_SECRET=(|whsec_replace_me)$' .env; then
     echo ""
-    echo "=== Provisioning Stripe webhooks ==="
+    echo "=== Provisioning Stripe webhook ==="
     bash scripts/stripe-webhooks.sh || echo "  (stripe-webhooks.sh failed - see its output)"
   else
     echo ""
-    echo "Stripe webhook secrets already configured - skipping webhook setup."
+    echo "Stripe webhook secret already configured - skipping webhook setup."
   fi
 fi
 

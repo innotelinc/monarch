@@ -32,10 +32,8 @@ jc21/nginx-proxy-manager:latest
 # The first-party Monarch images are published by the release workflow
 # (build-images job) to GHCR - they land in the offline bundle on the run
 # after they are pushed.
-ghcr.io/innotelinc/monarch-billing-api:latest
 ghcr.io/innotelinc/monarch-recs:latest
 ghcr.io/innotelinc/monarch-health:latest
 
 # The subscription platform image is public on GHCR (same org/user), so the
 # release CI can pull it without auth and it ships in the offline bundle.
-ghcr.io/innotelinc/jellyfin-subscription-platform:v1.2.0

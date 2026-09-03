@@ -67,12 +67,10 @@ DEFAULT_HOSTS = [
     # interface users log into (the Homarr dashboard).
     ("@",         "homarr",                   7575, True),
     ("app",       "homarr",                   7575, True),
-    ("api",       "billing-api",              8001, False),
     ("auth",      "authentik-server",         9000, False),
     ("media",     "jellyfin",                 8096, True),
     ("tv",        "iptv",                     3001, False),
     ("admin",     "nginx-proxy-manager",       81, False),
-    ("subscribe", "jellyfin-subscription",    3000, False),
     ("req",       "jellyseerr",               5055, True),
 ]
 

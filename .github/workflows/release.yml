@@ -7,8 +7,7 @@
 #   • nightly schedule.
 #
 # What a release produces:
-#   build-images    publish the first-party Docker images to GHCR
-#                   (ghcr.io/innotelinc/monarch-billing-api|recs|health),
+#   build-images    publish the first-party Docker images to GHCR  #                   (ghcr.io/innotelinc/monarch-recs|health),
 #                   tagged with the release version AND :latest
 #   release         cut the GitHub release with deployment payload +
 #                   source bundle + checksums
@@ -62,7 +61,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── Publish the first-party images (billing-api/recs/health) to GHCR.
+  # ── Publish the first-party images (recs/health) to GHCR.
   # Runs before the offline bundle job so the bundle can include the fresh
   # images. Tagged runs publish VERSION + latest; otherwise next-version +
   # latest (the version string is recomputed here to keep jobs independent).
@@ -115,16 +114,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-
-      - name: Build & push Monarch billing-api
-        uses: docker/build-push-action@v6
-        with:
-          context: ./billing-api
-          file: ./billing-api/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/innotelinc/monarch-billing-api:${{ steps.version.outputs.version }}
-            ghcr.io/innotelinc/monarch-billing-api:latest
 
       - name: Build & push Monarch AI recommendations
         uses: docker/build-push-action@v6
@@ -210,7 +199,6 @@ jobs:
           **This release was generated automatically** by the release workflow (tagged push, schedule, or manual dispatch).
 
           **First-party images published to GHCR** (also tagged \`latest\`):
-          - \`ghcr.io/innotelinc/monarch-billing-api\` — Stripe webhooks -> Authentik provisioning
           - \`ghcr.io/innotelinc/monarch-recs\` — AI recommendations + smart search
           - \`ghcr.io/innotelinc/monarch-health\` — media health analytics
 

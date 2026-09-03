@@ -16,7 +16,7 @@ automation** and **enterprise-grade infrastructure**.
 | **Live TV** | native M3U tuner + XMLTV guide (iptv-org), zero TVHeadend setup |
 | **Proxy & SSL** | Nginx Proxy Manager auto-configured via API, wildcard Let's Encrypt cert via DNS challenge |
 | **Delivery** | Docker Compose stack, one-command installer, offline bundle, live/install ISO |
-| **Subscriptions** | Stripe checkout landing page + billing-api → Authentik `paid_users` group |
+| **Subscriptions** | Magnate is the source billing platform (Stripe checkout → Authentik `paid_users` group) |
 | **Extras** | watch parties (SyncPlay), offline downloads, request portal (Jellyseerr) |
 
 Objectives of this repo: rebrand the classic *arr stack as **Monarch**,
@@ -62,9 +62,10 @@ cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc. (below)
    **wildcard Let's Encrypt certificate** via a DNS challenge, and
    bootstraps the NPM admin account from `NPM_ADMIN_EMAIL` /
    `NPM_ADMIN_PASSWORD` when it has not been created yet.
-5. Provisions the two **Stripe webhook** endpoints from `STRIPE_SECRET_KEY`
-   (`scripts/stripe-webhooks.sh`) when their signing secrets are still
-   placeholders in `.env` — reruns skip it once configured.
+5. Ensures the **Magnate Stripe webhook** endpoint (`subscribe.innotel.us`)
+   exists from `STRIPE_SECRET_KEY` (`scripts/stripe-webhooks.sh`) when the
+   signing secret is still a placeholder in `.env` — reruns skip it once
+   configured.
 
 Re-run `./setup.sh` any time you change `.env` or `scripts/npm-hosts.conf` —
 the proxy hosts are reconciled in place and the certificate is reused.
@@ -182,10 +183,8 @@ only touches services that are still unconfigured.
 | Transmission | http://localhost:9091 | optional extra downloader |
 | Deluge     | http://localhost:8112 | optional; default WebUI password is `deluge` on first login |
 | autobrr    | http://localhost:7474 | optional; manual setup |
-| Subscription platform | http://localhost:3000 | `subscribe.monarch.innotel.us`; signup + Stripe Checkout landing page |
 | Authentik  | http://localhost:9000 | `auth.monarch.innotel.us`; SSO + `paid_users` group = user management |
 | Authentik LDAP | localhost:389 / 636 | LDAP outpost - Jellyfin logins authenticate against it |
-| Billing API | http://localhost:8001 | `api.monarch.innotel.us`; Stripe webhooks -> Authentik paid users + Postgres |
 | **Monarch AI** | http://localhost:8002 | `monarch-recs` - AI recommendations + smart search (internal API) |
 | **Monarch Health** | http://localhost:8003 | `monarch-health` - media health analytics (internal API) |
 | Nginx Proxy Manager | http://localhost:81 | `admin.monarch.innotel.us`; reverse proxy + wildcard SSL |
@@ -219,13 +218,16 @@ users log into (the Homarr dashboard). Everything else is a subdomain:
 |-----------|---------|------|------------|
 | `monarch.innotel.us` (apex, `@`) | Homarr dashboard — main login | 7575 | yes |
 | `app.monarch.innotel.us` | Homarr dashboard | 7575 | yes |
-| `api.monarch.innotel.us` | billing-api | 8001 | - |
 | `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
 | `media.monarch.innotel.us` | Jellyfin | 8096 | yes |
 | `tv.monarch.innotel.us` | IPTV/EPG guide | 3001 | - |
 | `admin.monarch.innotel.us` | Nginx Proxy Manager admin | 81 | - |
 | `subscribe.monarch.innotel.us` | landing page + Stripe checkout | 3000 | - |
 | `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
+
+(The old `subscribe.monarch.innotel.us` / `api.monarch.innotel.us` billing
+hosts were removed — **Magnate** at `subscribe.innotel.us` is the source
+billing platform for all projects.)
 
 The mapping lives in `scripts/npm-hosts.conf` — add/remove lines freely; the
 script reconciles the proxy hosts on every run (idempotent). For a local NPM
@@ -292,9 +294,10 @@ Bootstrap credentials are applied **only on first boot**. Changing
 the admin UI instead (Directory -> Users -> `akadmin`).
 
 **The `paid_users` group is the source of truth for who has access.**
-Payments made through the landing page are mirrored into `paid_users` by
-billing-api, and subscribers are given access in Authentik — there is no
-separate Jellyfin user store for subscribers.
+Payments made through **Magnate** (the source billing platform, at
+`subscribe.innotel.us`) are mirrored into `paid_users`, and subscribers are
+given access in Authentik — there is no separate Jellyfin user store for
+subscribers.
 
 ### Authentik LDAP -> Jellyfin (login gate)
 
@@ -305,14 +308,14 @@ Authentik blocks their Jellyfin login (the LDAP bind fails).
 | Piece | Who sets it up | What it is |
 |-------|----------------|------------|
 | `authentik-ldap` container | `docker-compose.yml` | LDAP outpost, plain LDAP on 3389 / LDAPS on 6636 inside the network |
-| LDAP provider + outpost + app | billing-api on startup (`ensure_ldap_setup`) | base DN `dc=innotel,dc=us`; provider/outpost named `jellyfin-ldap` |
-| Bind service account | billing-api on startup | `authentik-ldap` service account + pinned token |
-| Groups | billing-api on startup | `paid_users` (subscribers) and `jellyfin_admins` (Jellyfin admins - auto-created) |
+| LDAP provider + outpost + app | Magnate provisioning | base DN `dc=innotel,dc=us`; provider/outpost named `jellyfin-ldap` |
+| Bind service account | Magnate provisioning | `authentik-ldap` service account + pinned token |
+| Groups | Magnate provisioning | `paid_users` (subscribers) and `jellyfin_admins` (Jellyfin admins - auto-created) |
 | Jellyfin LDAP-Auth plugin | `monarch-init` | installs the plugin and writes its config, then restarts Jellyfin |
 
-The full access chain: **Stripe checkout -> billing-api adds the user to
-`paid_users` -> LDAP bind succeeds -> Jellyfin login works.** Subscription
-cancels -> user set inactive -> LDAP bind fails -> Jellyfin login blocked.
+The full access chain: **Magnate checkout -> subscriber added to `paid_users`
+-> LDAP bind succeeds -> Jellyfin login works.** Subscription cancels -> user
+set inactive -> LDAP bind fails -> Jellyfin login blocked.
 
 **User profiles & watch history are native Jellyfin features.** Each Authentik
 account maps to a Jellyfin profile (created automatically on first LDAP
@@ -328,12 +331,12 @@ ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,
 
 ### Subscription platform + billing
 
-The public signup page (`subscribe.monarch.innotel.us`, host port 3000) lets
-visitors pick a plan and pay through Stripe Checkout. billing-api receives a
-second Stripe webhook and provisions the subscriber into Authentik. See
+**Magnate** (`subscribe.innotel.us`) is the source billing platform for all
+projects: visitors pick a plan and pay through Stripe Checkout, and Magnate
+provisions the subscriber into Authentik (`paid_users`). Monarch's own
+subscription/billing containers were removed in favor of it. See
 `.env.sample` for `APP_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-`BILLING_WEBHOOK_SECRET`, `JELLYFIN_URL` / `JELLYFIN_API_KEY` and
-`ACCOUNT_PORTAL_URL` / `REQUEST_URL`.
+`JELLYFIN_URL` / `JELLYFIN_API_KEY` and `ACCOUNT_PORTAL_URL` / `REQUEST_URL`.
 
 Getting `JELLYFIN_API_KEY`: `monarch-init` exports the Jellyfin admin token on
 first boot to `/docker/appdata/init/jellyfin-api-key.txt` — copy it into
@@ -380,7 +383,7 @@ library + the `/data/media` volume and publishes a JSON report:
 |----------|--------------|
 | `GET /api/analytics` | latest report from the periodic scan |
 | `POST /api/analytics/scan` | run a scan on demand |
-| `GET /api/services` | reachability of Jellyfin, Authentik, billing-api, recs, health |
+| `GET /api/services` | reachability of Jellyfin, Authentik, recs, health |
 | `GET /health` | service status + last scan time |
 
 The report includes **per-library stats** (item counts by type),
@@ -454,10 +457,10 @@ sudo docker compose up -d
    to route it through the **FlareSolverr proxy** that `monarch-init`
    already registered.
 2. **Stripe** — put your secret key (`STRIPE_SECRET_KEY`) in `.env`, then
-   run `./scripts/stripe-webhooks.sh` once. It creates the two webhook
-   endpoints (six events each) and writes their signing secrets into `.env`
-   for you; `./setup.sh` does this automatically on first configure. The
-   endpoints must be publicly reachable (`APP_URL` and the `api.` subdomain).
+   run `./scripts/stripe-webhooks.sh` once. It ensures the single Magnate
+   webhook endpoint (`subscribe.innotel.us`, five events) exists and writes
+   its signing secret into `.env` for you; `./setup.sh` does this
+   automatically on first configure. The endpoint must be publicly reachable.
 
 ***************************
 
@@ -560,10 +563,8 @@ into the stack via `monarch.service`.
 ```
 
 Output: `dist/offline-bundle/` — the docker image archives are split into
-<2 GB parts for GitHub release uploads. Note: the
-`jellyfin-subscription-platform` image is published from a **private** repo,
-so it is kept commented out of `scripts/offline-images.txt` — uncomment it
-when building a private bundle. To fetch a published release's bundle:
+<2 GB parts for GitHub release uploads. To fetch a published release's
+bundle:
 
 ```
 ./scripts/fetch-offline-bundle.sh          # -> ~/monarch-offline-bundle
@@ -579,8 +580,8 @@ Releases are cut by `.github/workflows/release.yml`. The workflow:
    "Run workflow" (choose a `minor`/`major` bump, or `lightweight` to skip
    the heavy builds for a quick test).
 2. **build-images** publishes the first-party images to GHCR
-   (`monarch-billing-api`, `monarch-recs`, `monarch-health` — tagged with the
-   release version **and** `latest`).
+   (`monarch-recs`, `monarch-health` — tagged with the release version
+   **and** `latest`).
 3. **release** cuts the GitHub release with the deployment payload + source
    bundle + checksums.
 4. Two parallel CI jobs build & upload the **docker image bundle** and the
@@ -593,7 +594,7 @@ Each release publishes:
 - `monarch-deployment.tar.gz` (source + compose + systemd installer payload)
 - `monarch-source-bundle.tar.gz` + checksum
 - `SHA256SUMS`
-- GHCR images `ghcr.io/innotelinc/monarch-{billing-api,recs,health}`
+- GHCR images `ghcr.io/innotelinc/monarch-{recs,health}`
 
 ***************************
 
