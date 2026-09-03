@@ -37,6 +37,7 @@ import base64
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -453,6 +454,55 @@ def jellyfin_wizard_pending() -> bool:
     return False
 
 
+def jellyfin_user_count() -> int:
+    """Number of users in Jellyfin's own DB (0 => broken first-run state)."""
+    try:
+        conn = sqlite3.connect(f"{APPDATA}/jellyfin/data/data/jellyfin.db")
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM Users").fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        return -1  # unknown - don't guess
+
+
+def jellyfin_reset_wizard_flag() -> bool:
+    """Flip IsStartupWizardCompleted back to false in system.xml.
+
+    Jellyfin >= 10.11 only creates its default admin through the startup
+    wizard, so a "completed" wizard with zero users is a dead end: the
+    /Startup endpoints 401 and there is no other way in. Resetting the flag
+    makes the wizard re-run on the next container start.
+    """
+    path = f"{APPDATA}/jellyfin/system.xml"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        _log(f"WARNING: could not read {path} to reset the wizard flag: {exc}")
+        return False
+    new_text = re.sub(
+        r"<IsStartupWizardCompleted>\s*true\s*</IsStartupWizardCompleted>",
+        "<IsStartupWizardCompleted>false</IsStartupWizardCompleted>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if new_text == text:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+    except OSError as exc:
+        _log(f"WARNING: could not write {path} to reset the wizard flag: {exc}")
+        return False
+    try:
+        ensure_owner(path)
+    except Exception:
+        pass
+    return True
+
+
 @arrived("jellyfin setup")
 def configure_jellyfin():
     _log("--- Jellyfin ---")
@@ -469,10 +519,33 @@ def configure_jellyfin():
         _log("Jellyfin wizard already completed - reusing existing admin.")
     else:
         _log("Completing the Jellyfin first-run wizard...")
-        _http(JELLYFIN_BASE, "/Startup/Configuration", method="POST", body={})
-        _http(JELLYFIN_BASE, "/Startup/User", method="POST",
-              body={"Name": USER, "Password": PASS})
-        _http(JELLYFIN_BASE, "/Startup/Complete", method="POST", body={})
+        # Jellyfin >= 10.11: POST /Startup/User only renames/sets the password
+        # on the FIRST existing user and 404s when none exists. The default
+        # user is created by GET /Startup/User (via UserManager.Initialize).
+        # Calling Complete without it yields a wizard marked done with zero
+        # users and no way to log in - so create the user first and check
+        # every step's status.
+        st, _, j = _http(JELLYFIN_BASE, "/Startup/User", method="GET")
+        if st != 200 or not (isinstance(j, dict) and j.get("Name")):
+            _issues.append("Jellyfin: could not create the initial admin user "
+                           f"(GET /Startup/User -> HTTP {st}) - wizard NOT completed.")
+            _log("WARNING: Jellyfin initial user could not be created - wizard NOT completed.")
+            return False
+        _log(f"Jellyfin: initial user '{j['Name']}' created - renaming to '{USER}'.")
+        st, _, _ = _http(JELLYFIN_BASE, "/Startup/Configuration", method="POST", body={})
+        if st not in (200, 204):
+            _log(f"WARNING: /Startup/Configuration -> HTTP {st} (continuing)")
+        st, _, _ = _http(JELLYFIN_BASE, "/Startup/User", method="POST",
+                         body={"Name": USER, "Password": PASS})
+        if st not in (200, 204):
+            _issues.append(f"Jellyfin: could not set admin credentials (POST /Startup/User -> HTTP {st})")
+            _log("WARNING: Jellyfin admin credentials not applied - wizard NOT completed.")
+            return False
+        st, _, _ = _http(JELLYFIN_BASE, "/Startup/Complete", method="POST", body={})
+        if st not in (200, 204):
+            _issues.append(f"Jellyfin: wizard completion failed (POST /Startup/Complete -> HTTP {st})")
+            _log("WARNING: Jellyfin wizard completion failed.")
+            return False
         time.sleep(3)
 
     # Log in and keep the admin token as the de-facto API key.
@@ -489,9 +562,29 @@ def configure_jellyfin():
     if status in (200, 201) and isinstance(j, dict):
         token = j.get("AccessToken")
     if not token:
-        _issues.append("Could not log in to Jellyfin with the shared credentials "
-                       "(check the Jellyfin admin user, then set JELLYFIN_API_KEY manually)")
-        _log("WARNING: Jellyfin login failed - export the Jellyfin API key manually.")
+        # A wizard marked complete with zero users is a dead end: reset the
+        # flag so the next Jellyfin start re-runs the first-run wizard (and
+        # our flow above creates the admin).
+        if jellyfin_user_count() == 0:
+            if jellyfin_reset_wizard_flag():
+                _issues.append(
+                    "Jellyfin had no users while the wizard was marked complete - "
+                    "reset IsStartupWizardCompleted in system.xml. Restart the "
+                    "jellyfin container, then re-run monarch-init to create the "
+                    "admin user and export JELLYFIN_API_KEY."
+                )
+                _log("WARNING: Jellyfin zombie state (0 users, wizard complete) - "
+                     "wizard flag reset; restart jellyfin and re-run monarch-init.")
+            else:
+                _issues.append(
+                    "Jellyfin had no users while the wizard was marked complete - "
+                    "set IsStartupWizardCompleted=false in system.xml, restart "
+                    "jellyfin, then re-run monarch-init."
+                )
+        else:
+            _issues.append("Could not log in to Jellyfin with the shared credentials "
+                           "(check the Jellyfin admin user, then set JELLYFIN_API_KEY manually)")
+            _log("WARNING: Jellyfin login failed - export the Jellyfin API key manually.")
         return False
 
     key_file = os.path.join(INIT_DIR, "jellyfin-api-key.txt")
