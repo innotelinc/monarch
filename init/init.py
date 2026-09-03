@@ -1255,17 +1255,20 @@ def configure_qbittorrent():
     for cat, save_path in categories.items():
         if cat in have:
             continue
+        # The WebUI API takes form-encoded params, not a JSON body.
         st, _, _ = _http(QBT_BASE, "/api/v2/torrents/createCategory", method="POST",
-                         body={"category": cat, "savePath": save_path}, opener=opener)
+                         body={"category": cat, "savePath": save_path},
+                         opener=opener, raw_form=True)
         if st in (200, 201):
             _log(f"qBittorrent category '{cat}' -> {save_path}")
         else:
             _issues.append(f"qBittorrent: category '{cat}' could not be created (HTTP {st})")
 
     # Default save path + no temp dir so category paths are used as-is.
+    # setPreferences takes its settings as a `json` form field.
     prefs = {"save_path": "/data/torrents", "temp_path_enabled": False}
     st, _, _ = _http(QBT_BASE, "/api/v2/app/setPreferences", method="POST",
-                     body=prefs, opener=opener)
+                     body={"json": json.dumps(prefs)}, opener=opener, raw_form=True)
     if st in (200, 204):
         _log("qBittorrent default save path set to /data/torrents")
     else:
