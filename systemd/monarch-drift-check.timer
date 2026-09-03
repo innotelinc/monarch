@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the Monarch live-stack drift check on a schedule
+Documentation=https://github.com/innotelinc/monarch
+
+[Timer]
+# Every 6 hours; RandomizedDelaySec avoids hammering the stack exactly on the
+# hour across many hosts. Persistent catches up after downtime/boot.
+OnCalendar=*-*-* 00,06,12,18:00:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

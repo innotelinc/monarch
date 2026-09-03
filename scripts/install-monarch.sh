@@ -89,6 +89,15 @@ install_service() {
   $SUDO cp "$root$TARGET/systemd/monarch.service" "$root/etc/systemd/system/monarch.service" 2>/dev/null || \
     $SUDO cp "$ROOT/systemd/monarch.service" "$root/etc/systemd/system/monarch.service"
   $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" "$root/etc/systemd/system/monarch.service"
+  # Live-stack drift check: a read-only monitor on a timer (see
+  # scripts/drift-check.sh). Installed alongside the main service so every
+  # install/update gets it; the ExecStart script path is relative to
+  # WorkingDirectory, so only that needs rewriting.
+  $SUDO cp "$root$TARGET/systemd/monarch-drift-check.service" "$root/etc/systemd/system/monarch-drift-check.service" 2>/dev/null || \
+    $SUDO cp "$ROOT/systemd/monarch-drift-check.service" "$root/etc/systemd/system/monarch-drift-check.service"
+  $SUDO cp "$root$TARGET/systemd/monarch-drift-check.timer" "$root/etc/systemd/system/monarch-drift-check.timer" 2>/dev/null || \
+    $SUDO cp "$ROOT/systemd/monarch-drift-check.timer" "$root/etc/systemd/system/monarch-drift-check.timer"
+  $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" "$root/etc/systemd/system/monarch-drift-check.service"
   # Local Nginx Proxy Manager is opt-in via the "npm" compose profile. When
   # NPM_MODE=remote (MONARCH_NPM_LOCAL=0) drop the --profile flag so the unit
   # never starts a local NPM container.
@@ -103,15 +112,21 @@ install_service() {
     $SUDO systemctl --root "$sysroot" daemon-reload 2>/dev/null || true
     $SUDO systemctl --root "$sysroot" enable monarch.service 2>/dev/null || \
       $SUDO ln -sf /etc/systemd/system/monarch.service "$sysroot/etc/systemd/system/multi-user.target.wants/monarch.service"
+    $SUDO systemctl --root "$sysroot" enable monarch-drift-check.timer 2>/dev/null || \
+      $SUDO ln -sf /etc/systemd/system/monarch-drift-check.timer "$sysroot/etc/systemd/system/timers.target.wants/monarch-drift-check.timer"
     # start only makes sense with a running systemd (live install)
     if [ -z "$root" ] && [ -d /run/systemd/system ]; then
       $SUDO systemctl start monarch.service 2>/dev/null || true
+      $SUDO systemctl start monarch-drift-check.timer 2>/dev/null || true
     fi
   else
     $SUDO systemctl daemon-reload 2>/dev/null || true
     $SUDO systemctl enable monarch.service 2>/dev/null || \
       $SUDO ln -sf /etc/systemd/system/monarch.service /etc/systemd/system/multi-user.target.wants/monarch.service
+    $SUDO systemctl enable monarch-drift-check.timer 2>/dev/null || \
+      $SUDO ln -sf /etc/systemd/system/monarch-drift-check.timer /etc/systemd/system/timers.target.wants/monarch-drift-check.timer
     $SUDO systemctl start monarch.service 2>/dev/null || true
+    $SUDO systemctl start monarch-drift-check.timer 2>/dev/null || true
   fi
 }
 

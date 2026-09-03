@@ -1,0 +1,24 @@
+[Unit]
+Description=Monarch live-stack drift check (read-only invariants)
+Documentation=https://github.com/innotelinc/monarch
+Requires=docker.service
+After=monarch.service docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/monarch
+
+# Probes the running stack and verifies monarch-init's invariants without
+# writing anything. Exits non-zero with DRIFT-FAIL lines on the journal when
+# something drifted (e.g. a container was recreated without the seed, or an
+# app's auth got reset). See scripts/drift-check.sh. The script path is
+# relative to WorkingDirectory (rewritten to the install target by
+# install-monarch.sh).
+ExecStart=/usr/bin/bash ./scripts/drift-check.sh --quiet
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
