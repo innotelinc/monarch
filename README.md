@@ -437,6 +437,16 @@ sudo systemctl status monarch-drift-check.timer
 journalctl -u monarch-drift-check.service      # last run + any DRIFT-FAIL lines
 ```
 
+### Telegram alerts (optional)
+
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (create the bot
+with @BotFather, get your chat id with @userinfobot) and the timer sends a
+Telegram message listing every `DRIFT-FAIL` line when drift is found:
+
+```
+./scripts/drift-check.sh --test-telegram      # send a test message
+```
+
 Drift happens when a container is recreated without the seed (e.g. an app
 reset its own config, or a volume was restored from a stale backup). Re-run
 `monarch-init` to repair it:

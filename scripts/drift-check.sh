@@ -41,9 +41,11 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 QUIET=0
+TEST_TG=0
 for arg in "$@"; do
   case "$arg" in
     --quiet) QUIET=1 ;;
+    --test-telegram) TEST_TG=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -60,8 +62,27 @@ USER="${MONARCH_USERNAME:-admin}"
 PASS="${MONARCH_PASSWORD:-monarch8}"
 
 FAILS=0
+FAIL_LINES=()
 say()  { [ "$QUIET" -eq 0 ] && echo "$@"; }
-fail() { echo "DRIFT-FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
+fail() { echo "DRIFT-FAIL: $*" >&2; FAIL_LINES+=("$*"); FAILS=$((FAILS + 1)); }
+
+# ── Telegram alerting (optional) ──────────────────────────────────────────
+# Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env to get a push message
+# when drift is found. The bot must be created via @BotFather; the chat id
+# can be found with @userinfobot (or use a group the bot is added to).
+# A test message can be sent with:
+#   scripts/drift-check.sh --test-telegram
+notify_telegram() {  # notify_telegram <subject> <message...> -> 0 on success
+  local subject="$1"; shift
+  local msg="$subject" line
+  for line in "$@"; do msg+=$'\n'"$line"; done
+  local reply
+  reply=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+    --data-urlencode "text=$msg" \
+    --data-urlencode "disable_web_page_preview=true")
+  echo "$reply" | grep -q '"ok":true' || { echo "Telegram send failed: $(echo "$reply" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("description",d))' 2>/dev/null || echo "$reply")" >&2; return 1; }
+}
 
 json_get() {  # json_get <url> <header...> -> echoes body, 0 on HTTP 200
   local url="$1"; shift
@@ -325,8 +346,23 @@ fi
 
 rm -f /tmp/drift-body.$$
 
+if [ "$TEST_TG" -eq 1 ]; then
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+    echo "DRIFT-FAIL: --test-telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env" >&2
+    exit 1
+  fi
+  if notify_telegram "drift-check test from $(hostname)" "Telegram alerting configured and reachable."; then
+    echo "drift-check: test message sent to Telegram chat $TELEGRAM_CHAT_ID"
+    exit 0
+  fi
+  exit 1
+fi
+
 if [ "$FAILS" -gt 0 ]; then
   echo "drift-check: $FAILS issue(s) found" >&2
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    notify_telegram "⚠️ Monarch drift check failed on $(hostname)" "${FAIL_LINES[@]}" || true
+  fi
   exit 1
 fi
 echo "drift-check: all live-stack invariants OK"
