@@ -1450,19 +1450,25 @@ def _jellyseerr_opener():
 def _jellyseerr_login(opener):
     """Sign in via Jellyfin (creates the admin user + Jellyfin connection on
     first run and sets the session cookie)."""
-    status, _, j = _http(JELLYSEERR_BASE, "/api/v1/auth/jellyfin", method="POST",
-                         body={
-                             "username": USER,
-                             "password": PASS,
-                             "hostname": "jellyfin",
-                             "port": 8096,
-                             "useSsl": False,
-                             "urlBase": "",
-                             "email": "admin@innotel.us",
-                             "serverType": 2,  # MediaServerType.JELLYFIN
-                         },
-                         opener=opener)
-    return status == 200 and isinstance(j, dict) and bool(j.get("id"))
+    # Once the Jellyfin connection is stored, /auth/jellyfin rejects a
+    # hostname with 500 "Jellyfin hostname already configured" - try with it
+    # first (first run), then without it (subsequent runs).
+    bodies = ({
+        "username": USER, "password": PASS,
+        "hostname": "jellyfin", "port": 8096, "useSsl": False,
+        "urlBase": "", "email": "admin@innotel.us",
+        "serverType": 2,  # MediaServerType.JELLYFIN
+    }, {
+        "username": USER, "password": PASS,
+        "email": "admin@innotel.us",
+        "serverType": 2,
+    })
+    for body in bodies:
+        status, _, j = _http(JELLYSEERR_BASE, "/api/v1/auth/jellyfin",
+                             method="POST", body=body, opener=opener)
+        if status == 200 and isinstance(j, dict) and bool(j.get("id")):
+            return True
+    return False
 
 
 def _jellyseerr_enable_jellyfin_login(opener):
