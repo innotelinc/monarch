@@ -12,7 +12,12 @@ set -euo pipefail
 #      subdomain (skips boards that were already customized).
 #   4. Auto-configures Nginx Proxy Manager through its API
 #      (scripts/npm-proxy-hosts.py): subdomain proxy hosts + wildcard
-#      Let's Encrypt certificate via DNS challenge.
+#      Let's Encrypt certificate via DNS challenge. When the NPM admin has
+#      not been created yet, the script bootstraps it from NPM_ADMIN_EMAIL /
+#      NPM_ADMIN_PASSWORD automatically.
+#   5. Optionally provisions the two Stripe webhook endpoints from
+#      STRIPE_SECRET_KEY (scripts/stripe-webhooks.sh) - runs only when a real
+#      key is set and the webhook secrets are still placeholders.
 #
 # Requires: bash, python3 (for the NPM script), and the variables documented
 # in .env.sample - at minimum MONARCH_DOMAIN, and for HTTPS the SSL_EMAIL +
@@ -81,6 +86,19 @@ else
   echo ""
   echo "WARNING: python3 not found - skipping Nginx Proxy Manager configuration."
   echo "Install python3 and re-run:  python3 scripts/npm-proxy-hosts.py"
+fi
+
+# 5. Stripe webhooks (optional) - only when a real STRIPE_SECRET_KEY is in
+# .env and the signing secrets are still placeholders (first configure).
+if [ -f .env ] && grep -Eq '^STRIPE_SECRET_KEY=(sk_(test|live)_.+)$' .env; then
+  if grep -Eq '^(STRIPE_WEBHOOK_SECRET|BILLING_WEBHOOK_SECRET)=(|whsec_replace_me)$' .env; then
+    echo ""
+    echo "=== Provisioning Stripe webhooks ==="
+    bash scripts/stripe-webhooks.sh || echo "  (stripe-webhooks.sh failed - see its output)"
+  else
+    echo ""
+    echo "Stripe webhook secrets already configured - skipping webhook setup."
+  fi
 fi
 
 echo ""

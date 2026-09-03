@@ -170,19 +170,59 @@ class NpmClient:
         except Exception as exc:  # noqa: BLE001 - network errors
             return 0, str(exc)
 
-    def login(self, email, password):
+    def login(self, email, password, quiet=False):
         status, body = self._request("POST", "/api/tokens",
                                      {"identity": email, "secret": password})
         if status == 200 and isinstance(body, dict) and body.get("token"):
             return body["token"]
-        if status in (401, 403):
-            print(f"  ERROR: NPM rejected the admin login ({status}).")
-            print("  If this is the first run, open http://<host>:81 once, set your")
-            print("  admin email + password (default admin@example.com / changeme),")
-            print("  then re-run setup.sh.")
-        else:
-            print(f"  ERROR: NPM login failed (HTTP {status}): {body}")
+        if not quiet:
+            if status in (401, 403):
+                print(f"  ERROR: NPM rejected the admin login ({status}).")
+                print("  If this is the first run, open http://<host>:81 once, set your")
+                print("  admin email + password (default admin@example.com / changeme),")
+                print("  then re-run setup.sh.")
+            else:
+                print(f"  ERROR: NPM login failed (HTTP {status}): {body}")
         return None
+
+    def bootstrap_first_admin(self, email, password):
+        """Create the initial NPM admin account with the configured credentials.
+
+        Current NPM images boot WITHOUT a default account - the UI asks you to
+        create one on the first visit, and POST /api/users is accepted
+        unauthenticated until a user exists. Older NPM images seeded
+        admin@example.com / changeme, so fall back to logging in with that and
+        creating the configured admin. Returns True when an account was made.
+        """
+        payload = {"name": "Admin", "nickname": "admin", "email": email,
+                   "auth": {"type": "password", "secret": password}}
+        # Right after the container starts, the UI answers 200 while the API
+        # backend is still coming up (502 from openresty / 404 on the route), so
+        # retry creation for a short window before giving up.
+        status = created = None
+        for _ in range(12):
+            status, created = self._request("POST", "/api/users", body=payload)
+            if status in (200, 201) and isinstance(created, dict) and created.get("id"):
+                print(f"  Bootstrapped NPM admin {created.get('email')} "
+                      "(first-run account created automatically).")
+                return True
+            if status in (404, 502, 503, 504, 0):
+                time.sleep(5)
+                continue
+            break  # deterministic rejection (users already exist, bad payload, ...)
+        # Users already exist (or older NPM): try the seeded default account.
+        token = self.login("admin@example.com", "changeme", quiet=True)
+        if token:
+            status, created = self._request("POST", "/api/users", body=payload,
+                                            token=token)
+            if status in (200, 201) and isinstance(created, dict) and created.get("id"):
+                print(f"  Bootstrapped NPM admin {created.get('email')} "
+                      "(created next to the default account).")
+                return True
+            print("  NPM has existing users and the default-account login works, "
+                  "but creating the configured admin failed "
+                  f"(HTTP {status}) - set it in the NPM UI instead.")
+        return False
 
     def get_schema(self, token=None):
         """Fetch the OpenAPI schema exposed by newer NPM versions (legacy
@@ -441,7 +481,12 @@ def main():
         sys.exit(2 if not args.dry_run else 0)
 
     client = NpmClient(npm_url)
-    token = None if args.dry_run else client.login(npm_email, npm_pass)
+    token = None if args.dry_run else client.login(npm_email, npm_pass, quiet=True)
+    if not token and not args.dry_run:
+        print("  NPM did not accept the configured admin login - checking whether "
+              "this is a first-run instance that needs its admin created...")
+        client.bootstrap_first_admin(npm_email, npm_pass)
+        token = client.login(npm_email, npm_pass)
     if not token and not args.dry_run:
         sys.exit(1)
 

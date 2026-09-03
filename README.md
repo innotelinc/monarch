@@ -46,7 +46,7 @@ cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc. (below)
 ./setup.sh
 ```
 
-`setup.sh` is idempotent and does four things:
+`setup.sh` is idempotent and does five things:
 
 1. Creates `.env` from `.env.sample` when missing (never overwrites).
 2. Installs the stack via `scripts/install-monarch.sh` (Docker, `/data`
@@ -58,8 +58,13 @@ cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc. (below)
    subdomain. Boards you have already customized are left untouched.
 4. Auto-configures **Nginx Proxy Manager** through its API
    (`scripts/npm-proxy-hosts.py`): creates the proxy hosts for the apex
-   (`MONARCH_DOMAIN` itself) plus every subdomain, and requests a
-   **wildcard Let's Encrypt certificate** via a DNS challenge.
+   (`MONARCH_DOMAIN` itself) plus every subdomain, requests a
+   **wildcard Let's Encrypt certificate** via a DNS challenge, and
+   bootstraps the NPM admin account from `NPM_ADMIN_EMAIL` /
+   `NPM_ADMIN_PASSWORD` when it has not been created yet.
+5. Provisions the two **Stripe webhook** endpoints from `STRIPE_SECRET_KEY`
+   (`scripts/stripe-webhooks.sh`) when their signing secrets are still
+   placeholders in `.env` — reruns skip it once configured.
 
 Re-run `./setup.sh` any time you change `.env` or `scripts/npm-hosts.conf` —
 the proxy hosts are reconciled in place and the certificate is reused.
@@ -256,9 +261,11 @@ Other DNS providers are supported via `NPM_DNS_PROVIDER` (route53, godaddy,
 vultr, ovh, hetzner, ...) — credentials always go in `NPM_DNS_CREDENTIALS`
 as JSON (or set `CLOUDFLARE_API_TOKEN` for the Cloudflare convenience path).
 
-First-time NPM admin: open `http://<host>:81` once (local mode), create your
-admin account (default `admin@example.com` / `changeme`), then re-run
-`./setup.sh`. In remote mode make sure `NPM_ADMIN_EMAIL` /
+First-time NPM admin (local mode) needs no manual step: current NPM images
+boot **without** a default account, and the script bootstraps the admin from
+`NPM_ADMIN_EMAIL` / `NPM_ADMIN_PASSWORD` automatically. If your NPM still has
+the legacy `admin@example.com` / `changeme` default, the configured admin is
+created alongside it. In remote mode make sure `NPM_ADMIN_EMAIL` /
 `NPM_ADMIN_PASSWORD` are the existing server's real credentials. The script
 prints clear guidance if the API login fails.
 
@@ -446,10 +453,11 @@ sudo docker compose up -d
    (see [Remaining config](#remaining-config)). Tag an indexer `cloudflare`
    to route it through the **FlareSolverr proxy** that `monarch-init`
    already registered.
-2. **NPM admin password** — set it once in the NPM UI before (re)running
-   `./setup.sh`.
-3. **Stripe webhooks** — two endpoints, six events each (see
-   `.env.sample`).
+2. **Stripe** — put your secret key (`STRIPE_SECRET_KEY`) in `.env`, then
+   run `./scripts/stripe-webhooks.sh` once. It creates the two webhook
+   endpoints (six events each) and writes their signing secrets into `.env`
+   for you; `./setup.sh` does this automatically on first configure. The
+   endpoints must be publicly reachable (`APP_URL` and the `api.` subdomain).
 
 ***************************
 
