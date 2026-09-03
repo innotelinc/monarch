@@ -462,16 +462,42 @@ def configure_authentik_ldap():
 # Jellyfin
 # ---------------------------------------------------------------------------
 
-def jellyfin_wizard_pending() -> bool:
-    status, _, _ = _http(JELLYFIN_BASE, "/Startup/Configuration")
-    if status == 200:
-        return True
-    # Fallback: some versions only report it via the public info endpoint;
-    # a completed wizard no longer exposes the /Startup endpoints.
-    status, _, j = _http(JELLYFIN_BASE, "/System/Info/Public")
-    if status == 200 and isinstance(j, dict):
-        return bool(j.get("StartupWizardCompleted", True)) is False
-    return False
+
+
+
+def jellyfin_wizard_pending(timeout=600) -> bool:
+    """Is the first-run wizard pending? Polls until the state is DEFINITIVE.
+
+    During early boot Jellyfin answers HTTP before the /Startup endpoints are
+    mounted and before system.xml has been fully written, so a single probe
+    can misread "still starting up" as "wizard completed" (public info can
+    lack the StartupWizardCompleted field entirely) - which made init skip the
+    wizard on a genuinely fresh boot, fail to log in, and then hit a dead-end
+    zombie state. Poll until we can tell for sure:
+      * /Startup/Configuration answers 200      -> wizard IS pending
+      * /System/Info/Public reports completed   -> wizard is DONE
+    Anything else (connection refused, 4xx/5xx, missing field) means Jellyfin
+    is not done starting up yet - keep waiting.
+    """
+    deadline = time.time() + timeout
+    saw_pending = False
+    while time.time() < deadline:
+        # /Startup/Configuration answers 200 only while the wizard is pending
+        # AND the setup endpoints are mounted - i.e. ready for our flow.
+        status, _, _ = _http(JELLYFIN_BASE, "/Startup/Configuration")
+        if status == 200:
+            return True
+        status, _, j = _http(JELLYFIN_BASE, "/System/Info/Public")
+        if status == 200 and isinstance(j, dict):
+            flag = j.get("StartupWizardCompleted")
+            if flag is False:
+                saw_pending = True  # wizard pending, endpoints still mounting
+            elif flag is True:
+                return False  # definitively completed - nothing to run
+        time.sleep(5)
+    # Timed out: only treat it as "done" if we never saw the wizard pending;
+    # otherwise report pending so the caller attempts the setup flow again.
+    return saw_pending
 
 
 def jellyfin_user_count() -> int:
@@ -568,23 +594,33 @@ def configure_jellyfin():
             return False
         time.sleep(3)
 
-    # Log in and keep the admin token as the de-facto API key.
+    # Log in and keep the admin token as the de-facto API key. Right after
+    # the wizard is completed Jellyfin restarts itself (setup mode -> normal),
+    # so on a slow first boot AuthenticateByName can 401 for a few seconds -
+    # wait for the server to settle, then retry the login a few times.
     auth_header = (
         'MediaBrowser Client="Monarch Init", Device="Linux", '
         'DeviceId="monarch-init-001", Version="1.0.0"'
     )
-    status, text, j = _http(
-        JELLYFIN_BASE, "/Users/AuthenticateByName", method="POST",
-        body={"Username": USER, "Pw": PASS},
-        headers={"X-Emby-Authorization": auth_header},
-    )
     token = None
-    if status in (200, 201) and isinstance(j, dict):
-        token = j.get("AccessToken")
+    for attempt in range(6):
+        if attempt:
+            time.sleep(10)
+        status, text, j = _http(
+            JELLYFIN_BASE, "/Users/AuthenticateByName", method="POST",
+            body={"Username": USER, "Pw": PASS},
+            headers={"X-Emby-Authorization": auth_header},
+        )
+        if status in (200, 201) and isinstance(j, dict) and j.get("AccessToken"):
+            token = j["AccessToken"]
+            break
+        _log(f"Jellyfin login attempt {attempt + 1}/6 -> HTTP {status} (server may still be settling after the wizard)")
     if not token:
         # A wizard marked complete with zero users is a dead end: reset the
         # flag so the next Jellyfin start re-runs the first-run wizard (and
-        # our flow above creates the admin).
+        # our flow above creates the admin). If the flag is ALREADY false the
+        # wizard is genuinely pending - Jellyfin just needs a restart so the
+        # pending wizard re-runs and creates the admin.
         if jellyfin_user_count() == 0:
             if jellyfin_reset_wizard_flag():
                 _issues.append(
@@ -596,11 +632,18 @@ def configure_jellyfin():
                 _log("WARNING: Jellyfin zombie state (0 users, wizard complete) - "
                      "wizard flag reset; restart jellyfin and re-run monarch-init.")
             else:
+                # The flag was already false: no reset needed, the wizard is
+                # simply pending. A Jellyfin restart makes the pending wizard
+                # create the admin user, after which re-running init logs in.
                 _issues.append(
-                    "Jellyfin had no users while the wizard was marked complete - "
-                    "set IsStartupWizardCompleted=false in system.xml, restart "
-                    "jellyfin, then re-run monarch-init."
+                    "Jellyfin has no users and the first-run wizard did not "
+                    "create the admin (login was denied). Restart the jellyfin "
+                    "container so the pending wizard runs, then re-run "
+                    "monarch-init."
                 )
+                _log("WARNING: Jellyfin has 0 users but the wizard flag is already "
+                     "false - restart jellyfin so the pending wizard runs, then "
+                     "re-run monarch-init.")
         else:
             _issues.append("Could not log in to Jellyfin with the shared credentials "
                            "(check the Jellyfin admin user, then set JELLYFIN_API_KEY manually)")
@@ -787,6 +830,12 @@ def configure_jellyfin_ldap():
         pass
     if not token:
         _issues.append("jellyfin-ldap: no Jellyfin admin token available - run Jellyfin setup first")
+        return False
+    if not AUTHENTIK_BASE_URL or not AUTHENTIK_BOOTSTRAP_TOKEN:
+        # Authentik is not part of this deployment (e.g. the CI full-stack
+        # check blanks it on purpose) - there is no LDAP outpost to point the
+        # plugin at, and installing it would restart Jellyfin for nothing.
+        _log("WARNING: Authentik not configured - skipping Jellyfin LDAP wiring.")
         return False
     if not LDAP_BIND_TOKEN:
         _issues.append("jellyfin-ldap: AUTHENTIK_LDAP_BIND_TOKEN is not set in docker-compose.yml")

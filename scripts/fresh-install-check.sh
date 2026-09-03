@@ -27,14 +27,22 @@ set -euo pipefail
 #     the template into /docker/appdata/homarr/configs/default.json), restarts
 #     it, and probes http://127.0.0.1:7575 for HTTP 200. The container is shut
 #     down afterwards (keep it running with MONARCH_CHECK_KEEP=1).
+#   Stage 3 (--full-stack, DISPOSABLE host/VM with Docker + sudo): boots the
+#     probe-able stack (jellyfin, *arrs, prowlarr, qBittorrent, bazarr,
+#     jellyseerr) + monarch-init, waits for init to wire everything, then
+#     runs the REAL drift check (scripts/drift-check.sh) against it - the
+#     closest CI gets to a live deployment. Authentik is not booted (heavy,
+#     needs migrations); both init.py and the drift check skip it when
+#     AUTHENTIK_BOOTSTRAP_TOKEN is empty, which the stage blanks in its env.
 #
-# Stage 2 writes to the real /docker/appdata and starts a container, so it
-# refuses to run when a live stack is detected unless the host is explicitly
+# Stages 2/3 write to the real /docker/appdata and start containers, so they
+# refuse to run when a live stack is detected unless the host is explicitly
 # declared disposable. Stage 1 is safe to run anywhere, any time.
 #
 # Usage:
 #   scripts/fresh-install-check.sh                     # offline rehearsal
 #   scripts/fresh-install-check.sh --full              # + live Homarr boot
+#   scripts/fresh-install-check.sh --full-stack        # + real stack + drift check
 #   MONARCH_DOMAIN=my.test scripts/fresh-install-check.sh
 #
 # Env overrides: MONARCH_CHECK_DOMAIN (default monarch-check.test - use a
@@ -48,10 +56,12 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
 FULL=0
+FULL_STACK=0
 for arg in "$@"; do
   case "$arg" in
     --full) FULL=1 ;;
-    *) echo "Unknown argument: $arg (expected --full)" >&2; exit 2 ;;
+    --full-stack) FULL_STACK=1 ;;
+    *) echo "Unknown argument: $arg (expected --full or --full-stack)" >&2; exit 2 ;;
   esac
 done
 
@@ -352,6 +362,141 @@ if [ "$FULL" = "1" ]; then
   if [ "${MONARCH_CHECK_KEEP:-0}" != "1" ]; then
     echo "  Stopping homarr (keep it up with MONARCH_CHECK_KEEP=1)..."
     docker compose -f docker-compose.yml rm -sf homarr > /dev/null 2>&1 || true
+  fi
+fi
+
+# ── Stage 3 (--full-stack): boot the real stack + run the real drift check ─
+# Boots the probe-able services (the ones scripts/drift-check.sh checks:
+# jellyfin, the *arrs, prowlarr, qBittorrent, bazarr, jellyseerr) plus
+# monarch-init, then runs the ACTUAL drift check against them. This is the
+# closest CI gets to a live deployment: it exercises init.py end-to-end
+# (Jellyfin wizard + admin, forms auth, root folders, qBittorrent client +
+# categories, Prowlarr apps, Bazarr, Jellyseerr) and then verifies every
+# invariant the drift check asserts.
+#
+# Authentik is intentionally NOT booted: its images are heavy and it needs
+# migrations. Both init.py and the drift check skip it when
+# AUTHENTIK_BOOTSTRAP_TOKEN is empty (the check's Authentik block is
+# conditional on the env var), so blanking it keeps this stage fast while
+# still covering everything else.
+if [ "$FULL_STACK" = "1" ]; then
+  echo ""
+  echo "=== Stage 3: full-stack boot + real drift check (disposable host required) ==="
+  command -v docker > /dev/null 2>&1 || { echo "FAIL: --full-stack needs docker" >&2; exit 1; }
+  if ! docker info > /dev/null 2>&1; then
+    echo "FAIL: docker daemon is not running" >&2; exit 1
+  fi
+  if docker ps --format '{{.Names}}' | grep -qE '^(homarr|nginx-proxy-manager|monarch-)' \
+     && [ "${MONARCH_CHECK_DISPOSABLE:-0}" != "1" ]; then
+    echo "FAIL: a Monarch stack is already running - refusing to touch it." >&2
+    echo "      Run this on a disposable host/VM, or export MONARCH_CHECK_DISPOSABLE=1." >&2
+    exit 1
+  fi
+
+  # Create the host layout the compose file mounts (/data for the media
+  # folders + appdata, owned by the containers' PUID 1000), exactly like
+  # install-monarch.sh create_data_dirs does. Every appdata service dir is
+  # pre-created here on purpose: Docker creates missing bind-mount sources
+  # as root, and Jellyseerr (unlike the hotio images) has no root init to
+  # chown /config itself - a root-owned dir crash-loops it with EACCES on
+  # a genuinely fresh host.
+  $SUDO mkdir -p /data/media/{tv,movies,music,xxx} \
+                /data/torrents/{tv,movies,music,xxx} \
+                /docker/appdata /opt/epg
+  for svc in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr \
+             qbittorrent bazarr homarr; do
+    $SUDO mkdir -p "/docker/appdata/$svc"
+    $SUDO chown -R 1000:1000 "/docker/appdata/$svc" 2>/dev/null || true
+  done
+  $SUDO mkdir -p /docker/appdata/homarr/configs
+  $SUDO chown -R 1000:1000 /docker/appdata 2>/dev/null || true
+  $SUDO chown -R 1000:1000 /data /opt/epg 2>/dev/null || true
+
+  # Throwaway .env (test domain + random password), Authentik blanked so
+  # init.py and the drift check both skip it. docker-compose.yml hardcodes
+  # AUTHENTIK_BASE_URL and `${AUTHENTIK_BOOTSTRAP_TOKEN:-...}` falls back to
+  # the default for an EMPTY value, so a .env blank is not enough - use a
+  # compose override file that forces both to empty for the init container.
+  render_env "$SCRATCH/.env"
+  sed -i -e 's|^AUTHENTIK_BASE_URL=.*|AUTHENTIK_BASE_URL=|' \
+         -e 's|^AUTHENTIK_BOOTSTRAP_TOKEN=.*|AUTHENTIK_BOOTSTRAP_TOKEN=|' \
+         -e 's|^JELLYFIN_URL=.*|JELLYFIN_URL=http://jellyfin:8096|' \
+         -e 's|^REQUEST_URL=.*|REQUEST_URL=https://req.monarch-check.test|' \
+         "$SCRATCH/.env"
+  cat > "$SCRATCH/no-authentik.yml" <<EOF
+services:
+  monarch-init:
+    environment:
+      AUTHENTIK_BASE_URL: ""
+      AUTHENTIK_BOOTSTRAP_TOKEN: ""
+EOF
+
+  echo "  Starting the probe-able stack (image pulls may take a while)..."
+  # Start ONLY the services the drift check probes (qbittorrent pulls in
+  # monarch-seed via depends_on). sabnzbd + iptv are monarch-init's deps but
+  # are NOT probed and iptv's RUN_AT_STARTUP EPG grab spikes memory on a
+  # small CI runner - keep them out and run init with --no-deps.
+  if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
+       --env-file "$SCRATCH/.env" up -d jellyfin sonarr radarr lidarr whisparr \
+       prowlarr qbittorrent bazarr jellyseerr > "$SCRATCH/up.log" 2>&1; then
+    bad "docker compose up -d (probe-able services) failed:"
+    tail -20 "$SCRATCH/up.log" | sed 's/^/    /'
+    exit 1
+  fi
+  ok "stack started (jellyfin, *arrs, prowlarr, qBittorrent, bazarr, jellyseerr)"
+
+  echo "  Running monarch-init to wire the stack..."
+  if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
+       -f "$SCRATCH/no-authentik.yml" \
+       --env-file "$SCRATCH/.env" run --rm --no-deps monarch-init \
+       > "$SCRATCH/init.log" 2>&1; then
+    bad "monarch-init failed to run:"
+    tail -40 "$SCRATCH/init.log" | sed 's/^/    /'
+    exit 1
+  fi
+  ok "monarch-init completed"
+
+  echo "  monarch-init summary (from init.log):"
+  # `compose run --rm` removes the container when done, so pull the summary
+  # from the captured log, not `docker logs`. Show every line from SUMMARY
+  # through the manual-action items.
+  sed -n '/monarch-init\] SUMMARY/,$p' "$SCRATCH/init.log" | \
+    grep -v 'monarch-init\] =' | sed 's/^/    /' | head -40
+
+  echo "  Waiting for Jellyfin to be responsive again (it restarts for the LDAP plugin)..."
+  n=0
+  while [ "$n" -lt 24 ]; do
+    if curl -sf -o /dev/null http://127.0.0.1:8096/System/Info/Public 2>/dev/null; then break; fi
+    n=$((n + 1)); sleep 5
+  done
+  echo "  Running the real drift check..."
+  sleep 10
+  if MONARCH_ENV="$SCRATCH/.env" bash scripts/drift-check.sh --quiet; then
+    ok "real drift check passed against the booted stack (exit 0)"
+  else
+    bad "real drift check FAILED against the booted stack"
+    echo "  Diagnosing the failing services (logs below):"
+    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr qbittorrent bazarr; do
+      st="$(docker inspect -f '{{.State.Status}} (restarts={{.RestartCount}})' "$c" 2>/dev/null || echo down)"
+      echo "    $c: $st"
+    done
+    for c in jellyfin jellyseerr; do
+      echo "    --- $c log tail ---"
+      docker logs --tail 25 "$c" 2>&1 | sed 's/^/      /'
+    done
+    echo "    --- OOM evidence (dmesg) ---"
+    if dmesg 2>/dev/null | grep -iE 'oom|killed process' | tail -8 | sed 's/^/      /'; then :; else echo "      (dmesg unavailable - no permission)"; fi
+    echo "    --- container memory (top 8 by RSS) ---"
+    docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null | sort -k2 -hr | head -8 | sed 's/^/      /' || true
+    echo "  (re-run manually with MONARCH_CHECK_KEEP=1 to inspect the stack)"
+  fi
+
+  if [ "${MONARCH_CHECK_KEEP:-0}" != "1" ]; then
+    echo "  Tearing the stack down (keep it up with MONARCH_CHECK_KEEP=1)..."
+    MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
+      -f "$SCRATCH/no-authentik.yml" \
+      --env-file "$SCRATCH/.env" down --remove-orphans > /dev/null 2>&1 || true
+    $SUDO rm -rf /data/media /data/torrents /docker/appdata /opt/epg 2>/dev/null || true
   fi
 fi
 

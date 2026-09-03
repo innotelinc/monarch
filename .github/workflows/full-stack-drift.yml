@@ -1,0 +1,49 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# full-stack-drift.yml — boot the REAL Monarch stack and run the REAL drift
+# check against it on every change that could affect what monarch-init wires
+# (init.py, compose, the drift check itself), nightly, and on demand.
+#
+# Runs scripts/fresh-install-check.sh --full-stack on a clean ubuntu-latest
+# runner: stages 1 (offline rehearsal incl. the drift-check <-> monarch-init
+# lockstep) + 3 (boots jellyfin, the *arrs, prowlarr, qBittorrent, bazarr,
+# jellyseerr + monarch-init; waits for init to wire everything; then runs
+# scripts/drift-check.sh --quiet against the booted stack and requires exit
+# 0). Authentik is not booted (both init.py and the drift check skip it when
+# AUTHENTIK_BOOTSTRAP_TOKEN is empty, which the stage blanks).
+#
+# Slower than the Homarr smoke check (image pulls + init run), so it only
+# triggers on the drift-relevant paths instead of every PR.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Full-stack drift check
+
+on:
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - "init/**"
+      - "scripts/drift-check.sh"
+      - "scripts/fresh-install-check.sh"
+      - ".env.sample"
+  schedule:
+    # Nightly belt-and-suspenders run.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-stack-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-stack-drift:
+    name: Full-stack boot + real drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run fresh-install check (full stack + drift)
+        run: ./scripts/fresh-install-check.sh --full-stack

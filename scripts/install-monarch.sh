@@ -139,6 +139,26 @@ create_data_dirs() {
                 "$root/data/torrents/{tv,movies,music,xxx}"
   $SUDO chown -R 1000:1000 "$root/data"
   $SUDO chmod -R a=,a+rX,u+w,g+w "$root/data"
+  # Docker creates missing bind-mount SOURCE dirs as root when a container
+  # first starts, and hotio/*arr images chown their /config at boot - but
+  # Jellyseerr's node image runs directly as UID 1000 with no root init, so a
+  # root-owned /docker/appdata/jellyseerr makes it crash-loop with EACCES.
+  # Pre-create every appdata dir the compose file mounts, owned by the stack's
+  # PUID 1000, so first boot is writable for all of them. (Deliberately NOT a
+  # blanket chown -R over the whole appdata tree: authentik's postgresql dir
+  # must stay owned by UID 999 and is handled separately below.)
+  local appdata_svcs=(jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr \
+                      qbittorrent bazarr sabnzbd transmission deluge requestrr \
+                      autobrr dispatcharr tvheadend nextpvr homarr monarch-health \
+                      monarch-recs nginx-proxy-manager)
+  local d
+  for svc in "${appdata_svcs[@]}"; do
+    d="$root/docker/appdata/$svc"
+    $SUDO mkdir -p "$d"
+    $SUDO chown -R 1000:1000 "$d"
+  done
+  $SUDO mkdir -p "$root/docker/appdata/homarr"/{configs,icons,data}
+  $SUDO chown -R 1000:1000 "$root/docker/appdata/homarr"
   # authentik's image runs as a non-root user (UID 1000) and cannot create its
   # own /media + /templates dirs if the host mounts are root-owned - pre-create
   # them with the same ownership as the rest of the stack. The postgresql data

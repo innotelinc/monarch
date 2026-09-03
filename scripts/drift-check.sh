@@ -39,12 +39,21 @@ set -uo pipefail
 #     - API key readable, basic auth configured
 #   Authentik:
 #     - LDAP outpost provisioned (when AUTHENTIK_BASE_URL is set)
+#   Infra (host, only when the docker CLI works):
+#     - /data and /docker/appdata disk usage below DRIFT_DISK_MAX_PCT (90)
+#     - each probed container not crash-looping (RestartCount below
+#       DRIFT_MAX_RESTARTS, default 10)
+#     - each probed container runs the current image (watchtower pulled a
+#       newer one but the container was never recreated -> stale image)
 #
 # Modes:
 #   (default)            check the live stack, read-only
 #   --quiet              only print DRIFT-FAIL lines (for cron/timers)
 #   --heal               when drift is found, re-run monarch-init, then
-#                        re-verify and report whether the stack healed
+#                        re-verify and report whether the stack healed.
+#                        Rate-limited: DRIFT_HEAL_MIN_INTERVAL (default 3600s)
+#                        must have passed since the last heal attempt, else
+#                        it escalates straight to an alert instead of looping.
 #   --check-manifest     validate a manifest file's schema only (no network) -
 #                        used by fresh-install-check.sh in CI; pass the file
 #                        with MONARCH_INVARIANTS=<path>
@@ -454,6 +463,45 @@ except Exception:
   rm -f /tmp/drift-ak.$$
 fi
 
+# ───────────────────────────────────────────────────────────────────────────
+# Infra (host-level, only when the docker CLI works)
+# ───────────────────────────────────────────────────────────────────────────
+DRIFT_DISK_MAX_PCT="${DRIFT_DISK_MAX_PCT:-90}"
+DRIFT_MAX_RESTARTS="${DRIFT_MAX_RESTARTS:-10}"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  # 1. Disk usage on the two host mounts everything reads/writes.
+  for mp in /data /docker/appdata; do
+    [ -d "$mp" ] || continue
+    pct=$(df -P "$mp" 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')
+    if [ -n "$pct" ] && [ "$pct" -ge "$DRIFT_DISK_MAX_PCT" ]; then
+      fail "infra: $mp at ${pct}% disk usage (>= ${DRIFT_DISK_MAX_PCT}%)"
+    else
+      say "ok: infra disk $mp at ${pct}%"
+    fi
+  done
+
+  # 2. Container health: crash-looping (high RestartCount) or running a stale
+  #    image (watchtower pulled a newer one but the container was never
+  #    recreated). Probed containers are the *arr apps + the fixed set.
+  while IFS= read -r cname; do
+    [ -n "$cname" ] || continue
+    rc=$(docker inspect -f '{{.RestartCount}}' "$cname" 2>/dev/null || echo 0)
+    if [ "$rc" -ge "$DRIFT_MAX_RESTARTS" ]; then
+      fail "infra: $cname restarted $rc times (>= ${DRIFT_MAX_RESTARTS}) - possible crash loop"
+    fi
+    # Image the container was created from vs the current image for its tag.
+    cimg=$(docker inspect -f '{{.Image}}' "$cname" 2>/dev/null || echo "")
+    tag=$(docker inspect -f '{{.Config.Image}}' "$cname" 2>/dev/null || echo "")
+    if [ -n "$cimg" ] && [ -n "$tag" ]; then
+      cur=$(docker image inspect -f '{{.Id}}' "$tag" 2>/dev/null || echo "")
+      if [ -n "$cur" ] && [ "$cimg" != "$cur" ]; then
+        fail "infra: $cname runs a stale image (container ${cimg:0:12}, current ${cur:0:12}) - recreate needed"
+      fi
+    fi
+    say "ok: infra container $cname (restarts=$rc)"
+  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo qbittorrent; echo jellyfin; echo jellyseerr; echo bazarr; } | sort -u)
+fi
+
 rm -f /tmp/drift-body.$$
 
 # ── --test-telegram: verify the bot without waiting for drift ─────────────
@@ -470,32 +518,49 @@ if [ "$TEST_TG" -eq 1 ]; then
 fi
 
 # ── --heal: re-run monarch-init on drift, then re-verify ──────────────────
+# Rate limit: remember the last heal attempt so a persistently drifted stack
+# escalates to an alert instead of looping init every timer tick.
+DRIFT_HEAL_MIN_INTERVAL="${DRIFT_HEAL_MIN_INTERVAL:-3600}"
+HEAL_STATE="/docker/appdata/init/drift-heal-last"
+HEAL_SUPPRESSED=0
 if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
-  echo "drift-check: $FAILS issue(s) found - re-running monarch-init to heal..." >&2
-  if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx monarch-init; then
-    # Re-run the existing one-shot container (created by `docker compose up`)
-    # and wait for it to exit. init waits up to 15 min per service on first
-    # boot; on a warm stack it exits in a minute or two.
-    docker start monarch-init >/dev/null 2>&1 || true
-    for _ in $(seq 1 450); do
-      st=$(docker inspect -f '{{.State.Status}}' monarch-init 2>/dev/null || echo gone)
-      [ "$st" = "exited" ] && break
-      sleep 2
-    done
+  now=$(date +%s)
+  last=0
+  [ -f "$HEAL_STATE" ] && last=$(cat "$HEAL_STATE" 2>/dev/null || echo 0)
+  if [ $((now - last)) -lt "$DRIFT_HEAL_MIN_INTERVAL" ]; then
+    HEAL_SUPPRESSED=1
+    echo "drift-check: heal suppressed - last attempt $((now - last))s ago (< ${DRIFT_HEAL_MIN_INTERVAL}s) - escalating to alert" >&2
   else
-    # No container yet (fresh stack): docker compose run is synchronous, so
-    # this blocks until init finishes on its own.
-    docker compose -f docker-compose.yml run --rm monarch-init >/dev/null 2>&1 || true
+    echo "drift-check: $FAILS issue(s) found - re-running monarch-init to heal..." >&2
+    echo "$now" > "$HEAL_STATE" 2>/dev/null || true
+    if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx monarch-init; then
+      # Re-run the existing one-shot container (created by `docker compose up`)
+      # and wait for it to exit. init waits up to 15 min per service on first
+      # boot; on a warm stack it exits in a minute or two.
+      docker start monarch-init >/dev/null 2>&1 || true
+      for _ in $(seq 1 450); do
+        st=$(docker inspect -f '{{.State.Status}}' monarch-init 2>/dev/null || echo gone)
+        [ "$st" = "exited" ] && break
+        sleep 2
+      done
+    else
+      # No container yet (fresh stack): docker compose run is synchronous, so
+      # this blocks until init finishes on its own.
+      docker compose -f docker-compose.yml run --rm monarch-init >/dev/null 2>&1 || true
+    fi
+    echo "drift-check: monarch-init finished - re-verifying..." >&2
+    # Re-run the check suite WITHOUT --heal (avoids a heal loop). The exit code
+    # of that run reports whether the stack healed.
+    exec bash "$0" --quiet
   fi
-  echo "drift-check: monarch-init finished - re-verifying..." >&2
-  # Re-run the check suite WITHOUT --heal (avoids a heal loop). The exit code
-  # of that run reports whether the stack healed.
-  exec bash "$0" --quiet
 fi
 
 if [ "$FAILS" -gt 0 ]; then
   echo "drift-check: $FAILS issue(s) found" >&2
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    if [ "$HEAL_SUPPRESSED" -eq 1 ]; then
+      FAIL_LINES+=("heal suppressed by rate limit (DRIFT_HEAL_MIN_INTERVAL=${DRIFT_HEAL_MIN_INTERVAL}s) - persistent drift")
+    fi
     notify_telegram "⚠️ Monarch drift check failed on $(hostname)" "${FAIL_LINES[@]}" || true
   fi
   exit 1

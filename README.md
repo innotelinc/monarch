@@ -416,6 +416,7 @@ against the services:
 | Jellyseerr | initialized, Jellyfin sign-in enabled |
 | Bazarr | API key readable, basic auth configured |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
+| Infra (host) | `/data` + `/docker/appdata` disk usage below 90%, probed containers not crash-looping (restart count), no stale images (recreate needed) |
 
 **Single source of truth:** what to check comes from
 `/docker/appdata/init/invariants.json`, which `monarch-init` emits from the
@@ -449,6 +450,26 @@ drifted stack repairs itself by re-running `monarch-init` and only alerts
 ```
 sudo systemctl status monarch-drift-check.timer
 journalctl -u monarch-drift-check.service      # last run + any DRIFT-FAIL lines
+```
+
+**Heal rate limit:** a heal attempt is recorded in
+`/docker/appdata/init/drift-heal-last`; if drift is still present and the
+last attempt was less than `DRIFT_HEAL_MIN_INTERVAL` (default 3600s) ago,
+the check skips healing and escalates straight to an alert instead of
+looping `monarch-init` on every tick.
+
+Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
+`DRIFT_MAX_RESTARTS` (default 10) and `DRIFT_HEAL_MIN_INTERVAL` in `.env`.
+
+The **full-stack CI workflow** (`.github/workflows/full-stack-drift.yml`)
+boots the real stack (jellyfin, *arrs, prowlarr, qBittorrent, bazarr,
+jellyseerr) + `monarch-init` on a disposable runner and runs the actual
+drift check against it — the closest CI gets to a live deployment. It runs
+on PRs touching `init/`, `docker-compose.yml`, the drift check, or the
+fresh-install check; nightly; and on demand (`workflow_dispatch`):
+
+```
+./scripts/fresh-install-check.sh --full-stack     # boot + init + real drift check
 ```
 
 ### Telegram alerts (optional)
