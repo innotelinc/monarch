@@ -35,13 +35,25 @@ if [ ! -f .env ] && [ -f .env.sample ]; then
 fi
 
 # 2. Install the stack (in-place mode; idempotent)
+# Deploy in place from this repo checkout by default, so the stack runs from
+# the source you cloned instead of a copy at /opt/monarch. Override with
+# MONARCH_TARGET (e.g. a deployed /opt/monarch layout or a disk install).
+export MONARCH_TARGET="${MONARCH_TARGET:-$ROOT}"
+
+# Nginx Proxy Manager: "local" (default) runs the NPM container via the
+# "npm" compose profile; "remote" reuses an existing NPM server instead
+# (see NPM_MODE / NPM_BASE_URL in .env). Tell the installer which mode so it
+# can strip the profile from the systemd unit for remote installs.
+npm_mode="$(sed -n 's/^NPM_MODE=//p' .env 2>/dev/null | tail -1 | xargs | tr '[:upper:]' '[:lower:]')"
+export MONARCH_NPM_LOCAL=1
+[ "$npm_mode" = "remote" ] && export MONARCH_NPM_LOCAL=0
 bash scripts/install-monarch.sh
 
 # 3. Configure Nginx Proxy Manager (proxy hosts + wildcard SSL)
 if command -v python3 >/dev/null 2>&1; then
   echo ""
   echo "=== Configuring Nginx Proxy Manager ==="
-  python3 scripts/npm-proxy-hosts.py "${@:-}"
+  python3 scripts/npm-proxy-hosts.py "$@"
 else
   echo ""
   echo "WARNING: python3 not found - skipping Nginx Proxy Manager configuration."

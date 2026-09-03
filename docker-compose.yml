@@ -146,6 +146,18 @@ services:
     image: ghcr.io/ajnart/homarr:latest
     ports:
       - 7575:7575
+    # The image's built-in healthcheck probes http://localhost:${PORT}, but the
+    # Next.js server binds to the container's own IP (Docker sets HOSTNAME), so
+    # localhost is never reachable - override it to probe the container
+    # hostname, which resolves to its own IP.
+    environment:
+      PORT: 7575
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$$(hostname):$${PORT} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/homarr/configs:/app/data/configs
@@ -191,7 +203,7 @@ services:
     container_name: sabnzbd
     image: ghcr.io/hotio/sabnzbd:latest
     ports:
-      - 8081:8080
+      - ${SABNZBD_PORT:-8081}:8080
       - 9090:9090
     volumes:
       - /etc/localtime:/etc/localtime:ro
@@ -726,6 +738,10 @@ services:
     <<: *common-keys
     container_name: nginx-proxy-manager
     image: jc21/nginx-proxy-manager:latest
+    # Optional local reverse proxy: only started when the "npm" compose
+    # profile is enabled. Set NPM_MODE=remote in .env to reuse an existing
+    # NPM server (NPM_BASE_URL) and keep NPM out of this stack entirely.
+    profiles: ["npm"]
     ports:
       - 80:80
       - 443:443
@@ -746,7 +762,9 @@ services:
   ###############################################
   watchtower:
     container_name: watchtower
-    image: containrrr/watchtower:latest
+    # containrrr/watchtower is archived (Dec 2025) and its images predate
+    # Docker Engine 29's minimum API (1.44) - use the maintained fork.
+    image: nickfedor/watchtower:latest
     restart: unless-stopped
     command: --cleanup --interval 21600
     volumes:

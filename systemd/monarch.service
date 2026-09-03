@@ -16,6 +16,7 @@ WorkingDirectory=/opt/monarch
 # pull + start slowly on first boot.
 ExecStart=/usr/bin/docker compose \
     -f docker-compose.yml \
+    --profile npm \
     up -d --wait --remove-orphans
 
 ExecStop=/usr/bin/docker compose \

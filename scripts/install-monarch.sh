@@ -89,6 +89,12 @@ install_service() {
   $SUDO cp "$root$TARGET/systemd/monarch.service" "$root/etc/systemd/system/monarch.service" 2>/dev/null || \
     $SUDO cp "$ROOT/systemd/monarch.service" "$root/etc/systemd/system/monarch.service"
   $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" "$root/etc/systemd/system/monarch.service"
+  # Local Nginx Proxy Manager is opt-in via the "npm" compose profile. When
+  # NPM_MODE=remote (MONARCH_NPM_LOCAL=0) drop the --profile flag so the unit
+  # never starts a local NPM container.
+  if [ "${MONARCH_NPM_LOCAL:-1}" != "1" ]; then
+    $SUDO sed -i '/--profile npm/d' "$root/etc/systemd/system/monarch.service"
+  fi
   # systemctl --root works offline (no running systemd needed), so it also
   # works from inside the installer chroot. Prefer it whenever a root dir is
   # given, or when we're in the chroot phase of a disk install.
@@ -120,12 +126,17 @@ create_data_dirs() {
   $SUDO chmod -R a=,a+rX,u+w,g+w "$root/data"
   # authentik's image runs as a non-root user (UID 1000) and cannot create its
   # own /media + /templates dirs if the host mounts are root-owned - pre-create
-  # them with the same ownership as the rest of the stack (postgresql data is
-  # handled by its own container and intentionally left alone).
+  # them with the same ownership as the rest of the stack. The postgresql data
+  # dir is intentionally NOT chowned: postgres:17 runs as UID 999 and owns its
+  # own data - chowning it to 1000 breaks the database.
   $SUDO mkdir -p "$root/docker/appdata/authentik/media" \
                 "$root/docker/appdata/authentik/templates" \
                 "$root/docker/appdata/authentik/redis"
-  $SUDO chown -R 1000:1000 "$root/docker/appdata/authentik"
+  $SUDO chown -R 1000:1000 "$root/docker/appdata/authentik/media" \
+                            "$root/docker/appdata/authentik/templates"
+  # redis:alpine's server drops to the redis user (UID 999) - the /data dir
+  # must be owned by it or RDB snapshots fail with MISCONF permission errors.
+  $SUDO chown -R 999:1000 "$root/docker/appdata/authentik/redis"
 }
 
 # ---- Mode 2: install into the running (already-installed) system ----

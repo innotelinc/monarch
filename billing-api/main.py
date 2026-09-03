@@ -69,7 +69,7 @@ LDAP_OUTPOST_TOKEN = os.environ.get("AUTHENTIK_LDAP_TOKEN", "ak-ldap-outpost-202
 LDAP_BIND_TOKEN = os.environ.get("AUTHENTIK_LDAP_BIND_TOKEN", "ak-ldap-bind-2026")
 LDAP_SEARCH_ROLE = "jellyfin-ldap-search"
 LDAP_BIND_FLOW_SLUG = "default-provider-authorization-implicit-consent"
-LDAP_INVALIDATION_FLOW_SLUG = "default-provider-invalidation"
+LDAP_INVALIDATION_FLOW_SLUG = "default-provider-invalidation-flow"
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -343,11 +343,17 @@ def revoke_paid_user(authentik_user_id: str | None) -> None:
 
 
 def ak_flow_pk(slug: str) -> str | None:
-    r = ak_request("GET", "/flows/", params={"slug": slug})
-    if r.status_code == 200:
-        results = r.json().get("results", [])
-        if results:
-            return results[0]["pk"]
+    # Newer Authentik versions serve flow instances under /flows/instances/
+    # (the legacy /flows/ path returns the web UI shell, not JSON).
+    for path in ("/flows/instances/", "/flows/"):
+        r = ak_request("GET", path, params={"slug": slug})
+        if r.status_code == 200:
+            try:
+                results = r.json().get("results", [])
+            except ValueError:
+                continue
+            if results:
+                return results[0]["pk"]
     return None
 
 
@@ -396,10 +402,13 @@ def ak_ensure_token(identifier: str, user_pk: int | None, key_value: str,
 
 
 def ak_find_provider(name: str) -> dict | None:
-    r = ak_request("GET", "/providers/ldap/", params={"name": name})
+    # Some Authentik versions ignore the ?name= filter and return every
+    # provider, so match client-side by exact name instead.
+    r = ak_request("GET", "/providers/ldap/", params={"page_size": 200})
     if r.status_code == 200:
-        results = r.json().get("results", [])
-        return results[0] if results else None
+        for provider in r.json().get("results", []):
+            if provider.get("name") == name:
+                return provider
     return None
 
 
@@ -422,10 +431,13 @@ def ak_ensure_ldap_provider() -> dict:
 
 
 def ak_find_application(slug: str) -> dict | None:
-    r = ak_request("GET", "/core/applications/", params={"slug": slug})
+    # Same as ak_find_provider: the ?slug= filter is ignored by some
+    # Authentik versions, so match client-side by exact slug.
+    r = ak_request("GET", "/core/applications/", params={"page_size": 200})
     if r.status_code == 200:
-        results = r.json().get("results", [])
-        return results[0] if results else None
+        for app in r.json().get("results", []):
+            if app.get("slug") == slug:
+                return app
     return None
 
 
@@ -445,10 +457,14 @@ def ak_ensure_application(provider_pk: str) -> dict:
 
 
 def ak_find_outpost(name: str) -> dict | None:
-    r = ak_request("GET", "/outposts/instances/", params={"name": name})
+    # The ?name= filter is ignored by some Authentik versions (it returns
+    # every outpost, including the embedded one), so match client-side by
+    # exact name - otherwise the LDAP outpost would never be created.
+    r = ak_request("GET", "/outposts/instances/", params={"page_size": 200})
     if r.status_code == 200:
-        results = r.json().get("results", [])
-        return results[0] if results else None
+        for outpost in r.json().get("results", []):
+            if outpost.get("name") == name:
+                return outpost
     return None
 
 

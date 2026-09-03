@@ -24,8 +24,10 @@ Configuration comes from environment variables or the repo's .env file:
   CLOUDFLARE_API_TOKEN  convenience: used instead of NPM_DNS_CREDENTIALS when
                         the provider is cloudflare
   NPM_FORWARD_HOST      "container" (default, forwards to service names on the
-                        compose network) or "host.docker.internal" (forwards
-                        to host-published ports)
+                        compose network; local NPM only) - anything else is
+                        used verbatim as the forward host, e.g.
+                        "host.docker.internal" for host-published ports, or
+                        this host's public IP/hostname when NPM_MODE=remote
   NPM_CERT_ID           optional: reuse an existing certificate id instead of
                         requesting a new wildcard cert
 
@@ -36,14 +38,17 @@ Flags:  --dry-run    print the plan without touching NPM
 The script is idempotent: existing proxy hosts are updated in place, and
 certificate issuance is only triggered when no matching wildcard cert exists.
 
-DNS prerequisite (one-time, outside this script): a wildcard A record
-*.MONARCH_DOMAIN -> <this host's public IP>. For Cloudflare, the API token
-needs Zone:DNS:Edit permission on the zone.
+DNS: when NPM_FORWARD_HOST is an IP and the DNS_TSIG_* variables are set
+(BIND + RFC 2136), the script writes the subdomain A records itself via
+nsupdate. The wildcard certificate uses the NPM_DNS_PROVIDER=rfc2136 DNS
+challenge (TXT records signed with the same TSIG key), so no manual DNS
+edits are needed.
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -162,6 +167,40 @@ class NpmClient:
                                      {"identity": email, "secret": password})
         if status == 200 and isinstance(body, dict) and body.get("token"):
             return body["token"]
+
+    def get_schema(self, token=None):
+        """Fetch the OpenAPI schema exposed by newer NPM versions (legacy
+        versions don't have /api/schema - returns None)."""
+        status, body = self._request("GET", "/api/schema", token=token, timeout=15)
+        if status == 200 and isinstance(body, dict) and "paths" in body:
+            return body
+        return None
+
+    @staticmethod
+    def _post_props(schema, path):
+        """Properties accepted by POST <path>, from the OpenAPI schema."""
+        try:
+            post = schema["paths"][path]["post"]
+            rb = post["requestBody"]["content"]["application/json"]["schema"]
+            return rb.get("properties", {}) or {}
+        except (KeyError, TypeError):
+            return {}
+
+    @staticmethod
+    def proxy_host_field_names(schema):
+        """Map logical flags to the field names this NPM version accepts.
+
+        Newer NPM (>= 2.12) renamed `websockets_support` ->
+        `allow_websocket_upgrade` and `caching` -> `caching_enabled`, and
+        rejects unknown properties, so pick the names from the live schema.
+        """
+        props = NpmClient._post_props(schema or {}, "/nginx/proxy-hosts")
+        return {
+            "websockets": ("allow_websocket_upgrade"
+                           if "allow_websocket_upgrade" in props
+                           else "websockets_support"),
+            "caching": "caching_enabled" if "caching_enabled" in props else "caching",
+        }
         if status in (401, 403):
             print(f"  ERROR: NPM rejected the admin login ({status}).")
             print("  If this is the first run, open http://<host>:81 once, set your")
@@ -183,18 +222,35 @@ class NpmClient:
                 return cert
         return None
 
-    def create_wildcard_cert(self, token, domain, email, provider, credentials):
-        body = {
-            "domain_names": [f"*.{domain}", domain],
-            "meta": {
-                "letsencrypt_agree": True,
-                "dns_challenge": True,
-                "dns_provider": provider,
-                "credentials": credentials,
-            },
-            "provider": "letsencrypt",
-            "email": email,
-        }
+    def create_wildcard_cert(self, token, domain, email, provider, credentials,
+                             schema=None):
+        """Request the wildcard Let's Encrypt certificate via DNS challenge.
+
+        Newer NPM versions changed the certificate schema (no top-level
+        `email`, `dns_provider_credentials` instead of `credentials`, no
+        `letsencrypt_agree`); adapt to whatever the live schema accepts.
+        """
+        body = {"provider": "letsencrypt",
+                "domain_names": [f"*.{domain}", domain]}
+        meta = {"dns_challenge": True, "dns_provider": provider}
+        props = NpmClient._post_props(schema or {}, "/nginx/certificates")
+        meta_props = (props.get("meta", {}) or {}).get("properties", {}) or {}
+        if schema:
+            if "dns_provider_credentials" in meta_props:
+                meta["dns_provider_credentials"] = credentials_ini(provider, credentials)
+                meta["propagation_seconds"] = 60
+            if "letsencrypt_agree" in meta_props:
+                meta["letsencrypt_agree"] = True
+            if "credentials" in meta_props:
+                meta["credentials"] = credentials
+            if "key_type" in meta_props:
+                meta["key_type"] = "rsa"
+            if "email" in props:
+                body["email"] = email
+        else:
+            meta.update({"letsencrypt_agree": True, "credentials": credentials})
+            body["email"] = email
+        body["meta"] = meta
         status, created = self._request("POST", "/api/nginx/certificates",
                                         body, token=token)
         if status not in (200, 201) or not isinstance(created, dict):
@@ -234,7 +290,10 @@ class NpmClient:
         return None
 
     def upsert_proxy_host(self, token, host_id, domain, forward_host, forward_port,
-                          certificate_id, websockets, dry_run=False):
+                          certificate_id, websockets, dry_run=False,
+                          host_fields=None):
+        host_fields = host_fields or {"websockets": "websockets_support",
+                                      "caching": "caching"}
         body = {
             "domain_names": [domain],
             "forward_scheme": "http",
@@ -243,8 +302,8 @@ class NpmClient:
             "certificate_id": certificate_id,
             "ssl_forced": bool(certificate_id),
             "block_exploits": True,
-            "caching": False,
-            "websockets_support": websockets,
+            host_fields["caching"]: False,
+            host_fields["websockets"]: websockets,
             "access_list_id": 0,
             "advanced_config": "client_max_body_size 0;",
         }
@@ -264,6 +323,77 @@ class NpmClient:
                   f"(HTTP {status}): {body_resp}" if body_resp else
                   f"  ERROR: could not {action} proxy host {domain} "
                   f"(HTTP {status})")
+
+
+# ---------------------------------------------------------------------------
+# Dynamic DNS via BIND TSIG (RFC 2136)
+# ---------------------------------------------------------------------------
+
+
+def tsig_config():
+    """TSIG credentials for dynamic DNS updates, or None when unset."""
+    server = env("DNS_TSIG_SERVER")
+    key_name = env("DNS_TSIG_KEY_NAME")
+    key_secret = env("DNS_TSIG_KEY_SECRET")
+    if not (server and key_name and key_secret):
+        return None
+    return {
+        "server": server,
+        "key_name": key_name,
+        "key_secret": key_secret,
+        "algorithm": env("DNS_TSIG_KEY_ALGORITHM", "hmac-sha256"),
+    }
+
+
+def is_ip_address(value):
+    try:
+        import ipaddress
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def credentials_ini(provider, credentials):
+    """Render DNS provider credentials as the INI text certbot expects.
+
+    Newer NPM versions write dns_provider_credentials straight to certbot's
+    credentials file (key = value lines), not JSON.
+    """
+    if provider == "rfc2136":
+        return "\n".join(f"{k} = {v}" for k, v in credentials.items())
+    if provider == "cloudflare":
+        token = credentials.get("auth_token") or credentials.get("api_token")
+        if token:
+            return f"dns_cloudflare_api_token = {token}"
+    return json.dumps(credentials)
+
+
+def dns_upsert_a(tsig, fqdn, ip, ttl=300, dry_run=False):
+    """Upsert <fqdn> A <ip> on the BIND server via nsupdate (TSIG)."""
+    script = (
+        f"server {tsig['server']}\n"
+        f"update delete {fqdn}. A\n"
+        f"update add {fqdn}. {ttl} A {ip}\n"
+        "send\n"
+    )
+    if dry_run:
+        print(f"  [dry-run] would DNS: {fqdn} A {ip} @ {tsig['server']}")
+        return True
+    try:
+        proc = subprocess.run(
+            ["nsupdate", "-y",
+             f"{tsig['algorithm']}:{tsig['key_name']}:{tsig['key_secret']}"],
+            input=script, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        print(f"  WARNING: nsupdate not found - skipping DNS update for {fqdn} "
+              "(install bind9-dnsutils).")
+        return False
+    if proc.returncode != 0:
+        print(f"  ERROR: DNS update failed for {fqdn}: {proc.stderr.strip()}")
+        return False
+    print(f"  DNS: {fqdn} -> {ip} (A, TTL {ttl}) @ {tsig['server']}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +421,7 @@ def main():
     ssl_email = env("SSL_EMAIL")
     forward_mode = env("NPM_FORWARD_HOST", "container")
     cert_id = env("NPM_CERT_ID")
+    tsig = tsig_config()
 
     hosts, hosts_src = load_hosts(domain)
 
@@ -305,6 +436,16 @@ def main():
     token = None if args.dry_run else client.login(npm_email, npm_pass)
     if not token and not args.dry_run:
         sys.exit(1)
+
+    # Newer NPM versions tightened the API schema (renamed fields, strict
+    # additionalProperties) - fetch the OpenAPI schema to adapt. Legacy NPM
+    # versions don't expose it and the old field names are used as fallback.
+    schema = client.get_schema(token) if not args.dry_run else None
+    host_fields = client.proxy_host_field_names(schema)
+    if schema:
+        print("  NPM API schema detected - adapting field names "
+              f"(websockets={host_fields['websockets']}, "
+              f"caching={host_fields['caching']}).")
 
     # ---- wildcard certificate -----------------------------------------
     if not args.skip_ssl and not args.hosts_only:
@@ -341,7 +482,8 @@ def main():
                 print(f"  Requesting wildcard cert for *.{domain} via {provider} "
                       f"(email {ssl_email})...")
                 new_id = client.create_wildcard_cert(token, domain, ssl_email,
-                                                     provider, credentials)
+                                                     provider, credentials,
+                                                     schema=schema)
                 if new_id and client.wait_for_cert(token, new_id):
                     cert_id = str(new_id)
 
@@ -353,14 +495,23 @@ def main():
 
     for host in hosts:
         domain_name = host["domain"]
-        forward_host = ("host.docker.internal"
-                        if forward_mode == "host.docker.internal"
-                        else host["forward"])
+        if forward_mode == "container":
+            forward_host = host["forward"]
+        else:
+            # "host.docker.internal", or an IP/hostname for a REMOTE NPM
+            # (NPM_MODE=remote): the remote server forwards to this host.
+            forward_host = forward_mode
         existing = client.find_host(existing_hosts, domain_name)
         host_id = str(existing.get("id")) if existing else None
         client.upsert_proxy_host(token, host_id, domain_name, forward_host,
                                  host["port"], cert_id or None,
-                                 host["websockets"], dry_run=args.dry_run)
+                                 host["websockets"], dry_run=args.dry_run,
+                                 host_fields=host_fields)
+        # Keep DNS in sync: write the A record for the subdomain when the
+        # forward target is an IP and TSIG credentials are configured.
+        if tsig and is_ip_address(forward_host):
+            dns_upsert_a(tsig, domain_name, forward_host,
+                         dry_run=args.dry_run)
 
     print("")
     print("Done. First point DNS at this host:  *.%s  ->  <public IP>" % domain)

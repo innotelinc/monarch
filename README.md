@@ -51,6 +51,8 @@ cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc. (below)
 1. Creates `.env` from `.env.sample` when missing (never overwrites).
 2. Installs the stack via `scripts/install-monarch.sh` (Docker, `/data`
    layout, `monarch.service` systemd unit, `docker compose up -d`).
+   `setup.sh` deploys in place from this checkout; set `MONARCH_TARGET`
+   (e.g. `/opt/monarch`) to install elsewhere.
 3. Auto-configures **Nginx Proxy Manager** through its API
    (`scripts/npm-proxy-hosts.py`): creates the subdomain proxy hosts and
    requests a **wildcard Let's Encrypt certificate** via a DNS challenge.
@@ -165,9 +167,21 @@ only touches services that are still unconfigured.
 
 # Subdomains & Nginx Proxy Manager (automatic)
 
-The stack ships `nginx-proxy-manager` (admin UI on **:81**). After the
-first `docker compose up -d`, `scripts/npm-proxy-hosts.py` (invoked by
-`setup.sh`) configures it entirely through its API:
+`scripts/npm-proxy-hosts.py` (invoked by `setup.sh`) configures Nginx Proxy
+Manager entirely through its API. Two modes (`.env`):
+
+- `NPM_MODE=local` (default) - the stack runs its own `nginx-proxy-manager`
+  container (compose profile `npm`, admin UI on **:81**) and setup drives it
+  at `http://localhost:81`.
+- `NPM_MODE=remote` - reuse an existing NPM server: the NPM container is
+  **not** started, and setup drives the remote server's API
+  (`NPM_BASE_URL`, e.g. `https://proxy.innotel.us`). The remote server
+  forwards to this host, so set `NPM_FORWARD_HOST` to the address it can
+  reach this host at - a LAN IP (e.g. `192.168.1.46`), public IP, or
+  hostname (instead of `container`). The ports in `npm-hosts.conf` are
+  this host's published ports, so they work in both modes.
+
+Either way the script creates (or reconciles) one proxy host per subdomain:
 
 | Subdomain | Service | Port | WebSockets |
 |-----------|---------|------|------------|
@@ -181,9 +195,9 @@ first `docker compose up -d`, `scripts/npm-proxy-hosts.py` (invoked by
 | `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
 
 The mapping lives in `scripts/npm-hosts.conf` — add/remove lines freely; the
-script reconciles the proxy hosts on every run (idempotent). To forward to
-host-published ports instead of container names, set
-`NPM_FORWARD_HOST=host.docker.internal` in `.env`.
+script reconciles the proxy hosts on every run (idempotent). For a local NPM
+you can also forward to host-published ports with
+`NPM_FORWARD_HOST=host.docker.internal`.
 
 ### Wildcard SSL (automatic)
 
@@ -211,9 +225,11 @@ Other DNS providers are supported via `NPM_DNS_PROVIDER` (route53, godaddy,
 vultr, ovh, hetzner, ...) — credentials always go in `NPM_DNS_CREDENTIALS`
 as JSON (or set `CLOUDFLARE_API_TOKEN` for the Cloudflare convenience path).
 
-First-time NPM admin: open `http://<host>:81` once, create your admin
-account (default `admin@example.com` / `changeme`), then re-run `./setup.sh`.
-The script prints clear guidance if the API login fails.
+First-time NPM admin: open `http://<host>:81` once (local mode), create your
+admin account (default `admin@example.com` / `changeme`), then re-run
+`./setup.sh`. In remote mode make sure `NPM_ADMIN_EMAIL` /
+`NPM_ADMIN_PASSWORD` are the existing server's real credentials. The script
+prints clear guidance if the API login fails.
 
 > The proxy hosts are created with `client_max_body_size 0;`, exploit
 > blocking and HTTPS-forcing enabled; `monarch-recs` and `monarch-health`
