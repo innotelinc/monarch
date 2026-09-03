@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# fresh-install.yml — smoke-check the Monarch fresh-install path on every PR
+# that touches the installer / compose / Homarr board / proxy map.
+#
+# Runs scripts/fresh-install-check.sh --full on a clean ubuntu-latest runner
+# (a disposable host, exactly what the --full stage requires):
+#   • stage 1 (offline rehearsal) — throwaway .env rendering, Homarr board
+#     template validation + proxy-map cross-check, NPM dry-run (apex host),
+#     and docker-compose.yml interpolation with no .env present.
+#   • stage 2 (live) — boots the real homarr container, seeds its board the
+#     same way setup.sh does, and verifies it serves HTTP 200 at :7575.
+#
+# No secrets are needed: homarr is pulled from GHCR and the board/domain are
+# the throwaway monarch-check.test values the check script generates.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Fresh-install check
+
+on:
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - "setup.sh"
+      - "scripts/**"
+      - "homarr/**"
+      - ".env.sample"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fresh-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fresh-install:
+    name: Fresh-install check (Homarr boot)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run fresh-install check
+        run: ./scripts/fresh-install-check.sh --full
