@@ -132,7 +132,8 @@ set_secret() {
 }
 
 for pair in "$url_platform:STRIPE_WEBHOOK_SECRET" "$url_billing:BILLING_WEBHOOK_SECRET"; do
-  url="${pair%%:*}"; var="${pair##*:}"
+  # Split on the LAST colon so URLs containing "://" aren't truncated.
+  url="${pair%:*}"; var="${pair##*:}"
   echo ""
   echo "--- $url ---"
   if [ "$DRY_RUN" = "1" ]; then
