@@ -74,7 +74,7 @@ only touches services that are still unconfigured.
 | Service    | URL                   | Notes |
 |------------|-----------------------|-------|
 | Homarr (dashboard) | http://localhost:7575 | `app.monarch.innotel.us` |
-| Jellyfin   | http://localhost:8096 | `media.monarch.innotel.us`; admin = your `.env` credentials |
+| Jellyfin   | http://localhost:8097 | `https://media.magnate.innotel.us`; Authentik LDAP users; admin = your `.env` credentials |
 | Jellyseerr | http://localhost:5055 | `req.monarch.innotel.us`; requests; connected to Jellyfin + Radarr/Sonarr |
 | Prowlarr   | http://localhost:9696 | indexers; all *arr apps pre-registered |
 | Radarr     | http://localhost:7878 | movies |
@@ -92,9 +92,92 @@ only touches services that are still unconfigured.
 | **Monarch AI** | http://localhost:8002 | `monarch-recs` - AI recommendations + smart search (internal API) |
 | **Monarch Health** | http://localhost:8003 | `monarch-health` - media health analytics (internal API) |
 | Nginx Proxy Manager | http://localhost:81 | `admin.monarch.innotel.us`; reverse proxy + wildcard SSL |
-| Clipbucket | http://localhost:8088 | video platform |
+| Clipbucket | http://localhost:8098 | `https://tube.innotel.us`; migrated from `.72`, database and files imported |
 | IPTV guide | http://localhost:3001 | `tv.monarch.innotel.us`; XMLTV guide (`/guide.xml`) for Jellyfin Live TV |
 | TVHeadend / NextPVR / Dispatcharr | 9981 / 8866 / 9191 | optional legacy live-TV backends (Jellyfin Live TV uses a native M3U tuner, so these are not required) |
+
+
+## Completed media migration from the legacy `.72` server
+
+The Jellyfin media and user migration to the Monarch instance on `.46`
+(`192.168.1.46`) is complete. The active service is published on host port
+`8097` (container port `8096`) because `.46:8096` belongs to the dashboard.
+The public endpoint is:
+
+```
+https://media.magnate.innotel.us
+```
+
+The new instance contains four canonical libraries and the migrated
+Authentik-backed profiles. During the broader migration, the legacy
+`media.innotel.us` endpoint is intentionally active again and routes to the
+original Jellyfin on `.72:8096`; it must remain available until the remaining
+`.72` services have been migrated. The new `.46` endpoint remains available
+at `media.magnate.innotel.us`:
+
+| Library | Path | Current items |
+|---------|------|---------------|
+| Movies | `/data/media/movies` | 4 |
+| TV Shows | `/data/media/tv` | 4 |
+| Music | `/data/media/music` | 94 |
+| Other | `/data/media/xxx` | 1 |
+
+The migrated profiles are `cola` and `dhunter`, plus the local `admin`
+account. `cola` is a regular paid user; `dhunter` is also in
+`jellyfin_admins`. Jellyfin authentication flows through the Authentik LDAP
+outpost and the LDAP-Auth plugin. The source `.72` media files were copied
+before cutover; the real source Jellyfin database was preserved while the
+obsolete zero-byte `library.db` artifact was removed.
+
+The legacy `.72` machine still hosts unrelated services (including
+billing-api, databases, Clipbucket, and TV/download services), as well as the
+legacy Jellyfin currently published at `media.innotel.us`. Do not remove that
+compose project or shared `/docker/appdata` until each remaining service has
+been separately migrated or decommissioned.
+
+### Legacy `.72` migration boundary
+
+The old host is still an active `arr` Compose project. The following services
+are duplicated on `.46` and should not be cut over or removed until their
+individual configs and queues are compared:
+
+- Jellyfin, Seerr, Sonarr, Radarr, Lidarr, Whisparr, Prowlarr, qBittorrent,
+  Bazarr, and IPTV.
+
+The following remain unique or have not yet been verified on `.46`:
+
+- Dispatcharr, TVHeadend, NextPVR, jfa-go, Requestarr, Transmission, Deluge,
+  SABnzbd, and autobrr.
+
+Clipbucket has now been staged on `.46` at host port `8098` and its public
+route has been cut over to `https://tube.innotel.us`. The imported snapshot
+contains 80 database tables, 2 users, 0 video rows, and the complete
+application/upload tree. The `.72` Clipbucket container remains running on
+`:8088` as a rollback copy; its application files and database were not
+deleted. The NPM database was backed up on `.71` before edge repair, and stale
+generated NPM files were retained under
+`/usr/src/proxy/backups/generated-pre-clipbucket-20260904164122`.
+
+The legacy billing API is currently **not a safe migration candidate**: its
+container publishes host `8001` to container port `8000`, but Uvicorn is
+configured to listen on container port `8001`; its configured `billing`
+database is also absent (only the default PostgreSQL databases exist). Its
+Stripe/Auth configuration must be reviewed before any replacement or webhook
+cutover. Do not copy or reuse its live Stripe credentials in a new deployment.
+
+| Legacy route | Current target | Status / migration action |
+|--------------|----------------|---------------------------|
+| `media.innotel.us` | `.72:8096` | Intentionally retained during migration |
+| `media.magnate.innotel.us` | `.46:8097` | New migrated Jellyfin; verified |
+| `dl.innotel.us`, `movies.innotel.us`, `mp3.innotel.us`, `xxx.innotel.us` | `.72` downloader / *arr ports | Active legacy routes; retain until queue/config migration |
+| `tube.innotel.us` | `.46:8098` | Migrated Clipbucket; verified over public HTTPS. Rollback source remains on `.72:8088` |
+| `index.innotel.us`, `req.innotel.us`, `tv.innotel.us`, `brr.innotel.us`, `accounts.innotel.us`, `portainer.innotel.us` | `.72` services | Active legacy routes; verify each during its service migration |
+| `tube.innotel.us` | `.46:8098` | Migrated Clipbucket; verified over public HTTPS; rollback source remains on `.72:8088` |
+| `api.monarch.innotel.us` | no managed DNS; stale `.46:8001` NPM target | Orphaned NPM host removed; no active replacement |
+
+The migration rule is: copy/configure first, verify the replacement and its
+public DNS/TLS/dependencies, then switch the route, and only later remove the
+source service after an explicit retention decision.
 
 
 ## Subdomains & Nginx Proxy Manager (automatic)
@@ -122,7 +205,7 @@ users log into (the Homarr dashboard). Everything else is a subdomain:
 | `monarch.innotel.us` (apex, `@`) | Homarr dashboard — main login | 7575 | yes |
 | `app.monarch.innotel.us` | Homarr dashboard | 7575 | yes |
 | `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
-| `media.monarch.innotel.us` | Jellyfin | 8096 | yes |
+| `media.magnate.innotel.us` | Jellyfin via Magnate edge | 8097 → container 8096 | yes |
 | `tv.monarch.innotel.us` | IPTV/EPG guide | 3001 | - |
 | `admin.monarch.innotel.us` | Nginx Proxy Manager admin | 81 | - |
 | `subscribe.monarch.innotel.us` | landing page + Stripe checkout | 3000 | - |

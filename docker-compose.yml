@@ -23,7 +23,10 @@ services:
     container_name: jellyfin
     image: ghcr.io/hotio/jellyfin:latest
     ports:
-      - 8096:8096
+      # Host 8097 → container 8096: 8096 on this host belongs to the capstone
+      # Control Center (dashboard), so Jellyfin shifts to the next free port.
+      # NPM edge: media.magnate.innotel.us → <host>:8097
+      - 8097:8096
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/jellyfin:/config
@@ -371,12 +374,12 @@ services:
     image: oxygenz/clipbucket-v5:latest
     pull_policy: always
     ports:
-      - 8088:80
+      - ${CLIPBUCKET_PORT:-8098}:80
     environment:
       PUID: 1000
       PGID: 1000
       TZ: ${TZ:-America/New_York}
-      DOMAIN_NAME: ${CLIPBUCKET_DOMAIN:-tube.${MONARCH_DOMAIN:-monarch.innotel.us}}
+      DOMAIN_NAME: ${CLIPBUCKET_DOMAIN:-tube.innotel.us}
       MYSQL_PASSWORD: ClipDB!2026
       UID: 1000
       GID: 1000
@@ -392,6 +395,7 @@ services:
   # the shared initial password.
   ###############################################
   authentik-postgresql:
+    profiles: ["authentik"]
     restart: unless-stopped
     container_name: authentik-postgresql
     image: postgres:17
@@ -406,6 +410,7 @@ services:
   # Without it the server and worker refuse to start - they default to
   # connecting to localhost:6379 inside their own containers.
   authentik-redis:
+    profiles: ["authentik"]
     restart: unless-stopped
     container_name: authentik-redis
     image: redis:alpine
@@ -414,6 +419,7 @@ services:
       - /docker/appdata/authentik/redis:/data
 
   authentik-server:
+    profiles: ["authentik"]
     restart: unless-stopped
     container_name: authentik-server
     image: ghcr.io/goauthentik/server:latest
@@ -445,6 +451,7 @@ services:
       start_period: 90s
 
   authentik-worker:
+    profiles: ["authentik"]
     restart: unless-stopped
     container_name: authentik-worker
     image: ghcr.io/goauthentik/server:latest
@@ -478,9 +485,13 @@ services:
   # AUTHENTIK_TOKEN is the outpost's API token.
   ###############################################
   authentik-ldap:
+    profiles: ["authentik"]
     restart: unless-stopped
     container_name: authentik-ldap
-    image: ghcr.io/goauthentik/ldap:latest
+    # Pin to the SAME version as the shared Authentik server (magnate compose).
+    # The stale :latest tag on this host resolved to 2025.2.4, which silently
+    # rejects all direct binds against the 2025.6.3 server.
+    image: ghcr.io/goauthentik/ldap:2025.6.3
     depends_on:
       authentik-server:
         condition: service_healthy
@@ -488,7 +499,8 @@ services:
       - 389:3389
       - 636:6636
     environment:
-      AUTHENTIK_HOST: http://authentik-server:9000
+      # Shared Authentik (Magnate bundle) published on the host at :9110.
+      AUTHENTIK_HOST: http://192.168.1.46:9110
       AUTHENTIK_INSECURE: "true"
       AUTHENTIK_TOKEN: ak-ldap-outpost-2026
 
@@ -614,18 +626,21 @@ services:
       LIVETV_M3U_URL: ${LIVETV_M3U_URL:-https://iptv-org.github.io/iptv/countries/us.m3u}
       LIVETV_GUIDE_URL: ${LIVETV_GUIDE_URL:-http://iptv:3000/guide.xml}
       # Authentik connection (LDAP outpost provisioning + Jellyfin LDAP-Auth
-      # plugin wiring). Values must match what magnate's billing provisions -
-      # see the README "Authentik LDAP -> Jellyfin" section.
-      AUTHENTIK_BASE_URL: http://authentik-server:9000
-      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-ak-bootstrap-innotel-2026}
-      AUTHENTIK_LDAP_SERVER: authentik-ldap
-      AUTHENTIK_LDAP_PORT: 3389
-      AUTHENTIK_LDAP_BIND_USER: authentik-ldap
-      AUTHENTIK_LDAP_BIND_TOKEN: ak-ldap-bind-2026
-      AUTHENTIK_LDAP_BIND_GROUP: paid_users
-      AUTHENTIK_LDAP_ADMIN_GROUP: jellyfin_admins
-      AUTHENTIK_LDAP_BASE_DN: dc=innotel,dc=us
-      AUTHENTIK_LDAP_TOKEN: ak-ldap-outpost-2026
+      # plugin wiring). Points at the SHARED Authentik (IdentityOps, bundled
+      # with Magnate and published on host :9110) — there is ONE identity
+      # instance for the whole ecosystem; this stack does not run its own.
+      # Values must match what magnate's billing provisions — see the README
+      # "Authentik LDAP -> Jellyfin" section.
+      AUTHENTIK_BASE_URL: ${AUTHENTIK_BASE_URL:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_LDAP_SERVER: ${AUTHENTIK_LDAP_SERVER:-authentik-ldap}
+      AUTHENTIK_LDAP_PORT: ${AUTHENTIK_LDAP_PORT:-3389}
+      AUTHENTIK_LDAP_BIND_USER: ${AUTHENTIK_LDAP_BIND_USER:-authentik-ldap}
+      AUTHENTIK_LDAP_BIND_TOKEN: ${AUTHENTIK_LDAP_BIND_TOKEN:-}
+      AUTHENTIK_LDAP_BIND_GROUP: ${AUTHENTIK_LDAP_BIND_GROUP:-paid_users}
+      AUTHENTIK_LDAP_ADMIN_GROUP: ${AUTHENTIK_LDAP_ADMIN_GROUP:-jellyfin_admins}
+      AUTHENTIK_LDAP_BASE_DN: ${AUTHENTIK_LDAP_BASE_DN:-dc=innotel,dc=us}
+      AUTHENTIK_LDAP_TOKEN: ${AUTHENTIK_LDAP_TOKEN:-}
     command: ["python", "/init/init.py"]
     volumes:
       - ./init:/init:ro

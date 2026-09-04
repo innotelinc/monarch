@@ -447,7 +447,7 @@ if [ -n "${AUTHENTIK_BASE_URL:-}" ] && [ -n "${AUTHENTIK_BOOTSTRAP_TOKEN:-}" ]; 
   ak_base="${AUTHENTIK_BASE_URL%/}"
   ak_code=$(curl -s -o /tmp/drift-ak.$$ -w "%{http_code}" \
     -H "Authorization: Bearer $AUTHENTIK_BOOTSTRAP_TOKEN" \
-    "$ak_base/api/v3/core/outposts/")
+    "$ak_base/api/v3/outposts/instances/")
   if [ "$ak_code" = "200" ]; then
     ak_outpost=$(python3 -c "
 import sys, json

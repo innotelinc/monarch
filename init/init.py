@@ -98,7 +98,7 @@ QBT_CATEGORIES = {
 # invariants manifest the drift check probes on localhost.
 PORTS = {
     "sonarr": 8989, "radarr": 7878, "lidarr": 8686, "whisparr": 6969,
-    "prowlarr": 9696, "qbt": 8080, "jellyfin": 8096,
+    "prowlarr": 9696, "qbt": 8080, "jellyfin": 8097,
     "jellyseerr": 5055, "bazarr": 6767,
 }
 
@@ -124,7 +124,13 @@ LDAP_OUTPOST_NAME = os.environ.get("AUTHENTIK_LDAP_OUTPOST", "jellyfin-ldap")
 LDAP_APP_SLUG = os.environ.get("AUTHENTIK_LDAP_APP_SLUG", "jellyfin-ldap")
 LDAP_OUTPOST_TOKEN = os.environ.get("AUTHENTIK_LDAP_TOKEN", "ak-ldap-outpost-2026")
 LDAP_SEARCH_ROLE = "jellyfin-ldap-search"
-LDAP_BIND_FLOW_SLUG = "default-provider-authorization-implicit-consent"
+# The LDAP provider's bind flow is executed ANONYMOUSLY by the outpost (the
+# outpost answers its identification/password stages with the bind DN+
+# password). Authorization-designation flows are gated require_authenticated
+# and can never be planned for that, so binds must use an authentication
+# flow (authentik docs: LDAP binds run the default-authentication-flow or a
+# dedicated LDAP auth flow with an identification + password stage).
+LDAP_BIND_FLOW_SLUG = "default-authentication-flow"
 LDAP_INVALIDATION_FLOW_SLUG = "default-provider-invalidation-flow"
 
 # ---------------------------------------------------------------------------
@@ -272,16 +278,58 @@ def ak_flow_pk(slug: str):
     return None
 
 
-def ak_ensure_service_account(username: str):
-    """Ensure the LDAP bind service account exists; return (user, token_identifier)."""
+def ak_ensure_bind_user(username: str) -> dict:
+    """Ensure the LDAP bind user exists (create as a REGULAR user).
+
+    Regular users are required here: authentik refuses to grant per-object
+    permissions to internal service accounts over the API, and role->user
+    membership has NO API route in Authentik 2025.6.x. The documented LDAP
+    pattern (bind user + per-user "Search full LDAP directory" grant)
+    therefore only works when the bind account is a normal user. Existing
+    internal service accounts (older installs) are returned untouched and
+    handled by the caller.
+    """
     existing = ak_find_user(username=username)
     if existing:
-        return existing, f"service-account-{username}-password"
-    status, _, j = ak_request("POST", "/core/users/service_account/", body={
-        "name": username, "create_group": False, "expiring": False})
+        return existing
+    status, _, _ = ak_request("POST", "/core/users/", body={
+        "username": username,
+        "name": "Jellyfin LDAP bind (monarch stack)",
+        "path": "users",
+    })
     if status not in (200, 201):
-        raise RuntimeError(f"service account creation failed ({status})")
-    return j, f"service-account-{username}-password"
+        raise RuntimeError(f"bind user creation failed ({status})")
+    return ak_find_user(username=username) or {}
+
+
+def ak_grant_ldap_search(bind_user: dict, provider_pk: str) -> tuple:
+    """Grant directory-wide LDAP search to the bind user on the provider.
+
+    Returns (ok, message). Regular users receive the per-object permission
+    directly. Internal service accounts cannot hold per-object grants, so we
+    (re)create the role-based permission bucket and tell the operator the one
+    remaining step (membership) is a server-side operation.
+    """
+    pk = bind_user.get("user_pk") or bind_user.get("pk")
+    if bind_user.get("type") != "internal_service_account":
+        status, _, _ = ak_request(
+            "POST", f"/rbac/permissions/assigned_by_users/{pk}/assign/",
+            body={"model": "authentik_providers_ldap.ldapprovider",
+                  "object_pk": str(provider_pk),
+                  "permissions": ["authentik_providers_ldap.search_full_directory"]})
+        if status in (200, 201, 204):
+            return True, ""
+        return False, f"per-user search grant failed (HTTP {status})"
+    role = ak_ensure_role(LDAP_SEARCH_ROLE)
+    role_pk = role.get("pk")
+    ak_role_assign_permission(
+        role_pk, "authentik_providers_ldap.search_full_directory",
+        model="authentik_providers_ldap.ldapprovider", object_pk=provider_pk)
+    return False, (
+        "bind user is an internal service account; add it to the "
+        f"'{LDAP_SEARCH_ROLE}' role's group server-side (manage.py shell: "
+        "User.objects.get(username=...).groups.add(Role.objects.get("
+        f"name='{LDAP_SEARCH_ROLE}').group)) for search to apply")
 
 
 def ak_token(identifier: str):
@@ -404,12 +452,6 @@ def ak_role_assign_permission(role_pk, permission, model=None, object_pk=None) -
     return status in (200, 201, 204)
 
 
-def ak_role_add_user(role_pk: str, user_pk: int) -> bool:
-    status, _, _ = ak_request("POST", f"/rbac/roles/{role_pk}/add_user/",
-                              body={"pk": int(user_pk)})
-    return status in (200, 204)
-
-
 @arrived("authentik ldap provisioning")
 def configure_authentik_ldap():
     """Idempotently provision the LDAP provider/outpost for Jellyfin logins.
@@ -424,10 +466,11 @@ def configure_authentik_ldap():
     if not wait_for(AUTHENTIK_BASE_URL, "/-/health/ready/", "Authentik"):
         return False
 
-    sa, bind_token_id = ak_ensure_service_account(LDAP_BIND_USER)
-    sa_pk = sa.get("user_pk") or sa.get("pk")
-    ak_ensure_token(bind_token_id, sa_pk, LDAP_BIND_TOKEN,
-                    "Jellyfin LDAP bind user (monarch stack)")
+    bind = ak_ensure_bind_user(LDAP_BIND_USER)
+    bind_pk = bind.get("user_pk") or bind.get("pk")
+    # The password LDAP clients (Jellyfin plugin, ldapsearch, ...) bind with.
+    ak_request("POST", f"/core/users/{bind_pk}/set_password/",
+               body={"password": LDAP_BIND_TOKEN})
 
     provider = ak_ensure_ldap_provider()
     provider_pk = provider.get("pk")
@@ -440,15 +483,9 @@ def configure_authentik_ldap():
     ak_ensure_token(f"ak-outpost-{outpost_pk}-api", None, LDAP_OUTPOST_TOKEN,
                     "LDAP outpost API token (monarch stack)", intent="api")
 
-    role = ak_ensure_role(LDAP_SEARCH_ROLE)
-    role_pk = role.get("pk")
-    ok = ak_role_assign_permission(
-        role_pk, "authentik_providers_ldap.search_full_directory",
-        model="authentik_providers_ldap.ldapprovider", object_pk=provider_pk)
-    if not ok:
-        # Some versions only expose it as a global permission.
-        ak_role_assign_permission(role_pk, "authentik_providers_ldap.search_full_directory")
-    ak_role_add_user(role_pk, sa_pk)
+    granted, grant_msg = ak_grant_ldap_search(bind, provider_pk)
+    if not granted:
+        _log(f"WARNING: {grant_msg}")
 
     admin_group = ak_group(LDAP_ADMIN_GROUP)
     _log(f"LDAP provisioning OK: provider={provider_pk} outpost={outpost_pk} "
@@ -661,7 +698,18 @@ def configure_jellyfin():
     # Add the media libraries (read-only media mount is fine - metadata lives in
     # the Jellyfin config volume). Jellyfin >= 10.11 takes name, collectionType
     # and paths as query parameters; only LibraryOptions goes in the body.
+    # Idempotency guard: skip libraries that already exist (name match).
+    # Without this, every init run creates Movies2, TV Shows3, ... duplicates.
+    status, _, existing = _http(
+        JELLYFIN_BASE, "/Library/VirtualFolders", headers=jellyfin_headers(token))
+    existing_names = (
+        {v.get("Name") for v in existing}
+        if status == 200 and isinstance(existing, list) else set()
+    )
     for lib in JELLYFIN_LIBRARIES:
+        if lib["name"] in existing_names:
+            _log(f"Jellyfin library '{lib['name']}' already exists - skipping")
+            continue
         qs = urllib.parse.urlencode({
             "name": lib["name"],
             "collectionType": lib["type"],
