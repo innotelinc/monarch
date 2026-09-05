@@ -162,10 +162,10 @@
     {
       "id": "1a2b3c4d-0003-4a03-8003-000000000003",
       "name": "Media",
-      "url": "https://media.__DOMAIN__",
+      "url": "https://media.magnate.innotel.us",
       "behaviour": {
-        "onClickUrl": "https://media.__DOMAIN__",
-        "externalUrl": "https://media.__DOMAIN__",
+        "onClickUrl": "https://media.magnate.innotel.us",
+        "externalUrl": "https://media.magnate.innotel.us",
         "isOpeningNewTab": true,
         "tooltipDescription": "Jellyfin - stream movies & TV"
       },

@@ -97,6 +97,7 @@ render_env() {
     -e "s|^MONARCH_DOMAIN=.*|MONARCH_DOMAIN=$TEST_DOMAIN|" \
     -e "s|^MONARCH_PASSWORD=.*|MONARCH_PASSWORD=$TEST_PASSWORD|" \
     -e "s|^SESSION_SECRET=change-me.*|SESSION_SECRET=$(openssl rand -hex 32 2>/dev/null || tr -dc 'a-f0-9' < /dev/urandom | head -c 64)|" \
+    -e "s|^SECRET_ENCRYPTION_KEY=.*|SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32 2>/dev/null || tr -dc 'a-f0-9' < /dev/urandom | head -c 64)|" \
     .env.sample > "$out"
 }
 
@@ -178,7 +179,7 @@ for app in board.get("apps", []):
 
 # External hosts the board may link to that are NOT proxied by monarch's
 # own NPM (e.g. Magnate, the source billing platform at subscribe.innotel.us).
-external_hosts = {"subscribe.innotel.us"}
+external_hosts = {"subscribe.innotel.us", "media.magnate.innotel.us"}
 
 problems = []
 for u in sorted(set(urls)):
