@@ -149,26 +149,32 @@ services:
   homarr:
     <<: *common-keys
     container_name: homarr
-    image: ghcr.io/ajnart/homarr:latest
+    # Homarr v1 (homarr-labs rewrite; the old ajnart/homarr v0.16 line is
+    # archived). v1 keeps everything under a single /appdata mount.
+    image: ghcr.io/homarr-labs/homarr:latest
     ports:
       - 7575:7575
-    # The image's built-in healthcheck probes http://localhost:${PORT}, but the
-    # Next.js server binds to the container's own IP (Docker sets HOSTNAME), so
-    # localhost is never reachable - override it to probe the container
-    # hostname, which resolves to its own IP.
     environment:
-      PORT: 7575
+      # v1's bundled nginx listens on 7575 and proxies to the app; do NOT set
+      # PORT (a v0 holdover) or the Next.js server collides with nginx.
+      # Required: secret used to encrypt DB secrets (openssl rand -hex 32).
+      SECRET_ENCRYPTION_KEY: "${SECRET_ENCRYPTION_KEY:?set SECRET_ENCRYPTION_KEY (openssl rand -hex 32)}"
+      # Cerulean (Authentik) OIDC SSO — one login for every surface.
+      AUTH_PROVIDERS: "oidc"
+      AUTH_OIDC_CLIENT_ID: "${AUTH_OIDC_CLIENT_ID:-}"
+      AUTH_OIDC_CLIENT_SECRET: "${AUTH_OIDC_CLIENT_SECRET:-}"
+      AUTH_OIDC_ISSUER: "${AUTH_OIDC_ISSUER:-}"
+      AUTH_OIDC_CLIENT_NAME: "${AUTH_OIDC_CLIENT_NAME:-Cerulean}"
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$$(hostname):$${PORT} || exit 1"]
+      # nginx (v1) listens on 7575 and proxies to the app.
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$$(hostname):7575 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 10s
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/homarr/configs:/app/data/configs
-      - /docker/appdata/homarr/icons:/app/public/icons
-      - /docker/appdata/homarr/data:/data
+      - /docker/appdata/homarr/appdata:/appdata
 
   ###############################################
   # QBITTORRENT - Main Downloader (WebUI on :8080)
