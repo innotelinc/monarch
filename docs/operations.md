@@ -130,10 +130,11 @@ before cutover; the real source Jellyfin database was preserved while the
 obsolete zero-byte `library.db` artifact was removed.
 
 The legacy `.72` machine still hosts unrelated services (including
-billing-api, databases, Clipbucket, and TV/download services), as well as the
-legacy Jellyfin currently published at `media.innotel.us`. Do not remove that
-compose project or shared `/docker/appdata` until each remaining service has
-been separately migrated or decommissioned.
+databases and TV/download services), as well as the legacy Jellyfin
+currently published at `media.innotel.us`. The billing-api and Clipbucket
+on .72 are retired (Magnate handles billing; Clipbucket is migrated to
+.46). Do not remove that compose project or shared `/docker/appdata` until
+each remaining service has been separately migrated or decommissioned.
 
 ### Legacy `.72` migration boundary
 
@@ -171,8 +172,8 @@ copy or reuse its live Stripe credentials in a new deployment.
 | `dl.innotel.us`, `movies.innotel.us`, `mp3.innotel.us`, `xxx.innotel.us` | `.72` downloader / *arr ports | Active legacy routes; retain until queue/config migration |
 | `tube.innotel.us` | `.46:8098` | Migrated Clipbucket; verified over public HTTPS. Rollback source remains on `.72:8088` |
 | `index.innotel.us`, `req.innotel.us`, `tv.innotel.us`, `brr.innotel.us`, `accounts.innotel.us`, `portainer.innotel.us` | `.72` services | Active legacy routes; verify each during its service migration |
-| `tube.innotel.us` | `.46:8098` | Migrated Clipbucket; verified over public HTTPS; rollback source remains on `.72:8088` |
-| `api.monarch.innotel.us` | no managed DNS; stale `.46:8001` NPM target | Orphaned NPM host removed; no active replacement |
+| `api.monarch.innotel.us` | retired | Billing-api decommissioned — Magnate handles all billing |
+| `subscribe.monarch.innotel.us` | retired | Billing migrated to Magnate (subscribe.innotel.us) |
 
 The migration rule is: copy/configure first, verify the replacement and its
 public DNS/TLS/dependencies, then switch the route, and only later remove the
