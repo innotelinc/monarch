@@ -226,12 +226,11 @@ users log into (the Homarr dashboard). Everything else is a subdomain:
 | `media.magnate.innotel.us` | Jellyfin via Magnate edge | 8097 → container 8096 | yes |
 | `tv.monarch.innotel.us` | IPTV/EPG guide | 3001 | - |
 | `admin.monarch.innotel.us` | Nginx Proxy Manager admin | 81 | - |
-| `subscribe.monarch.innotel.us` | landing page + Stripe checkout | 3000 | - |
 | `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
 
-(The old `subscribe.monarch.innotel.us` / `api.monarch.innotel.us` billing
-hosts were removed — **Magnate** at `subscribe.innotel.us` is the source
-billing platform for all projects.)
+(Billing hosts `subscribe.monarch.innotel.us` and `api.monarch.innotel.us`
+were removed — **Magnate** at `subscribe.innotel.us` is the source billing
+platform for all projects.)
 
 The mapping lives in `scripts/npm-hosts.conf` — add/remove lines freely; the
 script reconciles the proxy hosts on every run (idempotent). For a local NPM
