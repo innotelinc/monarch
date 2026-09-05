@@ -104,6 +104,12 @@ install_service() {
   if [ "${MONARCH_NPM_LOCAL:-1}" != "1" ]; then
     $SUDO sed -i '/--profile npm/d' "$root/etc/systemd/system/monarch.service"
   fi
+  # Legacy .72 services (Dispatcharr, TVHeadend, etc.) are opt-in via the
+  # "legacy" compose profile. When MONARCH_LEGACY=0 drop the --profile flag
+  # so the unit never starts legacy services.
+  if [ "${MONARCH_LEGACY:-0}" != "1" ]; then
+    $SUDO sed -i '/--profile legacy/d' "$root/etc/systemd/system/monarch.service"
+  fi
   # systemctl --root works offline (no running systemd needed), so it also
   # works from inside the installer chroot. Prefer it whenever a root dir is
   # given, or when we're in the chroot phase of a disk install.

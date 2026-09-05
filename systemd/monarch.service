@@ -17,6 +17,7 @@ WorkingDirectory=/opt/monarch
 ExecStart=/usr/bin/docker compose \
     -f docker-compose.yml \
     --profile npm \
+    --profile legacy \
     up -d --wait --remove-orphans
 
 ExecStop=/usr/bin/docker compose \

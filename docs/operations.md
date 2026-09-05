@@ -179,6 +179,24 @@ The migration rule is: copy/configure first, verify the replacement and its
 public DNS/TLS/dependencies, then switch the route, and only later remove the
 source service after an explicit retention decision.
 
+### Remaining .72 service migration checklist
+
+Enable one service at a time with `MONARCH_LEGACY=1` in `.env` (or
+`docker compose --profile legacy up -d <service>`). Verify on .46, then
+cut the DNS route and remove from .72.
+
+| Service | .72 port | Verify on .46 | DNS cut | .72 removed |
+|---------|----------|---------------|--------|-------------|
+| Dispatcharr | 9191 | ☐ | ☐ | ☐ |
+| TVHeadend | 9981/9982 | ☐ | ☐ | ☐ |
+| NextPVR | 8866 | ☐ | ☐ | ☐ |
+| Transmission | 9091 | ☐ | ☐ | ☐ |
+| Deluge | 8112 | ☐ | ☐ | ☐ |
+| autobrr | 7474 | ☐ | ☐ | ☐ |
+
+After all services are migrated, retire `media.innotel.us` and remove
+the .72 host from the compose project.
+
 
 ## Subdomains & Nginx Proxy Manager (automatic)
 

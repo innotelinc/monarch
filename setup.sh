@@ -62,6 +62,10 @@ export MONARCH_TARGET="${MONARCH_TARGET:-$ROOT}"
 npm_mode="$(sed -n 's/^NPM_MODE=//p' .env 2>/dev/null | tail -1 | xargs | tr '[:upper:]' '[:lower:]')"
 export MONARCH_NPM_LOCAL=1
 [ "$npm_mode" = "remote" ] && export MONARCH_NPM_LOCAL=0
+# Legacy .72 services (Dispatcharr, TVHeadend, etc.) are opt-in.
+# Set MONARCH_LEGACY=1 in .env to include them in the systemd unit.
+legacy="$(sed -n 's/^MONARCH_LEGACY=//p' .env 2>/dev/null | tail -1 | xargs | tr '[:upper:]' '[:lower:]')"
+export MONARCH_LEGACY="${legacy:-0}"
 bash scripts/install-monarch.sh
 
 # 3. Seed the Homarr landing board (Monarch main interface)
