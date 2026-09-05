@@ -158,12 +158,11 @@ deleted. The NPM database was backed up on `.71` before edge repair, and stale
 generated NPM files were retained under
 `/usr/src/proxy/backups/generated-pre-clipbucket-20260904164122`.
 
-The legacy billing API is currently **not a safe migration candidate**: its
-container publishes host `8001` to container port `8000`, but Uvicorn is
-configured to listen on container port `8001`; its configured `billing`
-database is also absent (only the default PostgreSQL databases exist). Its
-Stripe/Auth configuration must be reviewed before any replacement or webhook
-cutover. Do not copy or reuse its live Stripe credentials in a new deployment.
+The legacy billing API on `.72` is **RETIRED** — do not migrate it. Magnate
+subscribe.innotel.us is the single billing platform for the entire Innotel
+ecosystem. All Stripe keys, webhook endpoints, and subscription logic live in
+Magnate. The old `api.monarch.innotel.us` route has been removed. Do not
+copy or reuse its live Stripe credentials in a new deployment.
 
 | Legacy route | Current target | Status / migration action |
 |--------------|----------------|---------------------------|
