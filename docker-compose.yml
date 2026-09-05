@@ -223,6 +223,7 @@ services:
     <<: *common-keys
     container_name: transmission
     image: lscr.io/linuxserver/transmission:latest
+    profiles: ["legacy"]
     ports:
       - 9091:9091
       - 51413:51413
@@ -247,6 +248,7 @@ services:
     <<: *common-keys
     container_name: deluge
     image: lscr.io/linuxserver/deluge:latest
+    profiles: ["legacy"]
     ports:
       - 8112:8112
       - 58846:58846
@@ -293,6 +295,7 @@ services:
     <<: *common-keys
     container_name: autobrr
     image: ghcr.io/autobrr/autobrr:latest
+    profiles: ["legacy"]
     ports:
       - 7474:7474
     volumes:
@@ -306,6 +309,7 @@ services:
     <<: *common-keys
     container_name: dispatcharr
     image: ghcr.io/dispatcharr/dispatcharr:latest
+    profiles: ["legacy"]
     ports:
       - 9191:9191
     volumes:
@@ -319,6 +323,7 @@ services:
     <<: *common-keys
     container_name: tvheadend
     image: lscr.io/linuxserver/tvheadend:latest
+    profiles: ["legacy"]
     ports:
       - 9981:9981
       - 9982:9982
@@ -334,6 +339,7 @@ services:
     <<: *common-keys
     container_name: nextpvr
     image: nextpvr/nextpvr_amd64:latest
+    profiles: ["legacy"]
     ports:
       - 8866:8866
     volumes:
