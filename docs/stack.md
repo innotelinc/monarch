@@ -33,6 +33,7 @@ provides, and explicitly does not own.
 - ONYX — media storage
 - Magnate — subscriptions and entitlements
 - Cerulean — certificates and trust
+- NPM Edge — public routing, TLS termination at the edge
 
 ## Explicitly does NOT own
 
