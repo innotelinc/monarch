@@ -41,7 +41,7 @@ APPS = [
     ("Magnate", "https://app.magnate.innotel.us", "stripe", "Magnate - billing platform & admin portal"),
     ("AthenIQ Learn", "https://learn.innotel.us", "moodle", "AthenIQ - LMS / learning platform"),
     ("AthenIQ Studio", "https://studio.innotel.us", "code", "AthenIQ Studio - course authoring"),
-    ("Signara", "https://signara.innotel.us", "vault", "Signara - trust / certificate signing"),
+    ("Signara", "https://app.signara.innotel.us", "vault", "Signara - trust / certificate signing portal"),
     ("Onyx", "https://onyx.innotel.us", "minio", "Onyx - object storage"),
     ("Rizzaura", "https://rizzaura.innotel.us", "mastodon", "Rizzaura - social platform"),
     ("Atlas", "https://atlas.innotel.us", "gitea", "Atlas - DevOps / coding platform"),
