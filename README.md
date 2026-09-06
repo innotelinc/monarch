@@ -60,8 +60,10 @@ cp .env.sample .env    # edit MONARCH_USERNAME / MONARCH_PASSWORD etc.
 2. Installs the stack via `scripts/install-monarch.sh` (Docker, `/data` layout,
    `monarch.service` systemd unit, `docker compose up -d`). Set `MONARCH_TARGET`
    (e.g. `/opt/monarch`) to install elsewhere.
-3. Seeds the **Homarr landing board** so the apex domain shows the Monarch main
-   interface linking to every subdomain (customized boards are left untouched).
+3. Seeds the **Homarr landing board** (via `scripts/seed-homarr-board.py`) so the apex
+   domain shows the Monarch main interface with the full platform tile set — the media
+   stack plus **Cerulean**, **Capstone**, Magnate, AthenIQ, Zeus, Signara, Onyx,
+   Rizzaura, Atlas and Oasis (customized boards are left untouched).
 4. Auto-configures **Nginx Proxy Manager** via its API — proxy hosts for the apex and
    every subdomain, plus a **wildcard Let's Encrypt certificate** via DNS challenge.
 5. Ensures the **Magnate Stripe webhook** endpoint exists when `STRIPE_SECRET_KEY` is set.
@@ -133,9 +135,10 @@ stick — the installer stages it automatically. Full walkthroughs in
 docker-compose.yml          # the whole stack
 init/                       # monarch-init + monarch-seed (first-boot wiring, single source of truth)
 scripts/                    # setup.sh, install-monarch.sh, npm-proxy-hosts.py, drift-check.sh,
-                            # fresh-install-check.sh, stripe-webhooks.sh, ISO/offline builders
-homarr/                     # Homarr landing-board seed (board.default.json)
-.env.sample                 # every variable + secret hint
+                            # fresh-install-check.sh, stripe-webhooks.sh, seed-homarr-board.py,
+                            # ISO/offline builders
+homarr/                     # Homarr board seed, legacy v0 format (board.default.json);
+                            # v1 boards are seeded into sqlite by scripts/seed-homarr-board.py
 .github/workflows/          # release, fresh-install check, full-stack drift CI
 docs/                       # operations + deployment references
 ```

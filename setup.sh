@@ -69,23 +69,18 @@ export MONARCH_LEGACY="${legacy:-0}"
 bash scripts/install-monarch.sh
 
 # 3. Seed the Homarr landing board (Monarch main interface)
-# Renders homarr/board.default.json (a __DOMAIN__ template) into the Homarr
-# configs dir that docker-compose mounts. Never overwrites a board that was
-# already customized away from the stock Homarr welcome screen.
-homarr_conf="/docker/appdata/homarr/configs/default.json"
-if [ -f "$ROOT/homarr/board.default.json" ]; then
-  if [ -f "$homarr_conf" ] && ! grep -q 'Welcome to Homarr' "$homarr_conf" 2>/dev/null; then
-    echo ""
-    echo "Homarr board already customized - leaving it as-is."
-    echo "  (template: homarr/board.default.json - copy it over $homarr_conf to re-seed)"
-  else
-    mkdir -p "$(dirname "$homarr_conf")"
-    sed "s/__DOMAIN__/${MONARCH_DOMAIN:-monarch.innotel.us}/g" \
-      "$ROOT/homarr/board.default.json" > "$homarr_conf"
-    echo ""
-    echo "Seeded Homarr landing board -> $homarr_conf"
-    docker restart homarr >/dev/null 2>&1 || true
-  fi
+# Homarr v1 (homarr-labs) stores boards in its sqlite DB, so seeding runs
+# scripts/seed-homarr-board.py against the mounted appdata DB: it upserts the
+# full platform tile set (media stack + Cerulean + Capstone + every stack
+# service), fixes stale app URLs, and makes the board the home board so the
+# apex MONARCH_DOMAIN shows it. Idempotent - safe to re-run; tiles the user
+# added are left in place. (homarr/board.default.json is kept as a legacy
+# v0-format reference only.)
+if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT/scripts/seed-homarr-board.py" ]; then
+  python3 "$ROOT/scripts/seed-homarr-board.py" \
+    /docker/appdata/homarr/appdata/db/db.sqlite \
+    || echo "  (seed-homarr-board.py failed - see its output; the board may still open blank)"
+  docker restart homarr >/dev/null 2>&1 || true
 fi
 
 # 4. Configure Nginx Proxy Manager (proxy hosts + wildcard SSL)

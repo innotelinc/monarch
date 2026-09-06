@@ -162,10 +162,10 @@
     {
       "id": "1a2b3c4d-0003-4a03-8003-000000000003",
       "name": "Media",
-      "url": "https://media.magnate.innotel.us",
+      "url": "https://media.monarch.innotel.us",
       "behaviour": {
-        "onClickUrl": "https://media.magnate.innotel.us",
-        "externalUrl": "https://media.magnate.innotel.us",
+        "onClickUrl": "https://media.monarch.innotel.us",
+        "externalUrl": "https://media.monarch.innotel.us",
         "isOpeningNewTab": true,
         "tooltipDescription": "Jellyfin - stream movies & TV"
       },
@@ -310,10 +310,10 @@
     {
       "id": "1a2b3c4d-0005-4a05-8005-000000000005",
       "name": "Account",
-      "url": "https://auth.__DOMAIN__",
+      "url": "https://auth.cerulean.innotel.us",
       "behaviour": {
-        "onClickUrl": "https://auth.__DOMAIN__",
-        "externalUrl": "https://auth.__DOMAIN__",
+        "onClickUrl": "https://auth.cerulean.innotel.us",
+        "externalUrl": "https://auth.cerulean.innotel.us",
         "isOpeningNewTab": true,
         "tooltipDescription": "Authentik - sign in & manage your account"
       },
