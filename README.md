@@ -6,7 +6,7 @@
 
 Monarch rebrands the classic *arr stack as one premium media platform: **Jellyfin**
 streaming with user profiles, **AI-powered recommendations and smart search**, library
-**health analytics**, **Authentik-first** authentication with LDAP login gating, the whole
+**health analytics**, **Cerulean Cerulean Authentik-first** authentication with LDAP login gating, the whole
 **Sonarr/Radarr/Lidarr/Prowlarr** automation family wired automatically, **live TV** with a
 native M3U tuner and XMLTV guide, and one-command installs — including a bootable
 **live/install ISO** and an **offline bundle** for air-gapped deployment.
@@ -21,10 +21,10 @@ native M3U tuner and XMLTV guide, and one-command installs — including a boota
 
 > **About Monarch** — a premium, self-hosted media platform that turns a plain server into a
 > streaming service with AI recommendations, live TV, per-user profiles, and fully automated
-> media acquisition. Jellyfin is the streaming core; Authentik owns the users; the *arr stack
+> media acquisition. Jellyfin is the streaming core; Cerulean Authentik owns the users; the *arr stack
 > finds, downloads, and subtitles the content. **Landing page:** [innotelinc.github.io/monarch](https://innotelinc.github.io/monarch)
 
-**Non-negotiables:** 100% self-hosted · Docker Compose stack · Authentik-first
+**Non-negotiables:** 100% self-hosted · Docker Compose stack · Cerulean Authentik-first
 authentication (no separate user stores) · every service wired automatically on first boot ·
 release artifacts on every tagged release.
 
@@ -37,13 +37,13 @@ release artifacts on every tagged release.
 | 📺 **Streaming** | Jellyfin (movies, TV, music, live TV) with user profiles, watch history & SyncPlay watch parties | 
 | 🤖 **AI recommendations** | `monarch-recs`: content-based picks + smart search over your library — fully local, no external AI required | 
 | 🩺 **Library health** | `monarch-health`: missing/duplicate/orphan detection, per-library stats, disk usage, recently-added & most-played | 
-| 🔐 **Authentik SSO** | Users & passwords live in Authentik; Jellyfin logins resolve via the LDAP outpost — disable a user and their login dies instantly | 
+| 🔐 **Cerulean Authentik SSO** | Users & passwords live in Cerulean Authentik; Jellyfin logins resolve via the LDAP outpost — disable a user and their login dies instantly | 
 | 🎯 **Media automation** | Sonarr / Radarr / Lidarr / Whisparr / Prowlarr / qBittorrent / Bazarr, all configured and cross-wired by `monarch-init` | 
 | 📡 **Live TV** | Native M3U tuner + XMLTV guide (iptv-org) — zero TVHeadend setup; bring your own playlist via `LIVETV_M3U_URL` | 
 | 🌐 **Proxy & SSL** | Nginx Proxy Manager auto-configured via API with a wildcard Let's Encrypt cert (DNS challenge) | 
 | 🛡️ **Self-healing** | `monarch-drift-check` verifies the running stack hourly (systemd timer) and auto-repairs drift by re-running init | 
 | 💾 **Delivery** | One-command installer, offline bundle, bootable live/install ISO — install with or without internet | 
-| 💳 **Subscriptions** | Magnate is the source billing platform: Stripe checkout → Authentik `paid_users` group → access granted | 
+| 💳 **Subscriptions** | Magnate is the source billing platform: Stripe checkout → Cerulean Authentik `paid_users` group → access granted | 
 
 ## 🚀 Quick start (recommended)
 

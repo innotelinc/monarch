@@ -410,19 +410,6 @@ services:
   # Jellyfin LDAP-Auth plugin resolves logins against Authentik users;
   # disabling a user in Cerulean blocks their Jellyfin login.
   ###############################################
-  authentik-ldap:
-    container_name: authentik-ldap
-    # Same version as Cerulean's Authentik server (2024.12.2).
-    image: ghcr.io/goauthentik/ldap:2024.12.2
-    restart: unless-stopped
-    ports:
-      - "389:3389"
-      - "636:6636"
-    environment:
-      AUTHENTIK_HOST: http://192.168.1.46:9000
-      AUTHENTIK_INSECURE: "true"
-      # Outpost API token, provisioned by monarch-init (ak_ensure_token).
-      AUTHENTIK_TOKEN: ak-ldap-outpost-2026
 
   ###############################################
   # MONARCH-RECS - AI recommendations + smart search
@@ -546,11 +533,9 @@ services:
       LIVETV_M3U_URL: ${LIVETV_M3U_URL:-https://iptv-org.github.io/iptv/countries/us.m3u}
       LIVETV_GUIDE_URL: ${LIVETV_GUIDE_URL:-http://iptv:3000/guide.xml}
       # Authentik connection (LDAP outpost provisioning + Jellyfin LDAP-Auth
-      # plugin wiring). Points at the SHARED Authentik (IdentityOps, bundled
-      # with Magnate and published on host :9110) — there is ONE identity
-      # instance for the whole ecosystem; this stack does not run its own.
-      # Values must match what magnate's billing provisions — see the README
-      # "Authentik LDAP -> Jellyfin" section.
+      # plugin wiring). Points at the SHARED Authentik bundled with Cerulean
+      # (auth.cerulean.innotel.us) — there is ONE identity instance for the
+      # whole ecosystem; this stack does not run its own.
       AUTHENTIK_BASE_URL: ${AUTHENTIK_BASE_URL:-}
       AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
       AUTHENTIK_LDAP_SERVER: ${AUTHENTIK_LDAP_SERVER:-authentik-ldap}
