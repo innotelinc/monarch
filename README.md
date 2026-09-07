@@ -1,5 +1,9 @@
 <div align="center">
 
+[![CI](https://github.com/innotelinc/monarch/actions/workflows/ci.yml/badge.svg)](https://github.com/innotelinc/monarch/actions/workflows/ci.yml)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0-or-later-brightgreen.svg)](LICENSE)
+
+
 # 🦋 Monarch — Media Platform
 
 **Your own Netflix-grade streaming platform — AI recommendations, live TV, and the full *arr automation stack, self-hosted.**
@@ -18,6 +22,18 @@ native M3U tuner and XMLTV guide, and one-command installs — including a boota
 *One script, and your library gets a brain — with wings.*
 
 </div>
+
+---
+
+## Why Monarch
+
+| Problem | Monarch answer |
+| --- | --- |
+| Fragmented self-hosted media setups | One platform: Jellyfin streaming + AI recs + health analytics + *arr automation, all auto-wired |
+| Identity sprawl | Cerulean Authentik-first SSO; disable a user and their media access dies |
+| No release discipline | Tagged releases cut GHCR images + deployment bundle + source bundle + live ISO |
+| Air-gapped deploys are painful | Offline compose bundle + bootable live/install ISO included in every release |
+| Manual per-service config | `monarch-init` wires Jellyfin, *arr, LDAP, LDAP outpost, and reverse proxy on first boot |
 
 > **About Monarch** — a premium, self-hosted media platform that turns a plain server into a
 > streaming service with AI recommendations, live TV, per-user profiles, and fully automated
@@ -150,6 +166,13 @@ its containers, and `monarch-drift-check` watches disk usage, crash-looping cont
 stale images. No third-party author attribution is included anywhere in this project.
 
 ---
+
+
+---
+
+## License
+
+Monarch is licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE) for the full text.
 
 *Monarch — Media Platform. Self-hosted streaming with wings.*
 
