@@ -62,14 +62,28 @@ done < "$IMAGES_FILE"
 # (cat parts* reconstructs it). Consumers split members back out with
 # scripts/split-image-bundle.sh.
 rm -f "$OUT_DIR"/docker-images-part*.tar.gz
+
+# NextPVR has no multi-arch manifest - it ships nextpvr_amd64 / nextpvr_arm64
+# separately. `docker pull` otherwise only ever fetches the host arch, so pick
+# the matching NextPVR image the same way.
+case "$(uname -m)" in
+  x86_64|amd64) __bundle_arch="amd64" ;;
+  aarch64|arm64) __bundle_arch="arm64" ;;
+  *) __bundle_arch="amd64" ;;
+esac
+
 {
   for img in "${IMAGES[@]}"; do
+    case "$img" in
+      nextpvr/nextpvr_*) img="nextpvr/nextpvr_${__bundle_arch}:${img##*:}" ;;
+    esac
     echo "-- Pulling $img"
     docker pull "$img"
     echo "-- Saving $img (streamed)"
     docker save "$img" | gzip -1
   done
 } | split -b "$MAX_PART_BYTES" -d -a 2 - "$OUT_DIR/docker-images-part"
+unset __bundle_arch
 # split names parts part00, part01, ...; add the .tar.gz suffix and drop any
 # trailing empty part produced by an exact-size split.
 for f in "$OUT_DIR"/docker-images-part??; do

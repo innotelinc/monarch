@@ -1,6 +1,11 @@
 # Docker images pulled by the Monarch Media Platform docker-compose.yml.
 # One image per line; blank lines and '#' comments are ignored.
 # Used by scripts/build-offline-bundle.sh to produce the offline image bundle.
+#
+# build-offline-bundle.sh pulls with `docker pull` on the build host, so a
+# multi-arch image lands in the bundle for the host's architecture. NextPVR
+# publishes a SEPARATE image per arch (no multi-arch manifest) - the script
+# rewrites the nextpvr/nextpvr_* line to the host's arch automatically.
 ghcr.io/hotio/jellyfin:latest
 ghcr.io/seerr-team/seerr:latest
 ghcr.io/hotio/sonarr:latest
@@ -9,7 +14,7 @@ ghcr.io/hotio/lidarr:latest
 ghcr.io/hotio/whisparr:v2-develop
 ghcr.io/hotio/prowlarr:latest
 ghcr.io/hotio/bazarr:latest
-ghcr.io/ajnart/homarr:latest
+ghcr.io/homarr-labs/homarr:latest
 ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
 ghcr.io/hotio/sabnzbd:latest
 lscr.io/linuxserver/transmission:latest
@@ -21,19 +26,19 @@ ghcr.io/dispatcharr/dispatcharr:latest
 lscr.io/linuxserver/tvheadend:latest
 nextpvr/nextpvr_amd64:latest
 ghcr.io/iptv-org/epg:master
-oxygenz/clipbucket-v5:latest
-postgres:17
-ghcr.io/goauthentik/server:latest
-ghcr.io/goauthentik/ldap:latest
 python:3.12-slim
-containrrr/watchtower:latest
+nickfedor/watchtower:latest
 jc21/nginx-proxy-manager:latest
 
 # The first-party Monarch images are published by the release workflow
-# (build-images job) to GHCR - they land in the offline bundle on the run
-# after they are pushed.
+# (build-images job) to GHCR as multi-arch (amd64 + arm64) manifests - they
+# land in the offline bundle on the run after they are pushed.
 ghcr.io/innotelinc/monarch-recs:latest
 ghcr.io/innotelinc/monarch-health:latest
+ghcr.io/innotelinc/monarch-clipbucket:latest
 
-# The subscription platform image is public on GHCR (same org/user), so the
-# release CI can pull it without auth and it ships in the offline bundle.
+# Infisical (SecretOps) opt-in profile (compose.infisical.yml) - only pulled
+# into the bundle when enabled via `--profile infisical`; harmless to include.
+postgres:16-alpine
+redis:7-alpine
+ghcr.io/infisical/infisical:latest

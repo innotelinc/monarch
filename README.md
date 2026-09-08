@@ -123,6 +123,24 @@ Authentik bootstrap admin…). Subscriber access flows through **Magnate** billi
 checkout → `paid_users` group → LDAP bind succeeds → Jellyfin login works; cancel → user
 inactive → login blocked.
 
+## 🖥️ Platforms
+
+The Docker stack runs on **linux/amd64** and **linux/arm64** hosts — every
+third-party image is multi-arch, and the first-party images
+(`monarch-recs`, `monarch-health`, `monarch-clipbucket`) are published as
+amd64 + arm64 manifests by the release workflow. Two services need no
+manual steps but are worth knowing about:
+
+- **NextPVR** publishes a *separate* image per CPU architecture
+  (`nextpvr_amd64` / `nextpvr_arm64`); `scripts/install-monarch.sh` pins
+  the right one into `.env` (`NEXTPVR_IMAGE`) from `uname -m` automatically.
+- **ClipBucket** has no arm64 upstream image, so Monarch builds its own
+  bundled runtime (nginx + PHP-FPM + MariaDB, `clipbucket/`) and the
+  application source is git-cloned on first boot.
+
+The **live/install ISO** (`monarch-live-amd64.iso`) is amd64-only — on an
+arm64 host, install via the normal `./setup.sh` path instead.
+
 ## 📚 Documentation
 
 | Document | Covers |
@@ -133,7 +151,7 @@ inactive → login blocked.
 ## 📦 Releases & offline install
 
 Every `v*` tag triggers the [release workflow](.github/workflows/release.yml): first-party
-images (`monarch-recs`, `monarch-health`) publish to GHCR, and the GitHub Release attaches
+images (`monarch-recs`, `monarch-health`, `monarch-clipbucket`, amd64 + arm64) publish to GHCR, and the GitHub Release attaches
 the deployment payload, source bundle, checksums, the split **docker image bundle**, and a
 bootable **live/install ISO** (`monarch-live-amd64.iso`, BIOS + UEFI).
 

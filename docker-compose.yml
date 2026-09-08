@@ -348,7 +348,11 @@ services:
   nextpvr:
     <<: *common-keys
     container_name: nextpvr
-    image: nextpvr/nextpvr_amd64:latest
+    # NextPVR publishes a SEPARATE image per CPU architecture (nextpvr_amd64 /
+    # nextpvr_arm64) - there is no multi-arch manifest. install-monarch.sh
+    # pins NEXTPVR_IMAGE into .env from `uname -m`; override it manually if
+    # you run this stack on the non-native arch.
+    image: ${NEXTPVR_IMAGE:-nextpvr/nextpvr_amd64:latest}
     profiles: ["legacy"]
     ports:
       - 8866:8866
@@ -388,8 +392,11 @@ services:
   clipbucket:
     <<: *common-keys
     container_name: clipbucket
-    image: oxygenz/clipbucket-v5:latest
-    pull_policy: always
+    # Built from ./clipbucket (nginx + PHP-FPM + MariaDB runtime, app source
+    # git-cloned on first boot) - the upstream oxygenz image is amd64-only.
+    # The release workflow publishes amd64 + arm64 to GHCR.
+    image: ghcr.io/innotelinc/monarch-clipbucket:latest
+    build: ./clipbucket
     ports:
       - ${CLIPBUCKET_PORT:-8098}:80
     environment:

@@ -108,6 +108,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Cross-arch builds (arm64 from the amd64 runner) need QEMU.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -120,6 +124,9 @@ jobs:
         with:
           context: ./ai-recs
           file: ./ai-recs/Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm64
           push: true
           tags: |
             ghcr.io/innotelinc/monarch-recs:${{ steps.version.outputs.version }}
@@ -130,10 +137,26 @@ jobs:
         with:
           context: ./health-analytics
           file: ./health-analytics/Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm64
           push: true
           tags: |
             ghcr.io/innotelinc/monarch-health:${{ steps.version.outputs.version }}
             ghcr.io/innotelinc/monarch-health:latest
+
+      - name: Build & push Monarch ClipBucket
+        uses: docker/build-push-action@v6
+        with:
+          context: ./clipbucket
+          file: ./clipbucket/Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm64
+          push: true
+          tags: |
+            ghcr.io/innotelinc/monarch-clipbucket:${{ steps.version.outputs.version }}
+            ghcr.io/innotelinc/monarch-clipbucket:latest
 
   # ── Cut the GitHub release (payload + source bundle; version from the tag
   # when one was pushed, otherwise bumped from the last release).
@@ -198,9 +221,10 @@ jobs:
 
           **This release was generated automatically** by the release workflow (tagged push, schedule, or manual dispatch).
 
-          **First-party images published to GHCR** (also tagged \`latest\`):
+          **First-party images published to GHCR** (also tagged \`latest\`, amd64 + arm64):
           - \`ghcr.io/innotelinc/monarch-recs\` — AI recommendations + smart search
           - \`ghcr.io/innotelinc/monarch-health\` — media health analytics
+          - \`ghcr.io/innotelinc/monarch-clipbucket\` — ClipBucket v5 runtime (nginx + PHP-FPM + MariaDB)
 
           **What's included:**
           - \`monarch-deployment.tar.gz\` — full source + \`docker-compose.yml\` + systemd payload
