@@ -201,6 +201,20 @@ install_in_place() {
   else
     echo ".env already present - leaving it untouched."
   fi
+  # NextPVR publishes a SEPARATE image per CPU architecture (nextpvr_amd64 /
+  # nextpvr_arm64) - pin the right one into .env so the compose default never
+  # runs the wrong binary. Only added when the key is absent; users may
+  # override it manually afterwards.
+  if [ -f "$TARGET/.env" ] && ! grep -q '^NEXTPVR_IMAGE=' "$TARGET/.env"; then
+    case "$(uname -m)" in
+      x86_64|amd64) __np_arch="amd64" ;;
+      aarch64|arm64) __np_arch="arm64" ;;
+      *) __np_arch="amd64" ;;
+    esac
+    printf '\n# NextPVR per-architecture image (auto-detected from uname -m)\nNEXTPVR_IMAGE=nextpvr/nextpvr_%s:latest\n' "$__np_arch" >> "$TARGET/.env"
+    echo "Pinned NEXTPVR_IMAGE=nextpvr/nextpvr_$__np_arch:latest into $TARGET/.env"
+    unset __np_arch
+  fi
   load_docker_images "$TARGET/dist/docker-images"
   install_service ""
   echo "Monarch Media Platform installed at $TARGET and started."

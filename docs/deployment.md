@@ -91,6 +91,11 @@ bundle (`monarch-deployment.tar.gz`, `docker-images-part*.tar.gz`,
 hybrid (Secure Boot must be disabled); the installed system boots straight
 into the stack via `monarch.service`.
 
+> The live ISO is **amd64-only**. On an **arm64** host (e.g. a Raspberry Pi
+> or ARM server), the whole stack still works — install Docker and run
+> `./setup.sh` as described below; `install-monarch.sh` pins the
+> architecture-correct NextPVR image into `.env` automatically.
+
 ### Offline bundle
 
 ```
@@ -115,8 +120,9 @@ Releases are cut by `.github/workflows/release.yml`. The workflow:
    "Run workflow" (choose a `minor`/`major` bump, or `lightweight` to skip
    the heavy builds for a quick test).
 2. **build-images** publishes the first-party images to GHCR
-   (`monarch-recs`, `monarch-health` — tagged with the release version
-   **and** `latest`).
+   (`monarch-recs`, `monarch-health`, `monarch-clipbucket` — tagged with
+   the release version **and** `latest`, built for **linux/amd64 +
+   linux/arm64** via QEMU cross-compilation).
 3. **release** cuts the GitHub release with the deployment payload + source
    bundle + checksums.
 4. Two parallel CI jobs build & upload the **docker image bundle** and the
@@ -129,7 +135,8 @@ Each release publishes:
 - `monarch-deployment.tar.gz` (source + compose + systemd installer payload)
 - `monarch-source-bundle.tar.gz` + checksum
 - `SHA256SUMS`
-- GHCR images `ghcr.io/innotelinc/monarch-{recs,health}`
+- GHCR images `ghcr.io/innotelinc/monarch-{recs,health,clipbucket}` (multi-arch: amd64 + arm64)
+- The live ISO is **amd64-only**; the Docker stack itself runs on amd64 and arm64 hosts
 
 
 ## Manual setup (without the installer)
