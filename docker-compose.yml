@@ -22,6 +22,10 @@ services:
     <<: *common-keys
     container_name: jellyfin
     image: ghcr.io/hotio/jellyfin:latest
+    # Memory posture (docs/service-audit.md): transcode bursts are the media
+    # stack's biggest consumer; cap and keep swap off.
+    mem_limit: 4g
+    memswap_limit: 4g
     ports:
       # Host 8097 → container 8096: 8096 on this host belongs to the capstone
       # Control Center (dashboard), so Jellyfin shifts to the next free port.
