@@ -110,7 +110,7 @@ jobs:
 
       # Cross-arch builds (arm64 from the amd64 runner) need QEMU.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -146,7 +146,7 @@ jobs:
             ghcr.io/innotelinc/monarch-health:latest
 
       - name: Build & push Monarch ClipBucket
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./clipbucket
           file: ./clipbucket/Dockerfile
