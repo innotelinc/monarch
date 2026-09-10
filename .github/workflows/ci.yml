@@ -17,7 +17,7 @@ jobs:
     name: Repository structure
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Conformant structure
         run: |
@@ -41,7 +41,7 @@ jobs:
     name: Landing page sanity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Landing sanity
         run: |
