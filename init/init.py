@@ -1552,16 +1552,16 @@ def configure_bazarr():
         return False
 
     auth = settings.get("auth", {}) or {}
-    if auth.get("type") not in (None, "", "none"):
-        _log("Bazarr already has authentication configured - skipped.")
-        return False
+    _log("Bazarr local login: %s" % (auth.get("type") or "none"))
 
     # Bazarr's settings API takes form fields named settings-<section>-<key>;
-    # the password is stored MD5-hashed by the server.
+    # the password is stored MD5-hashed by the server. `settings-auth-type` is
+    # deliberately NOT sent: bazarr.<MONARCH_DOMAIN> already carries the
+    # Cerulean Authentik auth_request gate, so Bazarr must keep its default of
+    # no local login rather than gaining a second one. The API cannot express
+    # "no auth" anyway - it accepts only None/basic/form, and rejects an empty
+    # or "none" value with HTTP 406 - so the field is left untouched.
     form = {
-        "settings-auth-type": "basic",
-        "settings-auth-username": USER,
-        "settings-auth-password": PASS,
         "settings-general-use_sonarr": "true",
         "settings-general-use_radarr": "true",
     }
@@ -1587,7 +1587,7 @@ def configure_bazarr():
     st, _, _ = _http(BAZARR_BASE, "/api/system/settings", method="POST",
                      body=form, headers=auth_hdr, raw_form=True)
     if st in (200, 201, 202, 204):
-        _log("Bazarr: basic auth + Sonarr/Radarr connections saved via API.")
+        _log("Bazarr: local login off + Sonarr/Radarr connections saved via API.")
         _results["bazarr"] = "configured"
         return True
     _issues.append(f"bazarr: settings could not be saved via API (HTTP {st}) - configure manually")
@@ -1776,7 +1776,7 @@ def build_invariants() -> dict:
             "libraries": [lib["name"] for lib in JELLYFIN_LIBRARIES],
         },
         "jellyseerr": {"port": PORTS["jellyseerr"]},
-        "bazarr": {"port": PORTS["bazarr"], "auth_type": "basic"},
+        "bazarr": {"port": PORTS["bazarr"], "auth_type": "none (Cerulean SSO gate)"},
         "authentik": {"ldap_outpost": LDAP_OUTPOST_NAME},
     }
 

@@ -375,9 +375,24 @@ Notes:
   native Jellyfin apps and TV clients.
 * `https://req.innotel.us` (the subscriber-facing Jellyseerr, linked from
   Magnate) is deliberately **not** gated; `req.monarch.innotel.us` is.
-* WebUI logins that remain (Bazarr, qBittorrent, Sabnzbd) sit behind the gate
-  as well - the Authentik prompt comes first, their own login is the second
-  layer for direct LAN access.
+* **Their own logins are off too**, so the gate really is the only prompt:
+  `monarch-init` no longer sets a Bazarr login (its settings API accepts only
+  `None`/`basic`/`form`, so `settings-auth-type` is left untouched and the
+  shipped default of no auth stands), `qBittorrent.conf` whitelists the NPM
+  host (`WebUI\AuthSubnetWhitelist=127.0.0.1/32,<NPM_IP>/32` +
+  `AuthSubnetWhitelistEnabled=true`) so auth stays on for every other source,
+  and Sabnzbd needs two settings in `sabnzbd.ini`:
+
+  ```
+  host_whitelist = <container-id>, sabnzbd.monarch.innotel.us, sabnzbd, localhost
+  verify_xff_header = 0
+  ```
+
+  `host_whitelist` gates Sabnzbd's DNS-rebinding check, which otherwise 403s
+  the new hostname; `verify_xff_header` must be off because NPM forwards the
+  real public client IP in `X-Forwarded-For` and Sabnzbd rejects any non-local
+  address there. Both are host-side `appdata` files, so a fresh install needs
+  them applied once (`docker stop <app>` → edit → `docker start <app>`).
 
 #### Subscription platform + billing
 
