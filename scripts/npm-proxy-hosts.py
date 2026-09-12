@@ -76,6 +76,105 @@ DEFAULT_HOSTS = [
 
 HOSTS_CONF = os.path.join(SCRIPT_DIR, "npm-hosts.conf")
 
+# ── Cerulean Authentik forward auth (SSO gate for the media admin apps) ──
+# Injected as the proxy host's nginx `advanced_config`: an auth_request against
+# the Authentik embedded outpost. The outpost serves a domain-level
+# (forward_domain) proxy provider, so ONE provider covers every host - it tells
+# requests apart by the forwarded host. Radarr/Sonarr/Lidarr/Whisparr/Bazarr/
+# Prowlarr/qBittorrent/Sabnzbd have no OIDC of their own, so this is what puts
+# Cerulean sign-in in front of them. Braces are doubled for .format() - only
+# {outpost_url} and {signin_url} are fields.
+FORWARD_AUTH_SNIPPET = """\
+# ── Cerulean Authentik forward auth (managed by npm-proxy-hosts.py) ──
+# Buffer large SSO redirect headers.
+proxy_buffers 8 16k;
+proxy_buffer_size 32k;
+client_max_body_size 0;
+auth_request /outpost.goauthentik.io/auth/nginx;
+error_page 401 = @goauthentik_proxy_signin;
+auth_request_set $auth_cookie $upstream_http_set_cookie;
+add_header Set-Cookie $auth_cookie;
+auth_request_set $authentik_username $upstream_http_x_authentik_username;
+auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+auth_request_set $authentik_email $upstream_http_x_authentik_email;
+auth_request_set $authentik_name $upstream_http_x_authentik_name;
+auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+proxy_set_header X-authentik-username $authentik_username;
+proxy_set_header X-authentik-groups $authentik_groups;
+proxy_set_header X-authentik-email $authentik_email;
+proxy_set_header X-authentik-name $authentik_name;
+proxy_set_header X-authentik-uid $authentik_uid;
+location /outpost.goauthentik.io {{
+    proxy_pass {outpost_url}/outpost.goauthentik.io;
+    proxy_set_header Host $host;
+    proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+    # The provider runs in forward_domain mode and picks the app from the
+    # forwarded host; these do NOT survive into a custom location otherwise.
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    add_header Set-Cookie $auth_cookie;
+    auth_request_set $auth_cookie $upstream_http_set_cookie;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+}}
+location @goauthentik_proxy_signin {{
+    internal;
+    add_header Set-Cookie $auth_cookie;
+    return 302 {signin_url}/outpost.goauthentik.io/start?rd=$scheme://$http_host$request_uri;
+}}
+"""
+
+
+def forward_auth_snippet(outpost_url, signin_url):
+    """Render the auth_request nginx snippet for one proxy host.
+
+    outpost_url is server-side only (NPM -> Authentik over the LAN, direct -
+    never through NPM's own vhosts); signin_url is where the BROWSER is sent on
+    401, so it must be the public auth domain.
+    """
+    return FORWARD_AUTH_SNIPPET.format(outpost_url=outpost_url.rstrip("/"),
+                                       signin_url=signin_url.rstrip("/"))
+
+
+def resolve_forward_auth(domain):
+    """Resolve (enabled, outpost_url, signin_url, excluded subdomains)."""
+    enabled = env("NPM_FORWARD_AUTH", "1").lower() not in {"0", "false", "no", "off"}
+    excluded = {s.strip().lower() for s in
+                env("NPM_FORWARD_AUTH_EXCLUDE", "").split(",") if s.strip()}
+    if "all" in excluded:
+        enabled = False
+    outpost = env("MONARCH_AUTHENTIK_OUTPOST_URL") or \
+        f"http://{env('NPM_FORWARD_HOST', 'host.docker.internal')}:9000"
+    # The browser-facing sign-in target. MONARCH_AUTHENTIK_URL is authoritative;
+    # NPM_AUTHENTIK_URL is only honoured when it actually belongs to this base
+    # domain - the shared Innotel dev shell exports it for the Capstone stack
+    # (auth.capstone.innotel.us), and a cross-domain sign-in URL would set an
+    # SSO cookie on the wrong domain and bounce the user in a redirect loop.
+    signin = env("MONARCH_AUTHENTIK_URL").rstrip("/")
+    if not signin:
+        candidate = env("NPM_AUTHENTIK_URL").rstrip("/")
+        if candidate.endswith("." + domain) or candidate.endswith("/" + domain):
+            signin = candidate
+        else:
+            signin = f"https://auth.{domain}"
+    return enabled, outpost, signin, excluded
+
+
+def subdomain_of(domain_name, domain):
+    """'radarr.monarch.innotel.us' + 'monarch.innotel.us' -> 'radarr'."""
+    return domain_name[: -len(domain) - 1] if domain_name.endswith("." + domain) else "@"
+
+
+def host_advanced_config(host, domain, fa_enabled, fa_outpost, fa_signin,
+                         fa_excluded, fallback="client_max_body_size 0;"):
+    """The `advanced_config` a host should carry ('' -> fallback)."""
+    if not (fa_enabled and host.get("forward_auth")):
+        return fallback
+    if subdomain_of(host["domain"], domain).lower() in fa_excluded:
+        return fallback
+    return forward_auth_snippet(fa_outpost, fa_signin)
+
 
 def load_env(path):
     """Parse KEY=VALUE lines from a .env file into os.environ (never overwrite)."""
@@ -118,13 +217,17 @@ def load_hosts(domain):
                 if len(parts) < 3:
                     continue
                 sub, forward, port = parts[0], parts[1], parts[2]
-                ws = len(parts) > 3 and parts[3].lower() in ("yes", "true", "1")
-                hosts.append((sub, forward, int(port), ws))
+                # Trailing flags, order-independent: yes/true/1 -> websockets,
+                # fa -> Cerulean Authentik forward auth (SSO gate).
+                flags = {p.lower() for p in parts[3:]}
+                ws = bool(flags & {"yes", "true", "1"})
+                fa = "fa" in flags
+                hosts.append((sub, forward, int(port), ws, fa))
     else:
-        hosts = DEFAULT_HOSTS
+        hosts = [(*h, False) if len(h) == 4 else h for h in DEFAULT_HOSTS]
 
     result = []
-    for sub, forward, port, ws in hosts:
+    for sub, forward, port, ws, fa in hosts:
         if sub == "@":
             host_domain = domain
         else:
@@ -134,6 +237,7 @@ def load_hosts(domain):
             "forward": forward,
             "port": int(port),
             "websockets": ws,
+            "forward_auth": fa,
         })
     return result, hosts_src
 
@@ -337,7 +441,7 @@ class NpmClient:
 
     def upsert_proxy_host(self, token, host_id, domain, forward_host, forward_port,
                           certificate_id, websockets, dry_run=False,
-                          host_fields=None):
+                          host_fields=None, advanced_config="client_max_body_size 0;"):
         host_fields = host_fields or {"websockets": "websockets_support",
                                       "caching": "caching"}
         body = {
@@ -351,19 +455,20 @@ class NpmClient:
             host_fields["caching"]: False,
             host_fields["websockets"]: websockets,
             "access_list_id": 0,
-            "advanced_config": "client_max_body_size 0;",
+            "advanced_config": advanced_config,
         }
+        ss0 = "+SSO" if "outpost.goauthentik.io" in advanced_config else ""
         action = "update" if host_id else "create"
         if dry_run:
             print(f"  [dry-run] would {action} {domain} -> "
-                  f"{forward_host}:{forward_port} (ws={websockets})")
+                  f"{forward_host}:{forward_port} (ws={websockets}){ss0}")
             return
         path = f"/api/nginx/proxy-hosts/{host_id}" if host_id else "/api/nginx/proxy-hosts"
         method = "PUT" if host_id else "POST"
         status, body_resp = self._request(method, path, body, token=token)
         if status in (200, 201):
             print(f"  {action}d proxy host {domain} -> "
-                  f"{forward_host}:{forward_port} (ws={websockets})")
+                  f"{forward_host}:{forward_port} (ws={websockets}){ss0}")
         else:
             print(f"  ERROR: could not {action} proxy host {domain} "
                   f"(HTTP {status}): {body_resp}" if body_resp else
@@ -473,9 +578,17 @@ def main():
     tsig = tsig_config()
 
     hosts, hosts_src = load_hosts(domain)
+    fa_enabled, fa_outpost, fa_signin, fa_excluded = resolve_forward_auth(domain)
 
     print(f"Monarch -> Nginx Proxy Manager: {npm_url}")
     print(f"  domain: {domain}  ({len(hosts)} proxy hosts from {hosts_src})")
+    gated = [h["domain"] for h in hosts if h.get("forward_auth")]
+    if fa_enabled:
+        print(f"  Cerulean Authentik forward auth ON (outpost {fa_outpost}): "
+              f"{len(gated)} host(s) gated" + (f" - {', '.join(gated)}" if gated else ""))
+    else:
+        print("  WARNING: forward auth disabled - gated hosts will NOT require "
+              "Cerulean sign-in")
 
     if not npm_email or not npm_pass:
         print("ERROR: NPM_ADMIN_EMAIL / NPM_ADMIN_PASSWORD are not set (see .env.sample).")
@@ -577,6 +690,12 @@ def main():
             if bool(got_ws) != bool(host["websockets"]):
                 problems.append(f"websockets={bool(got_ws)} "
                                 f"(expected {bool(host['websockets'])})")
+            want_snippet = host_advanced_config(host, domain, fa_enabled, fa_outpost,
+                                                fa_signin, fa_excluded)
+            got_auth = "outpost.goauthentik.io" in (existing.get("advanced_config") or "")
+            want_auth = "outpost.goauthentik.io" in want_snippet
+            if got_auth != want_auth:
+                problems.append(f"forward_auth={got_auth} (expected {want_auth})")
             if problems:
                 print(f"  DRIFT: {domain_name} -> " + "; ".join(problems))
                 drifted += 1
@@ -608,10 +727,13 @@ def main():
             forward_host = forward_mode
         existing = client.find_host(existing_hosts, domain_name)
         host_id = str(existing.get("id")) if existing else None
-        client.upsert_proxy_host(token, host_id, domain_name, forward_host,
-                                 host["port"], cert_id or None,
-                                 host["websockets"], dry_run=args.dry_run,
-                                 host_fields=host_fields)
+        client.upsert_proxy_host(
+            token, host_id, domain_name, forward_host,
+            host["port"], cert_id or None,
+            host["websockets"], dry_run=args.dry_run,
+            host_fields=host_fields,
+            advanced_config=host_advanced_config(host, domain, fa_enabled,
+                                                 fa_outpost, fa_signin, fa_excluded))
         # Keep DNS in sync: write the A record for the subdomain when the
         # forward target is an IP and TSIG credentials are configured.
         if tsig and is_ip_address(forward_host):

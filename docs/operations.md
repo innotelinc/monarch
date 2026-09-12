@@ -331,6 +331,54 @@ Test the outpost from the host:
 ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,ou=users,dc=innotel,dc=us" -w ak-ldap-bind-2026 '(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)' cn
 ```
 
+#### Cerulean SSO gate for the media apps
+
+The media management apps (**Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
+Prowlarr, qBittorrent, Sabnzbd** and the `req.` Jellyseerr alias) do not speak
+OIDC - they only ship a local username/password form. "Sign in with Authentik"
+for them is an **nginx `auth_request` gate**: Nginx Proxy Manager asks the
+Cerulean Authentik embedded outpost first and only proxies the app when the
+request carries a valid SSO session. Their own login is switched to
+`external` ("a reverse proxy authenticated this user"), so there is exactly
+**one** prompt - Cerulean, shared across every `*.$MONARCH_DOMAIN` gate.
+
+| Piece | Where | What it is |
+|-------|-------|------------|
+| Proxy provider | `scripts/authentik-forward-auth.py` | `Monarch NPM Forward Auth` - `forward_domain`, cookie domain `$MONARCH_DOMAIN`, attached to the embedded outpost |
+| nginx gate | `scripts/npm-proxy-hosts.py` + the `fa` flag in `scripts/npm-hosts.conf` | injects the `auth_request` snippet as the host's `advanced_config` |
+| App login | `monarch-init` (`set_monarch_app_auth`) | `authenticationMethod=external`, `authenticationRequired=disabledForLocalAddresses` |
+
+Setup (idempotent - both scripts reconcile and support `--check`/`--dry-run`):
+
+```
+python3 scripts/authentik-forward-auth.py   # provider + application + outpost
+python3 scripts/npm-proxy-hosts.py          # proxy hosts + the gate
+```
+
+Turning it off, or exempting a host:
+
+```
+NPM_FORWARD_AUTH=0                    # no gate anywhere
+NPM_FORWARD_AUTH_EXCLUDE=req,admin    # leave these two unauthenticated
+```
+
+Notes:
+
+* The **sign-in page** is served by the shared Authentik core
+  (`auth.capstone.innotel.us`), while the gate itself sets its session cookie on
+  `.$MONARCH_DOMAIN` - so one sign-in covers every Monarch-gated host. The
+  redirect must stay on a `$MONARCH_DOMAIN` host; a cross-domain sign-in URL
+  would set the cookie in the wrong place and loop (the script guards against
+  this if a sibling stack exports `NPM_AUTHENTIK_URL`).
+* **Jellyfin itself is not gated this way** - it has its own Authentik-backed
+  login through the LDAP outpost, and a forward-auth redirect would break
+  native Jellyfin apps and TV clients.
+* `https://req.innotel.us` (the subscriber-facing Jellyseerr, linked from
+  Magnate) is deliberately **not** gated; `req.monarch.innotel.us` is.
+* WebUI logins that remain (Bazarr, qBittorrent, Sabnzbd) sit behind the gate
+  as well - the Authentik prompt comes first, their own login is the second
+  layer for direct LAN access.
+
 #### Subscription platform + billing
 
 **Magnate** (`subscribe.innotel.us`) is the source billing platform for all

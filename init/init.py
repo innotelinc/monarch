@@ -1103,21 +1103,31 @@ def monarch_app_base(svc, port):
 
 
 def set_monarch_app_auth(base, api, key):
+    """Let Cerulean Authentik be the ONLY login for a *arr app.
+
+    The Monarch NPM hosts put an Authentik auth_request gate in front of these
+    apps (the `fa` flag in scripts/npm-hosts.conf), and the apps have no OIDC of
+    their own. Their built-in Forms login would be a SECOND prompt after SSO, so
+    it is switched to `external` - *arr's mode for "a reverse proxy already
+    authenticated this user" - which stops the app from challenging.
+    """
     status, _, j = _http(base, f"/api/{api}/config/host", headers={"X-Api-Key": key})
     if status != 200 or not isinstance(j, dict):
         return False, "config/host unreachable"
-    if j.get("authenticationMethod") not in (None, "", "none"):
-        return True, "auth already configured"
-    j["authenticationMethod"] = "forms"
+    if j.get("authenticationMethod") == "external":
+        return True, "external auth already set"
+    j["authenticationMethod"] = "external"
+    # Older builds still validate these fields even in external mode.
     j["username"] = USER
     j["password"] = PASS
     # Newer *arr versions require passwordConfirmation to match password or
     # the PUT is rejected with HTTP 400 (and an empty body).
     j["passwordConfirmation"] = PASS
+    j.setdefault("authenticationRequired", "disabledForLocalAddresses")
     status, _, _ = _http(base, f"/api/{api}/config/host", method="PUT", body=j,
                          headers={"X-Api-Key": key})
     if status in (200, 202):
-        return True, "forms auth set"
+        return True, "external auth set (Cerulean SSO is the only login)"
     return False, f"auth not applied (HTTP {status})"
 
 
@@ -1289,18 +1299,21 @@ def configure_prowlarr():
         return False
 
     status, _, j = _http(PROWLARR_BASE, "/api/v1/config/host", headers={"X-Api-Key": key})
-    if status == 200 and isinstance(j, dict) and j.get("authenticationMethod") in (None, "none", ""):
-        j["authenticationMethod"] = "forms"
+    if status == 200 and isinstance(j, dict) and j.get("authenticationMethod") != "external":
+        # `external`: the Cerulean Authentik gate on prowlarr.<MONARCH_DOMAIN>
+        # is the only login - no second prompt from Prowlarr's own Forms auth.
+        j["authenticationMethod"] = "external"
         j["username"] = USER
         j["password"] = PASS
         # Newer versions require passwordConfirmation to match password or
         # the PUT is rejected with HTTP 400.
         j["passwordConfirmation"] = PASS
+        j.setdefault("authenticationRequired", "disabledForLocalAddresses")
         status, _, _ = _http(PROWLARR_BASE, "/api/v1/config/host", method="PUT",
                              body=j, headers={"X-Api-Key": key})
-        _log(f"Prowlarr: forms auth set (HTTP {status})")
+        _log(f"Prowlarr: external auth set (HTTP {status})")
     else:
-        _log("Prowlarr: auth already configured")
+        _log("Prowlarr: external auth already configured")
 
     # qBittorrent download client (skip if one already exists).
     status, _, clients = _http(PROWLARR_BASE, "/api/v1/downloadclient",
