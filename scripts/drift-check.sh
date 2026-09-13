@@ -403,17 +403,16 @@ if [ "$jf_code" = "200" ]; then
   jf_via="login"
   [ -n "$jf_token" ] || fail "jellyfin: login returned no AccessToken"
 elif [ -f "$JELLYFIN_KEY_FILE" ]; then
-  # Jellyfin's local admin password is set by its first-run wizard, and init
-  # cannot re-sync it for an existing admin: the password endpoints need the
-  # CURRENT password (or do not bind on this build), so it can legitimately
-  # diverge from MONARCH_PASSWORD once the operator changes it. The credential
-  # init DOES maintain is the exported admin token - verify with that, and
-  # report the divergence as a note rather than failing on something no
-  # automated path can repair.
+  # Fallback for when the shared credentials do not log in: Jellyfin's local
+  # admin password can diverge from MONARCH_PASSWORD (the password endpoint
+  # needs the CURRENT password), and that is reported rather than failed on.
+  # The credential that does not depend on the password is the durable admin
+  # API key at $JELLYFIN_KEY_FILE - it survives a password change, unlike the
+  # session tokens, which is why init mints a key instead of a token.
   jf_token=$(cat "$JELLYFIN_KEY_FILE" 2>/dev/null)
   jf_via="exported token"
   if [ -n "$jf_token" ]; then
-    say "note: jellyfin admin login with the shared credentials failed (HTTP $jf_code) - using the exported admin token"
+    say "note: jellyfin admin login with the shared credentials failed (HTTP $jf_code) - using the exported admin API key; re-align the password with scripts/jellyfin-admin-password.py --set"
   fi
 fi
 if [ -z "$jf_token" ]; then

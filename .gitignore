@@ -4,6 +4,10 @@
 !.env.sample
 .env.local
 .env.*.local
+# Backups written by scripts/jellyfin-admin-password.py and setup-style tooling:
+# a copy of .env is still a copy of the secrets, and must never be committed.
+.env.bak
+*.env.bak
 
 # Live USB / release build output
 .live-build/

@@ -29,8 +29,11 @@ under "MANUAL ACTIONS NEEDED", and the script always exits 0 so the one-shot
 container is not flagged as failed.
 
 Secrets/state written under /docker/appdata/init/:
-  * jellyfin-api-key.txt  - Jellyfin admin token (use as JELLYFIN_API_KEY in
-                            .env for the subscription platform)
+  * jellyfin-api-key.txt  - durable Jellyfin admin API key (use as
+                            JELLYFIN_API_KEY in .env for the subscription
+                            platform, AI recs and health analytics), falling
+                            back to the session token if the key could not be
+                            minted
   * status.json           - per-service result of the last run
   * invariants.json       - what monarch-init is supposed to maintain (the
                             drift check asserts against this)
@@ -687,17 +690,33 @@ def configure_jellyfin():
                      "re-run monarch-init.")
         else:
             _issues.append("Could not log in to Jellyfin with the shared credentials "
-                           "(check the Jellyfin admin user, then set JELLYFIN_API_KEY manually)")
+                           "(run scripts/jellyfin-admin-password.py --set to re-align the "
+                           "local admin password with MONARCH_PASSWORD, then re-run "
+                           "monarch-init)")
             _log("WARNING: Jellyfin login failed - export the Jellyfin API key manually.")
         return False
 
+    # The credential Monarch's services read. Export the DURABLE API key, not the
+    # session token above: a password change revokes every session token the
+    # admin holds (that is how this file went stale once, taking monarch-recs,
+    # monarch-health and magnate-entitlements with it). scripts/jellyfin-admin-
+    # password.py uses the same key name, so a first boot and a repair converge
+    # on one key instead of stacking a new one per run.
+    api_key = jellyfin_ensure_api_key(token)
+    if api_key:
+        token = api_key
+    else:
+        _log("WARNING: no durable Jellyfin API key - falling back to the session "
+             "token, which the next password change will revoke.")
     key_file = os.path.join(INIT_DIR, "jellyfin-api-key.txt")
     with open(key_file, "w", encoding="utf-8") as fh:
         fh.write(token)
     ensure_owner(key_file)
-    _log("Exported Jellyfin admin token -> " + key_file)
+    _log("Exported Jellyfin admin credential -> " + key_file)
     _log("Set JELLYFIN_API_KEY in .env to the contents of that file (used by the "
-         "subscription platform).")
+         "subscription platform). It is a durable API key; run "
+         "scripts/jellyfin-admin-password.py --set to mint or refresh it on an "
+         "existing install.")
 
     # Add the media libraries (read-only media mount is fine - metadata lives in
     # the Jellyfin config volume). Jellyfin >= 10.11 takes name, collectionType
@@ -747,6 +766,48 @@ def jellyfin_headers(token):
     uses the same one).
     """
     return {"Authorization": f"MediaBrowser Token={token}"}
+
+
+def jellyfin_ensure_api_key(token, name=None) -> str:
+    """Return Jellyfin's durable API key called <name>, creating it if needed.
+
+    API keys live in Jellyfin's own ApiKeys table and are not tied to the user's
+    password, so - unlike the session token AuthenticateByName returns - they
+    survive a password change. The name matches the one
+    scripts/jellyfin-admin-password.py uses. Returns "" when the endpoints are
+    unavailable, so the caller can fall back and still finish the run.
+    """
+    name = name or os.environ.get("JELLYFIN_API_KEY_NAME", "monarch-admin")
+
+    def find():
+        status, _, body = _http(JELLYFIN_BASE, "/Auth/Keys",
+                                headers=jellyfin_headers(token))
+        if status != 200 or not isinstance(body, dict):
+            return ""
+        for key in body.get("Items") or []:
+            if key.get("AppName") == name and key.get("AccessToken"):
+                return key["AccessToken"]
+        return ""
+
+    existing = find()
+    if existing:
+        _log(f"Jellyfin API key '{name}' already exists - reusing it")
+        return existing
+    status, _, _ = _http(
+        JELLYFIN_BASE, "/Auth/Keys?app=" + urllib.parse.quote(name),
+        method="POST", headers=jellyfin_headers(token))
+    if status not in (200, 204):
+        _log(f"WARNING: could not create the Jellyfin API key '{name}' (HTTP {status}).")
+        return ""
+    # The list endpoint lags the create on this build.
+    for _ in range(5):
+        created = find()
+        if created:
+            _log(f"Created Jellyfin API key '{name}'")
+            return created
+        time.sleep(1)
+    _log(f"WARNING: created the Jellyfin API key '{name}' but could not read it back.")
+    return ""
 
 
 def jellyfin_plugin_installed(token) -> bool:

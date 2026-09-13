@@ -242,12 +242,28 @@ not as failures.
 
 (Billing hosts `subscribe.monarch.innotel.us` and `api.monarch.innotel.us`
 were removed — **Magnate** at `subscribe.innotel.us` is the source billing
-platform for all projects.)
+platform for all projects. The leftover `subscribe.monarch.innotel.us` proxy
+host was then pruned from the edge; it forwarded to a port nothing listens on.)
 
 The mapping lives in `scripts/npm-hosts.conf` — add/remove lines freely; the
 script reconciles the proxy hosts on every run (idempotent). For a local NPM
 you can also forward to host-published ports with
 `NPM_FORWARD_HOST=host.docker.internal`.
+
+Deleting a line is deliberately **not** enough to delete a host: a typo in the
+conf must never take a live service down. The host becomes **drift** —
+`npm-proxy-hosts.py --check` fails and `drift-check` reports it — and is
+removed explicitly:
+
+```
+python3 scripts/npm-proxy-hosts.py --prune --dry-run   # preview
+python3 scripts/npm-proxy-hosts.py --prune             # delete
+```
+
+`--prune` only touches names inside `MONARCH_DOMAIN`, so the other products
+sharing `proxy.innotel.us` can never be removed from here. It is how the
+retired `subscribe.monarch.innotel.us` host above was cleaned up, and why
+`--check` no longer lets a host linger just because the conf stopped naming it.
 
 #### Wildcard SSL (automatic)
 
@@ -486,9 +502,56 @@ Jellyfin auth for this script is the `MediaBrowser Token=` header (the pinned
 v12 image answers 401 to `?api_key=` and `X-Emby-Token`), read from
 `JELLYFIN_API_KEY` or `/docker/appdata/init/jellyfin-api-key.txt`.
 
-Getting `JELLYFIN_API_KEY`: `monarch-init` exports the Jellyfin admin token on
-first boot to `/docker/appdata/init/jellyfin-api-key.txt` — copy it into
-`.env`. `monarch-recs` and `monarch-health` read the same file automatically.
+`JELLYFIN_API_KEY` should be a **durable API key**, not a session token: a
+password change revokes every session token the admin holds, which is exactly
+how this credential went stale once, and an API key survives it. `monarch-init`
+exports a session token on first boot (enough to get the stack up), and
+`scripts/jellyfin-admin-password.py --set` replaces it with a durable API key
+called `monarch-admin` and writes both places it is read from:
+`/docker/appdata/init/jellyfin-api-key.txt` and `JELLYFIN_API_KEY` in `.env`.
+`monarch-recs` and `monarch-health` read the same file automatically.
+
+#### The Jellyfin admin password
+
+`MONARCH_PASSWORD` sets the Jellyfin `admin` password on a fresh install, and
+Jellyfin refuses to change an existing one without the current password — so an
+operator changing it by hand desynchronises the shared credential, and no
+`monarch-init` re-run can put it back.
+**`scripts/jellyfin-admin-password.py`** aligns it through Jellyfin's own
+forgot-password flow, which needs no old password:
+
+```
+python3 scripts/jellyfin-admin-password.py --check   # drift only, changes nothing
+python3 scripts/jellyfin-admin-password.py --set     # align, then refresh the API key
+```
+
+Two traps in that flow are worth knowing before running it by hand: the PIN is
+written to a `passwordreset*.json` file **inside the container** (the API only
+returns the path, so the call looks like it did nothing), and redeeming the PIN
+makes **the PIN itself** the account password — log in with the PIN, not with an
+empty password. `--set` handles both, then sets `MONARCH_PASSWORD` through
+`POST /Users/{id}/Password`, which is why the account ends up matching `.env`
+instead of drifting again. Subscribers never use this account: they sign in
+through the Authentik LDAP outpost.
+
+#### Rotating a Jellyfin API key
+
+Mint one with `POST /Auth/Keys?app=<name>` (204) and read it back from
+`GET /Auth/Keys` — the list lags the create by a moment on this build. Delete one
+with `DELETE /Auth/Keys/<token>`. The order that never breaks a consumer is
+**mint → update the consumer → verify → delete the old key**: deleting first
+leaves the app locked out for however long the rest takes.
+
+| Consumer | Where its copy lives | How to update it |
+|---|---|---|
+| `monarch-admin` | `/docker/appdata/init/jellyfin-api-key.txt` + `JELLYFIN_API_KEY` in `.env` | `scripts/jellyfin-admin-password.py --set` |
+| Jellyseerr | `settings.json` → `jellyfin.apiKey` (plaintext) | edit it and restart the container |
+| Homarr | its own DB (`integrationSecret`, integration kind `jellyfin`) | **encrypted**: AES-256-CBC, key = `hex(SECRET_ENCRYPTION_KEY)`, 16-byte random IV, stored `hex(ciphertext).hex(iv)`. Set it in the Homarr UI, or re-encrypt with that scheme and restart |
+
+`monarch-admin` is the key Monarch's own services use (AI recommendations, health
+analytics, entitlements). The other two belong to the apps themselves and only
+need rotating if their value is exposed. There is no endpoint that "tests" a key:
+call any admin endpoint with it and expect 200.
 
 
 ## AI recommendations & smart search (monarch-recs)
@@ -557,14 +620,14 @@ against the services:
 | Sonarr / Radarr / Lidarr / Whisparr | API reachable, `authenticationMethod=external` (the Cerulean SSO gate is the only login), expected media root folder, qBittorrent download client |
 | Prowlarr | qBittorrent download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
 | qBittorrent | WebUI login with the shared credentials, `movies`/`tv`/`music`/`xxx` categories |
-| Jellyfin | admin API access — the shared credentials when they still match, otherwise the exported admin token (`/docker/appdata/init/jellyfin-api-key.txt`; a diverged local admin password is reported as a note, not a failure) — plus media libraries (Movies / TV Shows / Music / Other) |
+| Jellyfin | admin API access — the shared credentials when they still match, otherwise the durable admin API key (`/docker/appdata/init/jellyfin-api-key.txt`; when the local admin password has diverged the check says so and names the repair, `scripts/jellyfin-admin-password.py --set`) — plus media libraries (Movies / TV Shows / Music / Other) |
 | Jellyseerr | initialized, Jellyfin sign-in enabled |
 | Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
 | Infisical (once provisioned) | `.env` is still derived from the store — `infisical-setup.py --check` (read-only; skipped when `INFISICAL_TOKEN`/`INFISICAL_WORKSPACE_ID` are unset) |
 | Magnate (when `MAGNATE_URL` is set) | every managed user's Jellyfin policy matches its Magnate tier (`scripts/magnate-entitlements.py --check`, read-only; skipped when no Jellyfin API key) |
 | Nginx Proxy Manager (static) | `scripts/check-proxy-ports.py` — every `npm-hosts.conf` row forwards to a port `docker-compose.yml` publishes (or the container port); needs no credentials, runs in both NPM modes |
-| Nginx Proxy Manager (live) | live proxy hosts match `scripts/npm-hosts.conf` — subdomain, forward host/port and websocket support (`npm-proxy-hosts.py --check`); skipped when the NPM container isn't running and `NPM_MODE!=remote` / no `NPM_ADMIN_*` credentials |
+| Nginx Proxy Manager (live) | live proxy hosts match `scripts/npm-hosts.conf` — subdomain, forward host/port, websocket support and the SSO gate — and no host in `MONARCH_DOMAIN` is live that the conf no longer lists (`npm-proxy-hosts.py --check`; remove a retired host with `--prune`); skipped when the NPM container isn't running and `NPM_MODE!=remote` / no `NPM_ADMIN_*` credentials |
 | Infra (host) | `/data` + `/docker/appdata` disk usage below 90%, probed containers not crash-looping (restart count), no stale images (recreate needed) |
 
 > **Jellyfin on the pinned build.** It reads the MediaBrowser header from

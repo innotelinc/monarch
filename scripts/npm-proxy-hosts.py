@@ -30,19 +30,33 @@ Configuration comes from environment variables or the repo's .env file:
                         this host's public IP/hostname when NPM_MODE=remote
   NPM_CERT_ID           optional: reuse an existing certificate id instead of
                         requesting a new wildcard cert
+  TECHNITIUM_URL        Cerulean's Technitium DNS API base, used to create the A
+                        record for a NEW subdomain (+ TECHNITIUM_TOKEN, or
+                        TECHNITIUM_USER / TECHNITIUM_PASSWORD to log in)
 
 Flags:  --dry-run    print the plan without touching NPM
         --skip-ssl   skip certificate creation (hosts without a cert)
         --hosts-only manage proxy hosts only (no certificate work)
+        --check      read-only: fail when a live proxy host differs from
+                     npm-hosts.conf, including a host in THIS domain that the
+                     conf no longer lists (retired)
+        --prune      delete the proxy hosts in this domain that npm-hosts.conf
+                     no longer lists. Destructive, and scoped to MONARCH_DOMAIN:
+                     a host is only a candidate when every domain name it serves
+                     is inside this domain, so the other products sharing the
+                     NPM are never touched.
 
 The script is idempotent: existing proxy hosts are updated in place, and
 certificate issuance is only triggered when no matching wildcard cert exists.
 
-DNS: when NPM_FORWARD_HOST is an IP and the DNS_TSIG_* variables are set
-(BIND + RFC 2136), the script writes the subdomain A records itself via
-nsupdate. The wildcard certificate uses the NPM_DNS_PROVIDER=rfc2136 DNS
-challenge (TXT records signed with the same TSIG key), so no manual DNS
-edits are needed.
+DNS: when NPM_FORWARD_HOST is an IP, the script points the subdomain at it in
+Cerulean's DNS plane (Technitium HTTP API - TECHNITIUM_URL plus
+TECHNITIUM_TOKEN, or TECHNITIUM_USER / TECHNITIUM_PASSWORD). A name that
+already resolves is left alone: Monarch's hosts are CNAMEs to the apex and
+Technitium refuses an A record where a CNAME exists, so this only ever adds
+the record for a newly listed subdomain. The legacy BIND/TSIG path
+(DNS_TSIG_*) is still read as a fallback and warns that Cerulean has moved to
+Technitium.
 """
 
 import argparse
@@ -187,6 +201,14 @@ def resolve_forward_auth(domain):
 def subdomain_of(domain_name, domain):
     """'radarr.monarch.innotel.us' + 'monarch.innotel.us' -> 'radarr'."""
     return domain_name[: -len(domain) - 1] if domain_name.endswith("." + domain) else "@"
+
+
+def our_domain(domain_name, domain):
+    """True when <domain_name> is <domain> itself or a subdomain of it.
+
+    This is what keeps --prune inside Monarch's own namespace on a shared NPM.
+    """
+    return domain_name == domain or domain_name.endswith("." + domain)
 
 
 def host_advanced_config(host, domain, fa_enabled, fa_outpost, fa_signin,
@@ -491,6 +513,11 @@ class NpmClient:
                 return host
         return None
 
+    def delete_proxy_host(self, token, host_id):
+        """Delete a proxy host: (status, body); 200/204 means it is gone."""
+        return self._request("DELETE", f"/api/nginx/proxy-hosts/{host_id}",
+                             token=token)
+
     def upsert_proxy_host(self, token, host_id, domain, forward_host, forward_port,
                           certificate_id, websockets, dry_run=False,
                           host_fields=None, advanced_config="client_max_body_size 0;"):
@@ -734,6 +761,9 @@ def main():
     parser.add_argument("--check", action="store_true",
                         help="verify live NPM proxy hosts match npm-hosts.conf "
                              "(read-only; exit 1 on any drift)")
+    parser.add_argument("--prune", action="store_true",
+                        help="delete the proxy hosts in this domain that "
+                             "npm-hosts.conf no longer lists")
     args = parser.parse_args()
 
     load_env(os.path.join(REPO_ROOT, ".env"))
@@ -790,20 +820,23 @@ def main():
         print("ERROR: NPM_ADMIN_EMAIL / NPM_ADMIN_PASSWORD are not set (see .env.sample).")
         sys.exit(2 if not args.dry_run else 0)
 
+    # --check and --prune read the live NPM even alongside --dry-run, so they
+    # need a token; a plain --dry-run stays credential-free.
+    live = not args.dry_run or args.check or args.prune
     client = NpmClient(npm_url)
-    token = None if args.dry_run else client.login(npm_email, npm_pass, quiet=True)
-    if not token and not args.dry_run:
+    token = client.login(npm_email, npm_pass, quiet=True) if live else None
+    if not token and live:
         print("  NPM did not accept the configured admin login - checking whether "
               "this is a first-run instance that needs its admin created...")
         client.bootstrap_first_admin(npm_email, npm_pass)
         token = client.login(npm_email, npm_pass)
-    if not token and not args.dry_run:
+    if not token and live:
         sys.exit(1)
 
     # Newer NPM versions tightened the API schema (renamed fields, strict
     # additionalProperties) - fetch the OpenAPI schema to adapt. Legacy NPM
     # versions don't expose it and the old field names are used as fallback.
-    schema = client.get_schema(token) if not args.dry_run else None
+    schema = client.get_schema(token) if live else None
     host_fields = client.proxy_host_field_names(schema)
     if schema:
         print("  NPM API schema detected - adapting field names "
@@ -811,7 +844,8 @@ def main():
               f"caching={host_fields['caching']}).")
 
     # ---- wildcard certificate -----------------------------------------
-    if not args.check and not args.skip_ssl and not args.hosts_only:
+    if not args.check and not args.skip_ssl and not args.hosts_only \
+            and not args.prune:
         if args.dry_run:
             print(f"  [dry-run] would request wildcard cert for *.{domain} "
                   f"via {env('NPM_DNS_PROVIDER', 'cloudflare')}")
@@ -851,10 +885,44 @@ def main():
                     cert_id = str(new_id)
 
     # ---- proxy hosts ---------------------------------------------------
-    if not args.dry_run:
-        existing_hosts = client.get_proxy_hosts(token)
-    else:
-        existing_hosts = []
+    existing_hosts = client.get_proxy_hosts(token) if live else []
+
+    # --prune: delete the proxy hosts in THIS domain that npm-hosts.conf no
+    # longer lists. Deleting a line from the conf is deliberately not enough on
+    # its own - a typo in the conf must never remove a live host - so it takes
+    # this explicit flag. Scoped by domain: a host is a candidate only when
+    # every name it serves is inside MONARCH_DOMAIN.
+    if args.prune:
+        desired = {h["domain"] for h in hosts}
+        retired = []
+        for host in existing_hosts:
+            names = host.get("domain_names") or []
+            if names and all(our_domain(n, domain) for n in names) \
+                    and not any(n in desired for n in names):
+                retired.append((host, names[0]))
+        if not retired:
+            print("  Nothing to prune: every proxy host in this domain is in "
+                  "npm-hosts.conf.")
+            sys.exit(0)
+        for host, name in retired:
+            if args.dry_run:
+                print(f"  [dry-run] would delete {name} (id {host.get('id')} -> "
+                      f"{host.get('forward_host')}:{host.get('forward_port')})")
+                continue
+            status, body = client.delete_proxy_host(token, host.get("id"))
+            if status in (200, 204):
+                print(f"  deleted {name} (id {host.get('id')}) - it was in this "
+                      "domain but not in npm-hosts.conf")
+            else:
+                print(f"  ERROR: deleting {name} -> HTTP {status}: {body}")
+                sys.exit(1)
+        if args.dry_run:
+            print(f"  [dry-run] {len(retired)} retired proxy host(s) would be "
+                  "deleted")
+        else:
+            print(f"  pruned {len(retired)} retired proxy host(s) - "
+                  "npm-hosts.conf is authoritative for this domain again")
+        sys.exit(0)
 
     # --check: diff the live hosts against npm-hosts.conf and report drift.
     # The forward host resolves exactly like the upsert loop below, so the
@@ -899,18 +967,33 @@ def main():
                 print(f"  ok: {domain_name} -> {got_fwd}:{got_port} "
                       f"(ws={bool(got_ws)})")
                 matched += 1
-        extra = sorted(
-            (h.get("domain_names") or [""])[0] for h in existing_hosts
-            if not any(d in desired for d in (h.get("domain_names") or [])))
+        # A host in this domain that the conf no longer lists is drift, not a
+        # footnote: that is how the retired subscribe host stayed live for
+        # weeks. Hosts outside this domain belong to other products sharing the
+        # NPM and are reported as a note only.
+        ours, foreign = [], []
+        for host in existing_hosts:
+            names = host.get("domain_names") or [""]
+            if any(d in desired for d in names):
+                continue
+            name = names[0]
+            (ours if all(our_domain(n, domain) for n in names)
+             else foreign).append(name)
+        for name in sorted(ours):
+            print(f"  DRIFT: {name} -> live in NPM but not in npm-hosts.conf "
+                  "(retired; remove it with: npm-proxy-hosts.py --prune)")
+            drifted += 1
         print("")
         if drifted:
             print(f"  CHECK FAILED: {drifted} proxy host(s) drifted from "
                   f"npm-hosts.conf ({matched} match)")
             sys.exit(1)
         print(f"  CHECK OK: all {matched} proxy hosts match npm-hosts.conf")
-        if extra:
-            print(f"  (note: {len(extra)} extra host(s) in NPM not in "
-                  f"npm-hosts.conf: {', '.join(extra)})")
+        if foreign:
+            shown = ", ".join(sorted(foreign)[:3])
+            more = f" (+{len(foreign) - 3} more)" if len(foreign) > 3 else ""
+            print(f"  (note: {len(foreign)} host(s) in NPM outside this domain "
+                  f"are not managed here: {shown}{more})")
         sys.exit(0)
 
     for host in hosts:

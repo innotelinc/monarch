@@ -149,6 +149,7 @@ arm64 host, install via the normal `./setup.sh` path instead.
 |---|---|
 | [docs/operations.md](docs/operations.md) | Shared credentials, first-boot wiring, services & ports, subdomains/NPM, Authentik & LDAP, AI recommendations, health analytics, drift check, live TV, troubleshooting |
 | [docs/deployment.md](docs/deployment.md) | Installer & live USB, fresh-install check, offline bundle, building a release, manual setup |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release — hand-written from v1.22 on, summarised from the release tags before that |
 
 ## 📦 Releases & offline install
 
