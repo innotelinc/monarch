@@ -1699,6 +1699,17 @@ def _jellyseerr_login(opener):
 
 def _jellyseerr_enable_jellyfin_login(opener):
     """Settings -> Users: let subscribers sign in with their Jellyfin accounts."""
+    # /api/v1/settings/public needs no auth. When Seerr is already initialized
+    # AND Jellyfin sign-in is on, there is nothing to do - skip the credential
+    # POST entirely. monarch-init runs from the drift-check timer's --heal, so
+    # this path fires on a schedule; logging in with the admin password every
+    # cycle wrote failed-sign-in noise into Seerr's log (and once a password
+    # rotation lands, regular 401s) for zero effect.
+    status, _, public = _http(JELLYSEERR_BASE, "/api/v1/settings/public")
+    if (status == 200 and isinstance(public, dict)
+            and public.get("initialized") and public.get("mediaServerLogin")):
+        _log("Jellyseerr: already initialized with Jellyfin sign-in enabled.")
+        return True
     if not _jellyseerr_login(opener):
         _issues.append("jellyseerr: admin login failed - Jellyfin sign-in was not "
                        "enabled (set it under Settings -> Users).")

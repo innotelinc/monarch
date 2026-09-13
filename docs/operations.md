@@ -173,7 +173,7 @@ copy or reuse its live Stripe credentials in a new deployment.
 | `tube.innotel.us` | `.46:8098` | Migrated Clipbucket; verified over public HTTPS. Rollback source remains on `.72:8088` |
 | `index.innotel.us`, `req.innotel.us`, `tv.innotel.us`, `brr.innotel.us`, `accounts.innotel.us`, `portainer.innotel.us` | `.72` services | Active legacy routes; verify each during its service migration |
 | `api.monarch.innotel.us` | retired | Billing-api decommissioned — Magnate handles all billing |
-| `subscribe.monarch.innotel.us` | retired | Billing migrated to Magnate (subscribe.innotel.us) |
+| `subscribe.monarch.innotel.us` | repurposed | Now the shared subscribe portal (public page on :3040); billing still via Magnate |
 
 The migration rule is: copy/configure first, verify the replacement and its
 public DNS/TLS/dependencies, then switch the route, and only later remove the
@@ -230,6 +230,17 @@ published `3011`). Rows naming a service outside `docker-compose.yml`
 (`authentik-server` is the shared Cerulean stack) are reported as unverified,
 not as failures.
 
+**One row may name its own upstream.** `admin` does: `admin ${NPM_HOST_IP} 81`
+forwards to the NPM admin UI *on the NPM host*, because the admin UI does not
+run on this Docker host. A dotted hostname or an IP in the forward column wins
+over `NPM_FORWARD_HOST` (compose service names never contain a dot, so the two
+forms cannot be confused). This is not cosmetic: with the old
+`nginx-proxy-manager 2081` row the request path was *SSO gate answers, then the
+upstream fails*, because this stack's own optional `npm` profile is not running
+and nothing listens on :2081 — `https://admin.monarch.innotel.us` was dead while
+every other host worked. `NPM_HOST_IP` must be set in `.env`; the row resolves
+to `192.168.1.71:81` here, the same upstream `admin.zeus.innotel.us` uses.
+
 | Subdomain | Service | Port | WebSockets |
 |-----------|---------|------|------------|
 | `monarch.innotel.us` (apex, `@`) | Homarr dashboard — main login | 7575 | yes |
@@ -237,13 +248,15 @@ not as failures.
 | `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
 | `media.magnate.innotel.us` | Jellyfin via Magnate edge | 8097 → container 8096 | yes |
 | `tv.monarch.innotel.us` | IPTV/EPG guide | 3011 → container 3000 | - |
-| `admin.monarch.innotel.us` | Nginx Proxy Manager admin (SSO-gated) | 2081 | - |
+| `admin.monarch.innotel.us` | Nginx Proxy Manager admin (SSO-gated) | `NPM_HOST_IP`:81 | - |
 | `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
+| `subscribe.monarch.innotel.us` | shared subscribe portal (public landing page) | 3040 | - |
 
-(Billing hosts `subscribe.monarch.innotel.us` and `api.monarch.innotel.us`
-were removed — **Magnate** at `subscribe.innotel.us` is the source billing
-platform for all projects. The leftover `subscribe.monarch.innotel.us` proxy
-host was then pruned from the edge; it forwarded to a port nothing listens on.)
+(`api.monarch.innotel.us` was removed - **Magnate** at `subscribe.innotel.us`
+is the source billing platform for all projects. `subscribe.monarch.innotel.us`
+was later repointed at the shared subscribe portal - a public marketing page
+served by nginx on :3040, one page per service picked by Host header - and is a
+managed row in `npm-hosts.conf`, not a leftover.)
 
 The mapping lives in `scripts/npm-hosts.conf` — add/remove lines freely; the
 script reconciles the proxy hosts on every run (idempotent). For a local NPM
@@ -533,6 +546,29 @@ empty password. `--set` handles both, then sets `MONARCH_PASSWORD` through
 `POST /Users/{id}/Password`, which is why the account ends up matching `.env`
 instead of drifting again. Subscribers never use this account: they sign in
 through the Authentik LDAP outpost.
+
+#### Homarr's encryption key (and the Jellyfin key it holds)
+
+Homarr encrypts every integration secret it stores — the Jellyfin API key
+included — with `SECRET_ENCRYPTION_KEY` from `.env` (see the rotation table
+below for the exact scheme). The key and `/docker/appdata/homarr/appdata/db`
+are **one artifact**: the ciphertext only means anything to the key that made
+it. Two consequences worth stating plainly, because neither failure looks like
+a key problem from the outside:
+
+- **Back them up and restore them together.** A restored Homarr DB without its
+  key is a dashboard that boots and answers, with integrations that silently
+  fail.
+- **Never rotate it on a host whose DB already exists.** Changing the key
+  orphans every stored secret at once; the container stays healthy and the
+  tiles just stop working. If `.env` and the running container ever disagree,
+  put `.env` back to the **container's** value — that is the one the ciphertext
+  was made with — do not generate a new one.
+
+`monarch-drift-check` asserts `.env` and the running container carry the same
+key, and `jellyfin-admin-password.py --check-apps` then proves the *decrypted*
+key still authenticates against Jellyfin. Together those two cover both halves:
+the key Homarr is handed, and the secret it can actually read with it.
 
 #### Rotating a Jellyfin API key
 

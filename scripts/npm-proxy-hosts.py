@@ -263,6 +263,27 @@ def expand_env_refs(value):
         i = end + 1
 
 
+def resolve_forward(host, forward_mode):
+    """The upstream a row forwards to.
+
+    Most rows name a compose service and follow the global NPM_FORWARD_HOST mode
+    ("container" for a local NPM, or this host's IP for a REMOTE one). A row may
+    instead name its own upstream - an IP or a dotted hostname - which then
+    always wins. Container names never contain a dot, so the two forms cannot be
+    confused: `admin ${NPM_HOST_IP} 81 fa` reaches the NPM admin UI on the NPM
+    box itself, while every other row still follows the global mode.
+
+    This is why admin.<domain> needs an override at all: the admin UI does not
+    run on this Docker host (the compose "npm" profile is optional and is not
+    running here), it runs on the shared NPM host, so forwarding to this host's
+    published :2081 reaches nothing.
+    """
+    fwd = expand_env_refs(host["forward"])
+    if is_ip_address(fwd) or "." in fwd:
+        return fwd
+    return fwd if forward_mode == "container" else forward_mode
+
+
 def load_hosts(domain):
     """Subdomain map from npm-hosts.conf (or built-in defaults).
 
@@ -932,8 +953,7 @@ def main():
         desired = {h["domain"] for h in hosts}
         for host in hosts:
             domain_name = host["domain"]
-            forward_host = host["forward"] if forward_mode == "container" \
-                else forward_mode
+            forward_host = resolve_forward(host, forward_mode)
             existing = client.find_host(existing_hosts, domain_name)
             if existing is None:
                 print(f"  DRIFT: {domain_name} -> missing in NPM "
@@ -998,12 +1018,7 @@ def main():
 
     for host in hosts:
         domain_name = host["domain"]
-        if forward_mode == "container":
-            forward_host = host["forward"]
-        else:
-            # "host.docker.internal", or an IP/hostname for a REMOTE NPM
-            # (NPM_MODE=remote): the remote server forwards to this host.
-            forward_host = forward_mode
+        forward_host = resolve_forward(host, forward_mode)
         existing = client.find_host(existing_hosts, domain_name)
         host_id = str(existing.get("id")) if existing else None
         client.upsert_proxy_host(

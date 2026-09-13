@@ -431,7 +431,20 @@ services:
   # Serves the Cerulean LDAP directory (provider 'jellyfin-ldap') so the
   # Jellyfin LDAP-Auth plugin resolves logins against Authentik users;
   # disabling a user in Cerulean blocks their Jellyfin login.
-  ###############################################
+  # The image tag MUST track the Authentik server version (2026.8.2) -
+  # bump both together. AUTHENTIK_TOKEN is the outpost API token monarch-init
+  # pins in Authentik (AUTHENTIK_LDAP_TOKEN); the bind user the plugin binds
+  # with is provisioned by monarch-init too (password = AUTHENTIK_LDAP_BIND_TOKEN).
+  authentik-ldap:
+    <<: *common-keys
+    container_name: authentik-ldap
+    image: ghcr.io/goauthentik/ldap:2026.8.2
+    environment:
+      AUTHENTIK_HOST: ${AUTHENTIK_BASE_URL}
+      AUTHENTIK_INSECURE: "true"          # AUTHENTIK_BASE_URL is plain http on the LAN
+      AUTHENTIK_TOKEN: ${AUTHENTIK_LDAP_TOKEN:-ak-ldap-outpost-2026}
+    depends_on:
+      - jellyfin
 
   ###############################################
   # MONARCH-RECS - AI recommendations + smart search

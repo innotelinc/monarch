@@ -31,18 +31,42 @@ DB_PATH = sys.argv[1] if len(sys.argv) > 1 else "/docker/appdata/homarr/appdata/
 ICON = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{name}.png"
 
 # name -> (href, icon, tooltip). href doubles as the ping URL (status check).
+#
+# Every href here is a hostname that exists in Nginx Proxy Manager. A tile that
+# points at a name with no DNS record (the old `*.monarch.local` set) is a dead
+# tile no matter how healthy the container is, so real hosts only.
 APPS = [
-    # -- The portal landing page: Magnate owns plans, checkout and the
-    #    subscriber's account, so "Subscribe" is the entry point every other
-    #    surface links to (see docs/operations.md -> Subscription platform).
+    # -- Subscription entry points. Magnate owns plans, checkout and the
+    #    subscriber's account; each service has its own subscribe page and the
+    #    ecosystem-wide one is the landing page (see docs/operations.md ->
+    #    Subscription platform).
     ("Subscribe", "https://subscribe.innotel.us", "stripe", "Subscribe - the portal landing page: pick a plan, pay via Stripe, manage your account (Magnate)"),
-    # -- Media stack already in the DB; this entry only fixes the stale URL --
-    ("Jellyfin", "https://media.monarch.innotel.us", "jellyfin", "Jellyfin - stream movies & TV"),
+    ("Subscribe (Zeus)", "https://subscribe.zeus.innotel.us", "asterisk", "Zeus subscription page - phone plan + Capstone voice agents add-on"),
+    # -- Media stack. Jellyfin/Jellyseerr are published as media.innotel.us and
+    #    req.innotel.us; the `*.monarch.innotel.us` names below are the arr
+    #    apps' real hosts (the DB used to carry `*.monarch.local`, which has no
+    #    DNS record at all).
+    ("Jellyfin", "https://media.innotel.us", "jellyfin", "Jellyfin - stream movies & TV"),
+    ("Jellyseerr", "https://req.innotel.us", "jellyseerr", "Jellyseerr - request movies & TV"),
+    ("IPTV (EPG)", "https://tv.monarch.innotel.us", "tvheadend", "IPTV - live TV guide (XMLTV EPG)"),
+    ("Radarr", "https://radarr.monarch.innotel.us", "radarr", "Radarr - movie collection manager"),
+    ("Sonarr", "https://sonarr.monarch.innotel.us", "sonarr", "Sonarr - TV collection manager"),
+    ("Bazarr", "https://bazarr.monarch.innotel.us", "bazarr", "Bazarr - subtitle manager"),
+    ("Lidarr", "https://lidarr.monarch.innotel.us", "lidarr", "Lidarr - music collection manager"),
+    ("Prowlarr", "https://prowlarr.monarch.innotel.us", "prowlarr", "Prowlarr - indexer manager"),
+    ("qBittorrent", "https://qbittorrent.monarch.innotel.us", "qbittorrent", "qBittorrent - torrent client"),
+    ("SABnzbd", "https://sabnzbd.monarch.innotel.us", "sabnzbd", "SABnzbd - usenet client"),
+    ("Whisparr", "https://whisparr.monarch.innotel.us", "whisparr", "Whisparr - adult collection manager"),
     # -- Platform / stack services (added below the existing tiles) --
+    ("Monarch", "https://monarch.innotel.us", "jellyfin", "Monarch - this dashboard (apex origin)"),
     ("Capstone", "https://dashboard.capstone.innotel.us", "openai", "Capstone - voice AI agent platform dashboard"),
     ("Zeus PBX", "https://pbx.zeus.innotel.us", "asterisk", "Zeus - PBX / VoIP (Asterisk + coturn)"),
     ("AvantFAX", "https://fax.zeus.innotel.us", "files", "AvantFAX - fax service"),
     ("Magnate", "https://app.magnate.innotel.us", "stripe", "Magnate - billing platform & admin portal"),
+    ("Cerulean SSO", "https://auth.cerulean.innotel.us", "authentik", "Cerulean - identity provider (Authentik SSO)"),
+    ("Nginx Proxy", "https://admin.monarch.innotel.us", "nginx-proxy-manager", "Nginx Proxy Manager - edge admin UI"),
+    ("Olympus", "https://olympus.innotel.us", "openai", "Olympus - AI platform"),
+    ("Olympus Studio", "https://studio.olympus.innotel.us", "code", "Olympus Studio - app builder"),
     ("AthenIQ Learn", "https://learn.innotel.us", "moodle", "AthenIQ - LMS / learning platform"),
     ("AthenIQ Studio", "https://studio.innotel.us", "code", "AthenIQ Studio - course authoring"),
     ("Signara", "https://app.signara.innotel.us", "vault", "Signara - trust / certificate signing portal"),
@@ -50,7 +74,52 @@ APPS = [
     ("Rizzaura", "https://rizzaura.innotel.us", "mastodon", "Rizzaura - social platform"),
     ("Atlas", "https://atlas.innotel.us", "gitea", "Atlas - DevOps / coding platform"),
     ("Oasis", "https://oasis.innotel.us", "mailcow", "Oasis - mail platform"),
+    ("ZapIt", "https://zapit.innotel.us", "linkwarden", "ZapIt - short links"),
+    # -- LAN-only services: no NPM host exists, so the tile points at the
+    #    container's published port on this host instead of a name that does
+    #    not resolve.
+    ("Requestrr", "http://192.168.1.46:4545", "discord", "Requestrr - Discord request bot (LAN)"),
 ]
+
+# Tiles to REMOVE from the board (the app row is kept, so re-adding a tile is a
+# one-line change here). These are the services that are gone or unreachable:
+# their compose entries are `profiles: ["legacy"]` (retired on purpose) or they
+# publish no address at all, so a tile can only ever 404.
+RETIRED = [
+    "Autobrr",
+    "ClipBucket",
+    "Deluge",
+    "Dispatcharr",
+    "NextPVR",
+    "TVHeadend",
+    "Monarch Recs",
+]
+
+# Any app still pointing at one of these names is stale by construction.
+STALE_SUFFIXES = (".monarch.local",)
+STALE_HOSTS = {
+    "media.monarch.innotel.us": "media.innotel.us",
+    "req.monarch.innotel.us": "req.innotel.us",
+    "recs.monarch.innotel.us": "monarch.innotel.us",
+}
+
+
+def repair_stale_url(href: str) -> tuple[str, bool]:
+    """Rewrite a board href that points at a name with no DNS record.
+
+    The board predates the platform-wide `<service>.<domain>` hostnames and
+    carries `*.monarch.local` links (no DNS at all) and a couple of one-off
+    names that were never created in NPM. Returns (href, changed).
+    """
+    if not href:
+        return href, False
+    for old, new in STALE_HOSTS.items():
+        if old in href:
+            return href.replace(old, new), True
+    for suffix in STALE_SUFFIXES:
+        if suffix in href:
+            return href.replace(suffix, ".monarch.innotel.us"), True
+    return href, False
 
 
 def nanoid(n=25):
@@ -105,6 +174,19 @@ def main():
                 pass
         app_of_item = {aid: iid for iid, aid in item_app.items()}
 
+        # 0. Repair stale hrefs on apps we do not otherwise manage. The board
+        #    used to carry `*.monarch.local` names, which have no DNS record, so
+        #    every one of those tiles was dead. Rewrite them to the real
+        #    hostname instead of leaving a link that cannot resolve.
+        specs = {name: (href, tooltip) for name, href, _icon, tooltip in APPS}
+        for name, row in existing_apps.items():
+            if name in specs or name in RETIRED:
+                continue
+            new_href, changed = repair_stale_url(row["href"] or "")
+            if changed:
+                db.execute("UPDATE app SET href=?, ping_url=? WHERE id=?", (new_href, new_href, row["id"]))
+                print(f"  repaired stale URL: {name} -> {new_href}")
+
         placed = 0
         for name, href, icon_name, tooltip in APPS:
             icon = ICON.format(name=icon_name)
@@ -156,6 +238,23 @@ def main():
             else:
                 print(f"  already placed: {name}")
 
+        # 3.5 Retire tiles for services that no longer publish an address. The
+        #     app row stays (so nothing is lost and re-adding is one line), but
+        #     the board stops offering a link that can only 404.
+        retired = 0
+        for name in RETIRED:
+            row = existing_apps.get(name)
+            if not row:
+                continue
+            app_id = row["id"]
+            item_id = app_of_item.get(app_id)
+            if item_id is None:
+                continue
+            db.execute("DELETE FROM item_layout WHERE item_id=?", (item_id,))
+            db.execute("DELETE FROM item WHERE id=?", (item_id,))
+            retired += 1
+            print(f"  removed retired tile: {name}")
+
         # 4. Make this board the home board (apex shows the dashboard)
         db.execute(
             "UPDATE serverSetting SET value=? WHERE setting_key='board'",
@@ -168,7 +267,7 @@ def main():
         )
         db.commit()
         print(f"\nDone: board '{board['name']}' is the home board with the full stack tile set "
-              f"({len(APPS)} apps ensured, {placed} newly placed).")
+              f"({len(APPS)} apps ensured, {placed} newly placed, {retired} retired).")
     finally:
         db.close()
 

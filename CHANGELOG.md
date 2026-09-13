@@ -84,6 +84,32 @@ are written by hand and describe the behaviour change, not the commits.
 - `verify` step for the Jellyfin admin credential: a password change revokes
   every session token, so the exported token went stale silently and the checks
   that read it failed. The credential is now a durable API key.
+- **The LDAP outpost was documented but never deployed.** `docker-compose.yml`
+  carried the service comment, init provisioned provider/outpost/token into
+  Authentik, and the Jellyfin plugin pointed at `authentik-ldap:3389` - but no
+  container ever served it, so no LDAP login could ever succeed. The
+  `authentik-ldap` service now exists (image version-matched to the Authentik
+  server), and `monarch-init`'s LDAP chain completes end-to-end.
+- **`monarch-init` no longer posts the admin password to Jellyseerr on every
+  run.** The drift-check timer (`--heal`, every 6h) re-runs init, which logged
+  into Seerr with `admin`/`MONARCH_PASSWORD` each cycle - write-only noise that
+  turned into permanent 401s after any password rotation. Init now checks the
+  public settings first and only logs in when initialization is actually
+  needed.
+- **Seerr's Jellyfin Sync 404'd every 5 minutes** on Jellyfin 12: `/Items/Latest`
+  now requires `userId`, and Seerr's owner row was still bound to the
+  pre-rotation admin user id (deleted with the ghost user). Rebound to the live
+  admin; scans complete again. The stale ghost user row (duplicate `admin`,
+  same dead id) was removed.
+- **Whisparr answered 400 to every caller that was not `localhost`.** Its
+  `AllowedHosts` allowlist named only the edge domain and `.46`, so in-network
+  automation (monarch-init, Homarr) was locked out while drift-check blamed
+  "unreachable". The allowlist now names every stack container that talks to
+  it.
+- `subscribe.monarch.innotel.us` is back in `npm-hosts.conf` - as the **shared
+  subscribe portal** (public page on :3040, one page per service by Host
+  header), so the 6-hourly drift heal no longer sees it as drift and re-runs
+  init for nothing.
 
 ### Ops notes
 

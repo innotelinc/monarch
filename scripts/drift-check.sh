@@ -457,6 +457,31 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
+# Homarr's integration-secret encryption key
+# ───────────────────────────────────────────────────────────────────────────
+# Homarr encrypts every stored integration secret - including the Jellyfin API
+# key it uses - with SECRET_ENCRYPTION_KEY. That key and the Homarr database are
+# a single artifact: if .env and the running container disagree, Homarr cannot
+# decrypt its own integrations. The dashboard stays up and the tiles simply
+# stop working, which looks like a broken Jellyfin integration and not at all
+# like a key problem. Assert the two sides agree rather than assume it.
+#
+# Never "fix" a mismatch by rotating: the running container's value is the one
+# the stored ciphertext was made with. Put .env back to it (and restore them
+# together - docs/operations.md -> Homarr).
+homarr_key=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' homarr 2>/dev/null \
+  | sed -n 's/^SECRET_ENCRYPTION_KEY=//p' | head -1)
+if [ -z "$homarr_key" ]; then
+  say "ok: Homarr encryption key (skipped - homarr not running)"
+elif [ -z "${SECRET_ENCRYPTION_KEY:-}" ]; then
+  fail "homarr: .env carries no SECRET_ENCRYPTION_KEY while the running container has one - its stored integration secrets cannot be read back"
+elif [ "$SECRET_ENCRYPTION_KEY" = "$homarr_key" ]; then
+  say "ok: .env and the running Homarr share one SECRET_ENCRYPTION_KEY"
+else
+  fail "homarr: SECRET_ENCRYPTION_KEY in .env does not match the running container - Homarr cannot decrypt its stored integration secrets (the Jellyfin API key among them). Restore the container's value; do NOT rotate"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # Infisical (SecretOps): is .env still derived from the store?
 # ───────────────────────────────────────────────────────────────────────────
 # Read-only. Infisical is the source of truth for secrets; if it is provisioned
