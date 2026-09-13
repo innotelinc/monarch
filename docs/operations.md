@@ -551,7 +551,9 @@ leaves the app locked out for however long the rest takes.
 `monarch-admin` is the key Monarch's own services use (AI recommendations, health
 analytics, entitlements). The other two belong to the apps themselves and only
 need rotating if their value is exposed. There is no endpoint that "tests" a key:
-call any admin endpoint with it and expect 200.
+call any admin endpoint with it and expect 200 — which is what
+`scripts/jellyfin-admin-password.py --check-apps` does for both app copies, and
+`drift-check` runs it, so a rotation that stopped halfway cannot sit unnoticed.
 
 
 ## AI recommendations & smart search (monarch-recs)
@@ -621,6 +623,7 @@ against the services:
 | Prowlarr | qBittorrent download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
 | qBittorrent | WebUI login with the shared credentials, `movies`/`tv`/`music`/`xxx` categories |
 | Jellyfin | admin API access — the shared credentials when they still match, otherwise the durable admin API key (`/docker/appdata/init/jellyfin-api-key.txt`; when the local admin password has diverged the check says so and names the repair, `scripts/jellyfin-admin-password.py --set`) — plus media libraries (Movies / TV Shows / Music / Other) |
+| Jellyfin API keys held by the apps | Jellyseerr's copy in `settings.json` and Homarr's encrypted copy in its database still authenticate — the state a half-finished rotation leaves behind, which nothing else catches since the container and its own UI stay up (`jellyfin-admin-password.py --check-apps`) |
 | Jellyseerr | initialized, Jellyfin sign-in enabled |
 | Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |

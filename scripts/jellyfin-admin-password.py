@@ -46,13 +46,19 @@ JELLYFIN_API_KEY in .env (ai-recs, health-analytics, magnate-entitlements).
 
 Modes:
 
-  --check   (default) verify the whole credential chain, change nothing.
-  --set     align the password when it has drifted, then refresh the API key.
-  --force   with --set, use the forgot-password flow even when the login works.
+  --check       (default) verify the whole credential chain, change nothing.
+  --set         align the password when it has drifted, then refresh the API key.
+  --force       with --set, use the forgot-password flow even when the login works.
+  --check-apps  verify the keys the APPS hold (Jellyseerr's plaintext copy and
+                Homarr's encrypted one) still authenticate. A half-finished
+                rotation leaves an app configured with a token Jellyfin has
+                forgotten, which nothing else notices: the container is up and
+                its own UI answers. Read-only; drift-check runs this.
 
 Usage:
 
   python3 scripts/jellyfin-admin-password.py --check
+  python3 scripts/jellyfin-admin-password.py --check-apps
   python3 scripts/jellyfin-admin-password.py --set
 
 Exit: 0 = aligned/verified · 1 = drift or failure · 2 = not configured
@@ -62,6 +68,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -76,6 +83,10 @@ ENV_FILE = REPO_ROOT / ".env"
 
 DEFAULT_JELLYFIN_URL = "http://localhost:8097"
 DEFAULT_KEY_NAME = "monarch-admin"
+# Where the apps keep their own copy of a Jellyfin key (--check-apps).
+DEFAULT_SEERR_SETTINGS = "/docker/appdata/jellyseerr/settings.json"
+DEFAULT_HOMARR_DB = "/docker/appdata/homarr/appdata/db/db.sqlite"
+DEFAULT_HOMARR_CONTAINER = "homarr"
 # Where monarch-init exports the admin token Monarch's services read.
 KEY_FILE = Path("/docker/appdata/init/jellyfin-api-key.txt")
 # How the Jellyfin config volume is reached on the host, for reading the PIN file
@@ -221,6 +232,94 @@ def read_pin(pin_file, container, log=print):
     return ""
 
 
+# Homarr encrypts integration secrets at rest; this is its scheme, and it is
+# reproduced rather than reimplemented from the docs: AES-256-CBC, key = the 64
+# hex chars of SECRET_ENCRYPTION_KEY, a 16-byte IV, stored hex(ct).hex(iv).
+# Verified against a stored value whose plaintext was known. Running it in the
+# container keeps the key in the environment that owns it.
+HOMARR_DECRYPT = (
+    'const c=require("crypto"),k=Buffer.from(process.env.SECRET_ENCRYPTION_KEY,"hex"),'
+    '[h,i]=process.env.CT.split("."),d=c.createDecipheriv("aes-256-cbc",k,Buffer.from(i,"hex"));'
+    'process.stdout.write(Buffer.concat([d.update(Buffer.from(h,"hex")),d.final()]).toString("utf8"))')
+
+
+def decrypt_homarr_secret(ciphertext, container):
+    """Homarr's plaintext for a stored secret, or "" when it cannot be read."""
+    if not container or not ciphertext:
+        return ""
+    proc = subprocess.run(
+        ["docker", "exec", "-e", f"CT={ciphertext}", container, "node", "-e",
+         HOMARR_DECRYPT], capture_output=True, text=True)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def check_app_keys(jf, log=print):
+    """Verify the Jellyfin keys the apps hold. Returns the number of failures.
+
+    A key that cannot be READ - the file is absent, or Homarr's secret cannot be
+    decrypted because its container is not reachable - is reported as unverified
+    rather than failed: what this exists to catch is a key Jellyfin REJECTS,
+    which is what a half-finished rotation leaves behind.
+    """
+    failures = 0
+
+    def validate(token, who):
+        nonlocal failures
+        status = jf.verify(token)
+        if status == 200:
+            log(f"  ok: {who} holds a Jellyfin API key that still authenticates")
+            return
+        failures += 1
+        log(f"  DRIFT: {who} holds a Jellyfin API key Jellyfin rejects "
+            f"(HTTP {status}), so it cannot read Jellyfin. Re-run the rotation "
+            "in docs/operations.md.")
+
+    # Jellyseerr keeps its copy in plaintext.
+    settings = Path(env("JELLYSEERR_SETTINGS_FILE", DEFAULT_SEERR_SETTINGS))
+    if not settings.is_file():
+        log(f"  note: {settings} not found - jellyseerr's key not checked")
+    else:
+        token = ""
+        try:
+            token = (json.loads(settings.read_text(encoding="utf-8"))
+                     .get("jellyfin", {}).get("apiKey") or "").strip()
+        except (OSError, ValueError) as exc:
+            log(f"  note: {settings} could not be parsed ({exc}) - jellyseerr's "
+                "key not checked")
+        if token:
+            validate(token, "jellyseerr")
+        elif settings.is_file():
+            failures += 1
+            log(f"  DRIFT: jellyseerr stores no Jellyfin API key "
+                f"(jellyfin.apiKey is empty in {settings})")
+
+    # Homarr keeps its copy encrypted, so it has to be decrypted first.
+    db = Path(env("HOMARR_DB_FILE", DEFAULT_HOMARR_DB))
+    if not db.is_file():
+        log(f"  note: {db} not found - homarr's key not checked")
+        return failures
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        row = con.execute(
+            'SELECT s.value FROM "integrationSecret" s '
+            'JOIN "integration" i ON i.id = s.integration_id '
+            "WHERE i.kind = 'jellyfin' AND s.kind = 'apiKey'").fetchone()
+        con.close()
+    except sqlite3.Error as exc:
+        log(f"  note: homarr's database could not be read ({exc}) - its key not checked")
+        return failures
+    if not row or not row[0]:
+        log("  note: homarr has no Jellyfin integration secret - not checked")
+        return failures
+    token = decrypt_homarr_secret(row[0], env("HOMARR_CONTAINER", DEFAULT_HOMARR_CONTAINER))
+    if not token:
+        log("  note: homarr's stored key could not be decrypted (its container or "
+            "crypto scheme is unavailable) - not checked")
+        return failures
+    validate(token, "homarr")
+    return failures
+
+
 def align_password(jf, user, password, container, log=print):
     """Run the forgot-password flow and set <password>. Returns True on success."""
     log("  Logging in with the shared credentials failed - using Jellyfin's "
@@ -269,6 +368,9 @@ def main():
                     "and refresh the durable admin API key")
     parser.add_argument("--check", action="store_true",
                         help="verify the credential chain only (default)")
+    parser.add_argument("--check-apps", action="store_true",
+                        help="verify the Jellyfin API keys held by Jellyseerr and "
+                             "Homarr (read-only)")
     parser.add_argument("--set", action="store_true",
                         help="align the password when it has drifted, and refresh "
                              "the admin API key")
@@ -286,11 +388,18 @@ def main():
     password = env("MONARCH_PASSWORD")
     key_name = env("JELLYFIN_API_KEY_NAME", DEFAULT_KEY_NAME)
 
+    jf = Jellyfin(base)
+
+    # The app-held keys need no credential of their own: they are validated by
+    # calling Jellyfin with them.
+    if args.check_apps:
+        print(f"Jellyfin API keys held by the apps ({base}):")
+        return 1 if check_app_keys(jf) else 0
+
     if not password:
         print("NOT CONFIGURED: MONARCH_PASSWORD is not set (see .env.sample).")
         return 2
 
-    jf = Jellyfin(base)
     print(f"Jellyfin admin credential: {user}@{base}")
 
     ok, token, _ = jf.login(user, password)

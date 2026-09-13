@@ -441,6 +441,22 @@ fi
 rm -f /tmp/drift-jf.$$
 
 # ───────────────────────────────────────────────────────────────────────────
+# Jellyfin API keys held by the apps
+# ───────────────────────────────────────────────────────────────────────────
+# Rotating a key means updating whoever holds it, and a half-finished rotation
+# (new key minted, the old one deleted, the app still configured with it) leaves
+# the app authenticating with a token Jellyfin has forgotten. Nothing else
+# notices: the container is up, its own UI answers, and only its requests to
+# Jellyfin fail. Read each app's copy and prove Jellyfin still accepts it.
+if app_keys_out=$(python3 scripts/jellyfin-admin-password.py --check-apps 2>&1); then
+  say "ok: the Jellyfin API keys held by the apps still authenticate"
+  [ "$QUIET" -eq 0 ] && printf '%s\n' "$app_keys_out" | indent
+else
+  fail "jellyfin: an app's stored API key no longer authenticates"
+  printf '%s\n' "$app_keys_out" | indent >&2
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # Infisical (SecretOps): is .env still derived from the store?
 # ───────────────────────────────────────────────────────────────────────────
 # Read-only. Infisical is the source of truth for secrets; if it is provisioned

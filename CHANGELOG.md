@@ -8,7 +8,7 @@ Monarch had no changelog before v1.22, so everything older is summarised from it
 release tag - `git log <tag>` still has the full detail. From v1.22 on, entries
 are written by hand and describe the behaviour change, not the commits.
 
-## [Unreleased] - 2026-09-13
+## [v1.22] - 2026-09-13
 
 ### Added
 
@@ -33,6 +33,11 @@ are written by hand and describe the behaviour change, not the commits.
 - **`scripts/check-proxy-ports.py`**: fails CI when a port in
   `npm-hosts.conf` does not match the compose publish (and vice versa), so a
   proxy host cannot point at a port nothing listens on.
+- **`jellyfin-admin-password.py --check-apps`**, run by `drift-check`: reads the
+  Jellyfin key that Jellyseerr and Homarr each hold and proves Jellyfin still
+  accepts it. A rotation that stopped halfway leaves an app authenticating with
+  a token Jellyfin has forgotten, and nothing else notices - the container is
+  up, its own UI answers, and only its requests to Jellyfin fail.
 - **`npm-proxy-hosts.py --prune`**: deletes the proxy hosts in this domain that
   `npm-hosts.conf` no longer lists. Scoped to `MONARCH_DOMAIN`, so the other
   products sharing the NPM are never touched.
