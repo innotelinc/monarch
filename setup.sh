@@ -113,6 +113,10 @@ echo ""
 echo "Setup finished. The stack is running; open the dashboard:"
 echo "  https://${MONARCH_DOMAIN:-monarch.innotel.us}   (main interface)"
 echo "  https://app.${MONARCH_DOMAIN:-monarch.innotel.us}"
+echo ""
+echo "Portal landing page / subscribing page (Magnate - plans, checkout, billing):"
+echo "  ${SUBSCRIBE_URL:-https://subscribe.innotel.us}"
+echo "Monarch takes no payments; every Subscribe link in the stack points there."
 
 # ── Infisical (SecretOps) — opt-in secret provisioning ──────────────
 # Secrets for the Innotel Platform Stack live in Infisical. Enable by

@@ -43,11 +43,19 @@ provides, and explicitly does not own.
 
 
 > **Current state:** ONYX media storage integration is on the roadmap; Monarch currently uses local /data volumes.
+>
+> **Alignment scorecard:** [docs/mission-alignment.md](mission-alignment.md) maps every mission
+> capability (streaming, live TV, profiles, recommendations, analytics, tiers) to what this
+> repo actually ships, what is delegated to Authentik/Infisical/ONYX/Magnate, and the gaps in
+> priority order — with the commands that verify each claim.
 
 ## Secrets (Infisical)
 
 Secrets for this platform live in **Infisical** (SecretOps): credentials are imported
-into an Infisical workspace and the stack's `.env` is derived from it. Enable it with:
+into an Infisical workspace and the stack's `.env` is **derived** from it — one
+direction only. `INFISICAL_*` is the bootstrap set that has to stay in `.env`
+(the address, workspace id, environment and service token that get you in);
+everything else is rendered from the store, never hand-edited:
 
 ```bash
 # generate the required keys and add them to .env
@@ -59,6 +67,16 @@ openssl rand -hex 16      # INFISICAL_DB_PASSWORD
 docker compose -f docker-compose.yml -f compose.infisical.yml --profile infisical up -d
 bash scripts/infisical-setup.sh
 ```
+
+```bash
+python3 scripts/infisical-setup.py --check    # is .env derived from the store?
+python3 scripts/infisical-setup.py --render   # pull every secret into .env
+```
+
+`--check` never writes and reports key names only (never values); it exits 1 on
+drift, `monarch-drift-check` runs it, and `--render` is the fix. This is what
+makes a rotated secret land on the host instead of living only in one of the
+two places.
 
 See [compose.infisical.yml](../compose.infisical.yml) and
 [scripts/infisical-setup.py](../scripts/infisical-setup.py) for details.

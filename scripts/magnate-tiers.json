@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Magnate owns the billing decision; Monarch owns how a tier plays. Magnate's",
+    "entitlement API returns a plan slug (basic/standard/premium/agents/magnate",
+    "as seeded in magnate-subscription-platform lib/db.ts) and whether the",
+    "subscriber is active. This file is the tier -> playback policy table that",
+    "scripts/magnate-entitlements.py applies to Jellyfin (and that",
+    "monarch-drift-check re-verifies).",
+    "",
+    "quality_kbps is a bitrate ceiling in kbit/s, 0 = no cap. profiles is",
+    "advisory: Jellyfin has no per-user profile limit, so it is what Magnate/",
+    "Authentik are asked to allow (Enterprise/Family multi-profile tiers) and is",
+    "reported rather than enforced."
+  ],
+  "default_plan": "basic",
+  "exempt_users": ["admin", "akadmin"],
+  "plans": {
+    "basic":    { "streams": 1, "quality_kbps": 4000, "profiles": 1, "downloads": false },
+    "standard": { "streams": 2, "quality_kbps": 8000, "profiles": 2, "downloads": true  },
+    "premium":  { "streams": 4, "quality_kbps": 0,    "profiles": 5, "downloads": true  },
+    "agents":   { "streams": 4, "quality_kbps": 0,    "profiles": 5, "downloads": true  },
+    "magnate":  { "streams": 0, "quality_kbps": 0,    "profiles": 0, "downloads": true  }
+  }
+}

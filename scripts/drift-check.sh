@@ -21,7 +21,8 @@ set -uo pipefail
 # Checks (all driven by the invariants manifest):
 #   *arr (sonarr/radarr/lidarr/whisparr):
 #     - API reachable
-#     - forms authentication configured (authMethod = forms)
+#     - authMethod = external: the Cerulean Authentik auth_request gate is the
+#       ONLY login, so the app must not also show its own Forms prompt
 #     - expected media root folder present
 #     - qBittorrent download client present
 #   Prowlarr:
@@ -31,17 +32,27 @@ set -uo pipefail
 #     - WebUI login works with the shared credentials
 #     - movies/tv/music/xxx categories exist
 #   Jellyfin:
-#     - admin login works with the shared credentials
+#     - admin API access works: the shared credentials when they still match,
+#       otherwise the exported admin token (init writes it; a diverged local
+#       admin password is reported as a note, not a failure)
 #     - media libraries exist
 #   Jellyseerr:
 #     - initialized, Jellyfin sign-in enabled
+#   Infisical (SecretOps, once provisioned):
+#     - .env is still derived from the store (infisical-setup.py --check)
+#   Magnate (RevenueOps, when MAGNATE_URL is set):
+#     - every managed user's Jellyfin policy matches its Magnate tier
+#       (scripts/magnate-entitlements.py --check, read-only)
 #   Bazarr:
 #     - API key readable, basic auth configured
 #   Authentik:
 #     - LDAP outpost provisioned (when AUTHENTIK_BASE_URL is set)
-#   Nginx Proxy Manager (only when the local NPM container runs):
-#     - live proxy hosts match scripts/npm-hosts.conf (npm-proxy-hosts.py
-#       --check: subdomain, forward host, port and websocket support)
+#   Nginx Proxy Manager:
+#     - scripts/check-proxy-ports.py: npm-hosts.conf forwards to ports
+#       docker-compose.yml publishes (static, no credentials needed)
+#     - when the local NPM container runs (or NPM_MODE=remote with
+#       credentials): live proxy hosts match scripts/npm-hosts.conf
+#       (npm-proxy-hosts.py --check: subdomain, forward host, port, websockets)
 #   Infra (host, only when the docker CLI works):
 #     - /data and /docker/appdata disk usage below DRIFT_DISK_MAX_PCT (90)
 #     - each probed container not crash-looping (RestartCount below
@@ -168,6 +179,7 @@ fi
 FAILS=0
 FAIL_LINES=()
 say()  { [ "$QUIET" -eq 0 ] && echo "$@"; }
+indent() { sed 's/^/  /'; }   # prefix each line of stdin with two spaces
 fail() { echo "DRIFT-FAIL: $*" >&2; FAIL_LINES+=("$*"); FAILS=$((FAILS + 1)); }
 
 # ── Telegram alerting (optional) ──────────────────────────────────────────
@@ -248,8 +260,13 @@ while IFS='|' read -r svc port api root media; do
     continue
   fi
   method=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('authenticationMethod',''))" 2>/dev/null)
-  if [ "$method" != "forms" ]; then
-    fail "$svc: forms auth not configured (authenticationMethod='$method')"
+  # `external` is the correct value, not `forms`: init/init.py
+  # set_monarch_app_auth() switches these apps to *arr's "a reverse proxy
+  # already authenticated this user" mode so the Cerulean Authentik gate on
+  # <svc>.MONARCH_DOMAIN is the only login. Forms auth here would be a
+  # SECOND prompt after SSO.
+  if [ "$method" != "external" ]; then
+    fail "$svc: the Cerulean SSO gate is not the only login (authenticationMethod='$method', expected 'external')"
   fi
 
   body=$(json_get "http://localhost:$port/api/$api/rootfolder" "${hdr[@]}")
@@ -364,43 +381,106 @@ except Exception:
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
-# Jellyfin (admin login + libraries)
+# Jellyfin (admin API access + libraries)
 # ───────────────────────────────────────────────────────────────────────────
 JF_PORT=$(manifest_val "['jellyfin']['port']")
+JELLYFIN_KEY_FILE=/docker/appdata/init/jellyfin-api-key.txt
+# This build (the pinned v12 image) reads the MediaBrowser header from
+# `Authorization`, NOT `X-Emby-Authorization`: the X-Emby-* spellings are
+# rejected with HTTP 400 ("Value cannot be null. (Parameter 'request.App')")
+# even with valid credentials, which is what made this check report a false
+# failure. The header value is the same either way.
 jf_auth='MediaBrowser Client="Drift Check", Device="Linux", DeviceId="drift-check-001", Version="1.0.0"'
 jf_code=$(curl -s -o /tmp/drift-jf.$$ -w "%{http_code}" \
   -X POST "http://localhost:$JF_PORT/Users/AuthenticateByName" \
   -H "Content-Type: application/json" \
-  -H "X-Emby-Authorization: $jf_auth" \
+  -H "Authorization: $jf_auth" \
   -d "{\"Username\":\"$USER\",\"Pw\":\"$PASS\"}")
-if [ "$jf_code" != "200" ]; then
-  fail "jellyfin: admin login failed (HTTP $jf_code)"
-else
+jf_token=""
+jf_via=""
+if [ "$jf_code" = "200" ]; then
   jf_token=$(python3 -c "import sys,json; print(json.load(open('/tmp/drift-jf.$$')).get('AccessToken',''))" 2>/dev/null)
-  if [ -z "$jf_token" ]; then
-    fail "jellyfin: login returned no AccessToken"
-  else
-    libs=$(curl -s "http://localhost:$JF_PORT/Library/VirtualFolders" -H "X-Emby-Token: $jf_token" | \
-      python3 -c "
+  jf_via="login"
+  [ -n "$jf_token" ] || fail "jellyfin: login returned no AccessToken"
+elif [ -f "$JELLYFIN_KEY_FILE" ]; then
+  # Jellyfin's local admin password is set by its first-run wizard, and init
+  # cannot re-sync it for an existing admin: the password endpoints need the
+  # CURRENT password (or do not bind on this build), so it can legitimately
+  # diverge from MONARCH_PASSWORD once the operator changes it. The credential
+  # init DOES maintain is the exported admin token - verify with that, and
+  # report the divergence as a note rather than failing on something no
+  # automated path can repair.
+  jf_token=$(cat "$JELLYFIN_KEY_FILE" 2>/dev/null)
+  jf_via="exported token"
+  if [ -n "$jf_token" ]; then
+    say "note: jellyfin admin login with the shared credentials failed (HTTP $jf_code) - using the exported admin token"
+  fi
+fi
+if [ -z "$jf_token" ]; then
+  fail "jellyfin: admin login failed (HTTP $jf_code) and no exported token at $JELLYFIN_KEY_FILE"
+else
+  libs=$(curl -s "http://localhost:$JF_PORT/Library/VirtualFolders" \
+    -H "Authorization: MediaBrowser Token=$jf_token" | \
+    python3 -c "
 import sys, json
 try:
     print(','.join(sorted(v.get('Name','') for v in json.load(sys.stdin))))
 except Exception:
     print('')
 " 2>/dev/null)
-    missing=""
-    while IFS= read -r want; do
-      [ -n "$want" ] || continue
-      case ",$libs," in
-        *",$want,"*) : ;;
-        *) missing="$missing '$want'" ;;
-      esac
-    done < <(manifest_list "['jellyfin']['libraries']")
-    [ -z "$missing" ] || fail "jellyfin: libraries missing:$missing (have: '$libs')"
-    say "ok: jellyfin (login ok, libraries='$libs')"
-  fi
+  missing=""
+  while IFS= read -r want; do
+    [ -n "$want" ] || continue
+    case ",$libs," in
+      *",$want,"*) : ;;
+      *) missing="$missing '$want'" ;;
+    esac
+  done < <(manifest_list "['jellyfin']['libraries']")
+  [ -z "$missing" ] || fail "jellyfin: libraries missing:$missing (have: '$libs')"
+  say "ok: jellyfin ($jf_via, libraries='$libs')"
 fi
 rm -f /tmp/drift-jf.$$
+
+# ───────────────────────────────────────────────────────────────────────────
+# Infisical (SecretOps): is .env still derived from the store?
+# ───────────────────────────────────────────────────────────────────────────
+# Read-only. Infisical is the source of truth for secrets; if it is provisioned
+# (.env carries INFISICAL_TOKEN/WORKSPACE_ID) the .env on this host must match
+# it, or a rotated secret is live only on one side of the boundary.
+if [ -n "${INFISICAL_TOKEN:-}" ] && [ -n "${INFISICAL_WORKSPACE_ID:-}" ]; then
+  if inf_out=$(python3 scripts/infisical-setup.py --check 2>&1); then
+    say "ok: .env is derived from Infisical"
+    [ "$QUIET" -eq 0 ] && printf '%s\n' "$inf_out" | indent
+  else
+    fail "infisical: .env drifted from the Infisical workspace"
+    printf '%s\n' "$inf_out" | indent >&2
+  fi
+else
+  say "ok: Infisical (skipped - no INFISICAL_TOKEN/WORKSPACE_ID in .env)"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# Magnate entitlements -> Jellyfin policies (RevenueOps)
+# ───────────────────────────────────────────────────────────────────────────
+# Read-only: asks Magnate what each managed user is entitled to and compares it
+# with the Jellyfin policy (scripts/magnate-tiers.json is the tier map). Skipped
+# when Magnate is not configured; a Jellyfin that cannot answer counts as a
+# skip, not drift.
+if [ -n "${MAGNATE_URL:-}" ]; then
+  ent_out=$(python3 scripts/magnate-entitlements.py --check 2>&1)
+  ent_rc=$?
+  if [ "$ent_rc" -eq 0 ]; then
+    say "ok: Magnate entitlements match Jellyfin policies"
+    [ "$QUIET" -eq 0 ] && printf '%s\n' "$ent_out" | indent
+  elif [ "$ent_rc" -eq 2 ]; then
+    say "ok: Magnate entitlements (skipped - not configured)"
+  else
+    fail "magnate: Jellyfin policies drifted from the Magnate tier map"
+    printf '%s\n' "$ent_out" | indent >&2
+  fi
+else
+  say "ok: Magnate entitlements (skipped - MAGNATE_URL not set)"
+fi
 
 # ───────────────────────────────────────────────────────────────────────────
 # Jellyseerr (initialized + Jellyfin sign-in)
@@ -433,8 +513,21 @@ else
   if [ -z "$bz_body" ]; then
     fail "bazarr: /api/system/settings unreachable with API key"
   else
-    bz_type=$(echo "$bz_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('type') or '')" 2>/dev/null)
-    [ "$bz_type" = "$BZ_AUTH_TYPE" ] || fail "bazarr: basic auth not configured (type='$bz_type')"
+    # Bazarr must keep NO local login - bazarr.$MONARCH_DOMAIN carries the
+    # Cerulean Authentik gate, and init deliberately leaves settings-auth-type
+    # alone (Bazarr's API cannot express "no auth": it accepts only
+    # None/basic/form and rejects an empty value with HTTP 406). The live API
+    # reports type null for "no login", so normalise both sides: the manifest
+    # may carry either the machine value ("none") or the older description.
+    bz_type=$(echo "$bz_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('type') or 'none')" 2>/dev/null)
+    bz_want=$(printf '%s' "$BZ_AUTH_TYPE" | tr '[:upper:]' '[:lower:]')
+    case "$bz_want" in
+      *sso*|*none*) bz_want="none" ;;
+    esac
+    case "$bz_type" in
+      ""|none|None|null) bz_type="none" ;;
+    esac
+    [ "$bz_type" = "$bz_want" ] || fail "bazarr: expected no local login (got type='$bz_type')"
     say "ok: bazarr (auth type='$bz_type')"
   fi
 fi
@@ -469,6 +562,18 @@ fi
 # ───────────────────────────────────────────────────────────────────────────
 # Nginx Proxy Manager (local container or NPM_MODE=remote + credentials)
 # ───────────────────────────────────────────────────────────────────────────
+# The static half: npm-hosts.conf must forward to ports docker-compose.yml
+# actually publishes (scripts/check-proxy-ports.py). Mode-independent and needs
+# no credentials - the live NPM can match a wrong row perfectly, which is how
+# `tv` forwarded to the Zeus portal's :3001 while the guide published 3011.
+if ports_out=$(python3 scripts/check-proxy-ports.py 2>&1); then
+  say "ok: npm-hosts.conf ports match docker-compose publishes"
+  [ "$QUIET" -eq 0 ] && printf '%s\n' "$ports_out" | indent
+else
+  fail "npm: npm-hosts.conf forwards to a port docker-compose does not publish"
+  printf '%s\n' "$ports_out" | indent >&2
+fi
+
 # Verifies the live NPM proxy hosts match scripts/npm-hosts.conf via
 # npm-proxy-hosts.py --check (read-only, exit 1 on drift). Runs when the
 # local NPM container is up, or when NPM_MODE=remote points at an external
@@ -486,10 +591,10 @@ if [ "$npm_container" -eq 1 ] \
   else
     if npm_out=$(python3 scripts/npm-proxy-hosts.py --check 2>&1); then
       say "ok: npm proxy hosts match npm-hosts.conf"
-      [ "$QUIET" -eq 0 ] && echo "$npm_out" | sed 's/^/  /'
+      [ "$QUIET" -eq 0 ] && printf '%s\n' "$npm_out" | indent
     else
       fail "npm: proxy hosts drifted from npm-hosts.conf"
-      echo "$npm_out" | sed 's/^/  /' >&2
+      printf '%s\n' "$npm_out" | indent >&2
     fi
   fi
 else

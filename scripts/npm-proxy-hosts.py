@@ -53,6 +53,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode, urlsplit
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -69,7 +70,10 @@ DEFAULT_HOSTS = [
     ("app",       "homarr",                   7575, True),
     ("auth",      "authentik-server",         9000, False),
     ("media",     "jellyfin",                 8096, True),
-    ("tv",        "iptv",                     3001, False),
+    # Host 3011 -> container 3000: host :3001 belongs to the Zeus portal, so
+    # this forwards to the published IPTV guide (npm-hosts.conf carries the
+    # same line for real deployments).
+    ("tv",        "iptv",                     3011, False),
     ("admin",     "nginx-proxy-manager",       81, False),
     ("req",       "jellyseerr",               5055, True),
 ]
@@ -137,6 +141,18 @@ def forward_auth_snippet(outpost_url, signin_url):
                                        signin_url=signin_url.rstrip("/"))
 
 
+def auth_subdomain(signin_url, domain):
+    """Subdomain of the sign-in URL when it is on `domain`, else ''.
+
+    The gate 401s to the sign-in page; gating that page itself would redirect
+    it to itself, so it is excluded by construction (see resolve_forward_auth).
+    """
+    host = (urlsplit(signin_url).hostname or "").lower()
+    if host.endswith("." + domain):
+        return host[: -len(domain) - 1]
+    return ""
+
+
 def resolve_forward_auth(domain):
     """Resolve (enabled, outpost_url, signin_url, excluded subdomains)."""
     enabled = env("NPM_FORWARD_AUTH", "1").lower() not in {"0", "false", "no", "off"}
@@ -158,6 +174,13 @@ def resolve_forward_auth(domain):
             signin = candidate
         else:
             signin = f"https://auth.{domain}"
+    # The SSO entry point is never gated. A 401 on the sign-in page redirects
+    # back to that same host, so a gate there loops onto itself and every gated
+    # host becomes unreachable - a lockout that costs host access to undo. This
+    # exclusion also cancels a hand-edited `fa` flag (main() reports it).
+    auth_sub = auth_subdomain(signin, domain)
+    if auth_sub:
+        excluded.add(auth_sub)
     return enabled, outpost, signin, excluded
 
 
@@ -197,13 +220,35 @@ def env(name, default=""):
     return os.environ.get(name, default).strip()
 
 
+def expand_env_refs(value):
+    """Expand ${VAR} / ${VAR:-default} in a conf field from the env / .env.
+
+    Lets npm-hosts.conf name the same variable the compose file derives a
+    publish from (SABNZBD_PORT), so one .env value drives both the publish and
+    the proxy host and the two cannot drift apart.
+    """
+    out, i = "", 0
+    while True:
+        start = value.find("${", i)
+        if start < 0:
+            return out + value[i:]
+        end = value.find("}", start)
+        if end < 0:
+            return out + value[i:]
+        out += value[i:start]
+        name, _, default = value[start + 2:end].partition(":-")
+        out += env(name.strip()) or default
+        i = end + 1
+
+
 def load_hosts(domain):
     """Subdomain map from npm-hosts.conf (or built-in defaults).
 
     Conf format: one host per line - `<sub> <forward> <port> [websockets]`
-    where forward is the container name (or a host name/port for custom rows)
-    and `@` means the apex (MONARCH_DOMAIN itself — the main interface users
-    log into). Lines starting with '#' are comments.
+    where forward is the container name (or a host name/port for custom rows),
+    the port is this host's published port (or ${VAR:-default}), and `@` means
+    the apex (MONARCH_DOMAIN itself — the main interface users log into). Lines
+    starting with '#' are comments.
     """
     hosts_src = os.path.isfile(HOSTS_CONF) and HOSTS_CONF or "built-in defaults"
     if os.path.isfile(HOSTS_CONF):
@@ -222,7 +267,14 @@ def load_hosts(domain):
                 flags = {p.lower() for p in parts[3:]}
                 ws = bool(flags & {"yes", "true", "1"})
                 fa = "fa" in flags
-                hosts.append((sub, forward, int(port), ws, fa))
+                resolved = expand_env_refs(port)
+                if not resolved.isdigit():
+                    raise SystemExit(
+                        f"npm-hosts.conf: the port for '{sub}' is {port!r}, which "
+                        f"resolved to {resolved!r} - set that variable, or give "
+                        "the field a ${VAR:-default}"
+                    )
+                hosts.append((sub, forward, int(resolved), ws, fa))
     else:
         hosts = [(*h, False) if len(h) == 4 else h for h in DEFAULT_HOSTS]
 
@@ -477,8 +529,114 @@ class NpmClient:
 
 
 # ---------------------------------------------------------------------------
-# Dynamic DNS via BIND TSIG (RFC 2136)
+# Dynamic DNS: Cerulean's Technitium HTTP API (the ecosystem's DNS plane)
 # ---------------------------------------------------------------------------
+# Cerulean owns DNS and replaced RFC2136/nsupdate/SSH+BIND with Technitium over
+# HTTP - "no SSH, no TSIG, no nsupdate" (cerulean-dns-platform docs/stack.md).
+# Monarch's A records go there. The legacy DNS_TSIG_* path below still works for
+# a host that runs its own BIND, and says so out loud when it is used.
+
+
+def technitium_login(url, user, password):
+    """Exchange user/password for a Technitium session token."""
+    data = technitium_api(url, "/api/user/login", {"user": user, "pass": password})
+    token = data.get("token", "")
+    if not token:
+        raise RuntimeError(f"Technitium login rejected ({data.get('status')})")
+    return token
+
+
+def technitium_config():
+    """(url, token) for the Technitium API, or None when unconfigured.
+
+    A static API token wins (it never expires); otherwise TECHNITIUM_USER /
+    TECHNITIUM_PASSWORD is exchanged for a session token on each run. Same
+    variable names Cerulean itself uses, so one .env value serves both.
+    """
+    url = env("TECHNITIUM_URL").rstrip("/")
+    if not url:
+        return None
+    token = env("TECHNITIUM_TOKEN")
+    if token:
+        return url, token
+    user, password = env("TECHNITIUM_USER"), env("TECHNITIUM_PASSWORD")
+    if user and password:
+        return url, technitium_login(url, user, password)
+    return None
+
+
+def technitium_api(url, path, params, token=""):
+    """One Technitium HTTP API call -> parsed JSON."""
+    req = urllib.request.Request(f"{url}{path}?{urlencode(params)}", method="GET")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def technitium_zone(url, token, fqdn):
+    """The hosted zone that owns fqdn (longest match), or '' when none does."""
+    data = technitium_api(url, "/api/zones/list",
+                          {"pageNumber": 1, "zonesPerPage": 100}, token)
+    names = [z.get("name", "").rstrip(".")
+             for z in data.get("response", {}).get("zones", [])]
+    matches = [n for n in names if n and (fqdn == n or fqdn.endswith("." + n))]
+    return max(matches, key=len) if matches else ""
+
+
+def technitium_records(url, token, fqdn, zone):
+    """The records that already exist for fqdn: [(type, value), ...]."""
+    data = technitium_api(url, "/api/zones/records/get",
+                          {"domain": fqdn, "zone": zone, "listZone": "false"}, token)
+    out = []
+    for rec in data.get("response", {}).get("records", []):
+        rdata = rec.get("rData", {})
+        out.append((str(rec.get("type", "")).upper(),
+                    rdata.get("ipAddress") or rdata.get("cname") or ""))
+    return out
+
+
+def dns_upsert_technitium(cfg, fqdn, ip, ttl=300, dry_run=False):
+    """Point <fqdn> at <ip> in Cerulean's Technitium, unless it already resolves.
+
+    A name that already has a record is LEFT ALONE: Monarch's hosts are CNAMEs
+    to the apex (every product subdomain CNAMEs to `innotel.us`, which holds the
+    A record), and Technitium refuses an A where a CNAME exists. Only a name
+    with no record gets one - which is the case this automation exists for (a
+    newly added subdomain in npm-hosts.conf).
+    """
+    url, token = cfg
+    if dry_run:
+        print(f"  [dry-run] would DNS: {fqdn} A {ip} via Technitium {url} "
+              "(if it has no record yet)")
+        return True
+    try:
+        zone = technitium_zone(url, token, fqdn)
+        if not zone:
+            print(f"  WARNING: no Technitium zone owns {fqdn} - skipping DNS "
+                  "update (create the zone in Cerulean first).")
+            return False
+        existing = technitium_records(url, token, fqdn, zone)
+        if existing:
+            kinds = ", ".join(f"{t} {v}".strip() for t, v in existing)
+            print(f"  DNS: {fqdn} already resolves ({kinds}) - left as is")
+            return True
+        data = technitium_api(url, "/api/zones/records/add", {
+            "domain": fqdn, "zone": zone, "type": "A",
+            "ipAddress": ip, "ttl": ttl, "overwrite": "true"}, token)
+    except (urllib.error.URLError, OSError, ValueError, RuntimeError) as exc:
+        print(f"  ERROR: Technitium DNS update failed for {fqdn}: {exc}")
+        return False
+    status = str(data.get("status", ""))
+    if status not in ("ok", "success"):
+        message = str(data.get("errorMessage") or status)
+        if "CNAME" in message.upper():          # raced with another writer
+            print(f"  DNS: {fqdn} already resolves (CNAME) - left as is")
+            return True
+        print(f"  ERROR: Technitium refused {fqdn} -> {ip}: {message}")
+        return False
+    print(f"  DNS: {fqdn} -> {ip} (A, TTL {ttl}) via Technitium ({zone})")
+    return True
 
 
 def tsig_config():
@@ -520,8 +678,20 @@ def credentials_ini(provider, credentials):
     return json.dumps(credentials)
 
 
+def dns_upsert(technitium, tsig, fqdn, ip, ttl=300, dry_run=False):
+    """Upsert the A record: Technitium first, legacy BIND/TSIG second."""
+    if technitium:
+        return dns_upsert_technitium(technitium, fqdn, ip, ttl, dry_run)
+    if tsig:
+        print("  WARNING: using the legacy BIND/TSIG path - Cerulean's DNS plane "
+              "is Technitium (set TECHNITIUM_URL + TECHNITIUM_TOKEN or "
+              "TECHNITIUM_USER/PASSWORD)")
+        return dns_upsert_a(tsig, fqdn, ip, ttl, dry_run)
+    return False
+
+
 def dns_upsert_a(tsig, fqdn, ip, ttl=300, dry_run=False):
-    """Upsert <fqdn> A <ip> on the BIND server via nsupdate (TSIG)."""
+    """Upsert <fqdn> A <ip> on a BIND server via nsupdate (legacy TSIG path)."""
     script = (
         f"server {tsig['server']}\n"
         f"update delete {fqdn}. A\n"
@@ -576,13 +746,39 @@ def main():
     forward_mode = env("NPM_FORWARD_HOST", "container")
     cert_id = env("NPM_CERT_ID")
     tsig = tsig_config()
+    try:
+        technitium = technitium_config()
+    except (urllib.error.URLError, OSError, ValueError, RuntimeError) as exc:
+        print(f"  WARNING: Technitium DNS automation unavailable ({exc}) - "
+              "A records will not be written")
+        technitium = None
 
     hosts, hosts_src = load_hosts(domain)
     fa_enabled, fa_outpost, fa_signin, fa_excluded = resolve_forward_auth(domain)
 
     print(f"Monarch -> Nginx Proxy Manager: {npm_url}")
     print(f"  domain: {domain}  ({len(hosts)} proxy hosts from {hosts_src})")
-    gated = [h["domain"] for h in hosts if h.get("forward_auth")]
+    if technitium:
+        print(f"  DNS: A records via Technitium {technitium[0]}")
+    elif tsig:
+        print(f"  DNS: A records via the LEGACY BIND/TSIG path ({tsig['server']}) - "
+              "Cerulean's DNS plane is Technitium (set TECHNITIUM_URL + a token)")
+    else:
+        print("  DNS: not configured - A records are left untouched "
+              "(set TECHNITIUM_URL + TECHNITIUM_TOKEN or TECHNITIUM_USER/PASSWORD)")
+    requested_gated = [h["domain"] for h in hosts if h.get("forward_auth")]
+    gated = [h["domain"] for h in hosts if h.get("forward_auth")
+             and subdomain_of(h["domain"], domain).lower() not in fa_excluded]
+    # A host that asked for `fa` and did not get it gets a line of its own: the
+    # only way that happens without an explicit NPM_FORWARD_AUTH_EXCLUDE is the
+    # sign-in host, which is the lockout case.
+    auth_host = (urlsplit(fa_signin).hostname or "").lower()
+    cancelled = [d for d in requested_gated if d.lower() == auth_host]
+    if fa_enabled and cancelled:
+        print(f"  WARNING: refusing to forward-auth the SSO sign-in host "
+              f"({', '.join(cancelled)}) - the gate redirects there, so gating "
+              "it would loop onto itself and lock every gated host out. Remove "
+              "the `fa` flag from that line in scripts/npm-hosts.conf.")
     if fa_enabled:
         print(f"  Cerulean Authentik forward auth ON (outpost {fa_outpost}): "
               f"{len(gated)} host(s) gated" + (f" - {', '.join(gated)}" if gated else ""))
@@ -735,10 +931,10 @@ def main():
             advanced_config=host_advanced_config(host, domain, fa_enabled,
                                                  fa_outpost, fa_signin, fa_excluded))
         # Keep DNS in sync: write the A record for the subdomain when the
-        # forward target is an IP and TSIG credentials are configured.
-        if tsig and is_ip_address(forward_host):
-            dns_upsert_a(tsig, domain_name, forward_host,
-                         dry_run=args.dry_run)
+        # forward target is an IP and a DNS mechanism is configured.
+        if is_ip_address(forward_host):
+            dns_upsert(technitium, tsig, domain_name, forward_host,
+                       dry_run=args.dry_run)
 
     print("")
     print("Done. First point DNS at this host:  *.%s  and %s  ->  <public IP>"

@@ -225,7 +225,11 @@ services:
     container_name: sabnzbd
     image: ghcr.io/hotio/sabnzbd:latest
     ports:
-      - ${SABNZBD_PORT:-8081}:8080
+      # 8082 is the default because scripts/npm-hosts.conf forwards
+      # sabnzbd.<domain> to ${SABNZBD_PORT:-8082} - the same variable, so the
+      # edge and the publish move together (checked by
+      # scripts/check-proxy-ports.py).
+      - ${SABNZBD_PORT:-8082}:8080
       - 9090:9090
     volumes:
       - /etc/localtime:/etc/localtime:ro

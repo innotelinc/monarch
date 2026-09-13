@@ -11,7 +11,7 @@
 
 Monarch rebrands the classic *arr stack as one premium media platform: **Jellyfin**
 streaming with user profiles, **AI-powered recommendations and smart search**, library
-**health analytics**, **Cerulean Cerulean Authentik-first** authentication with LDAP login gating, the whole
+**health analytics**, **Cerulean Authentik-first** authentication with LDAP login gating, the whole
 **Sonarr/Radarr/Lidarr/Prowlarr** automation family wired automatically, **live TV** with a
 native M3U tuner and XMLTV guide, and one-command installs — including a bootable
 **live/install ISO** and an **offline bundle** for air-gapped deployment.
@@ -60,7 +60,7 @@ release artifacts on every tagged release.
 | 🌐 **Proxy & SSL** | Nginx Proxy Manager auto-configured via API with a wildcard Let's Encrypt cert (DNS challenge) | 
 | 🛡️ **Self-healing** | `monarch-drift-check` verifies the running stack hourly (systemd timer) and auto-repairs drift by re-running init | 
 | 💾 **Delivery** | One-command installer, offline bundle, bootable live/install ISO — install with or without internet | 
-| 💳 **Subscriptions** | Magnate is the source billing platform: Stripe checkout → Cerulean Authentik `paid_users` group → access granted | 
+| 💳 **Subscriptions** | [subscribe.innotel.us](https://subscribe.innotel.us) — the portal landing page and subscribing page — is Magnate's: Stripe checkout → Cerulean Authentik `paid_users` group → access granted, and `scripts/magnate-entitlements.py` turns the plan into Jellyfin playback policy | 
 
 ## 🚀 Quick start (recommended)
 
@@ -89,8 +89,9 @@ Re-run `./setup.sh` any time you change `.env` or `scripts/npm-hosts.conf` — p
 reconciled in place and the certificate is reused.
 
 **DNS prerequisite (one-time):** point a wildcard + apex record at this host's public IP
-(`*.monarch.innotel.us` and `monarch.innotel.us`), or set the `DNS_TSIG_*` options so the
-NPM script writes both A records itself. The old `ARR_USERNAME`/`ARR_PASSWORD` variables are
+(`*.monarch.innotel.us` and `monarch.innotel.us`), or set `TECHNITIUM_URL` (+ a token, or
+user/password) so the NPM script writes records itself through **Cerulean's Technitium** —
+new subdomains get an A record, and a name that already resolves is left as is. The old `ARR_USERNAME`/`ARR_PASSWORD` variables are
 `MONARCH_USERNAME`/`MONARCH_PASSWORD` now — regenerate an existing `.env` from `.env.sample`.
 
 Everything after boot is **wired for you**: one-shot `monarch-seed` and `monarch-init`
@@ -109,6 +110,7 @@ Main entry points (full table in [docs/operations.md](docs/operations.md)):
 
 | Subdomain | Service | What it is |
 |---|---|---|
+| `subscribe.innotel.us` | Magnate | **Portal landing page and subscribing page** — pick a plan, Stripe Checkout, manage your account. Lives outside this domain because billing is Magnate's, not Monarch's. |
 | `monarch.<domain>` (apex) | Homarr dashboard | Main login / landing board |
 | `media.<domain>` | Jellyfin | Streaming — movies, TV, music, live TV |
 | `auth.<domain>` | Authentik | SSO, user management, `paid_users` access group |
@@ -169,9 +171,9 @@ stick — the installer stages it automatically. Full walkthroughs in
 ```
 docker-compose.yml          # the whole stack
 init/                       # monarch-init + monarch-seed (first-boot wiring, single source of truth)
-scripts/                    # setup.sh, install-monarch.sh, npm-proxy-hosts.py, drift-check.sh,
-                            # fresh-install-check.sh, stripe-webhooks.sh, seed-homarr-board.py,
-                            # ISO/offline builders
+scripts/                    # setup.sh, install-monarch.sh, npm-proxy-hosts.py, check-proxy-ports.py,
+                            # drift-check.sh, fresh-install-check.sh, stripe-webhooks.sh,
+                            # seed-homarr-board.py, ISO/offline builders
 homarr/                     # Homarr board seed, legacy v0 format (board.default.json);
                             # v1 boards are seeded into sqlite by scripts/seed-homarr-board.py
 .github/workflows/          # release, fresh-install check, full-stack drift CI
@@ -203,4 +205,6 @@ canonical single-responsibility architecture where Authentik owns identity, Infi
 secrets, Cerulean owns trust, ONYX owns storage, Magnate owns revenue, NPM Edge owns the edge, and every other
 platform is a business function that consumes them. See
 [docs/stack.md](docs/stack.md) for this platform's owns/consumes boundaries and its
-Infisical secret setup.
+Infisical secret setup, and [docs/mission-alignment.md](docs/mission-alignment.md) for the
+capability-by-capability scorecard against the mission — what ships, what is delegated, and
+the gaps in priority order.

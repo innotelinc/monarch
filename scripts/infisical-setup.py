@@ -7,7 +7,15 @@ scoped service token back into .env so credentials live in Infisical and the
 .env is derived from it.
 
 Usage:
-    python3 scripts/infisical-setup.py [--force]
+    python3 scripts/infisical-setup.py [--force]      # provision + import
+    python3 scripts/infisical-setup.py --render       # derive .env FROM Infisical
+    python3 scripts/infisical-setup.py --check        # is .env derived from it?
+
+The direction matters: Infisical is the store. `--render` pulls every secret
+in the workspace and folds it into .env (bootstrap `INFISICAL_*` keys are never
+fetched - they are what gets you in); `--check` reports drift and exits 1
+without writing, so a host can prove its .env is derived (drift-check runs it).
+Values are never printed - only key names.
 
 Reads from .env (or the environment):
     INFISICAL_ADDR            base URL, default http://localhost:<INFISICAL_PORT|8383>
@@ -129,9 +137,81 @@ class Api:
         return False
 
 
+def fetch_secrets(api: "Api", ws_id: str, environment: str) -> dict:
+    """Every secret in the workspace root: {key: value}."""
+    path = (f"/api/v3/secrets/raw?workspaceId={ws_id}&environment={environment}"
+            "&secretPath=%2F")
+    status, data = api.get(path)
+    if status != 200:
+        raise RuntimeError(
+            f"secret read failed (HTTP {status}): {str(data)[:200]} - is "
+            "INFISICAL_TOKEN still valid?")
+    rows = data.get("secrets", []) if isinstance(data, dict) else data
+    return {str(r.get("secretKey")): str(r.get("secretValue", ""))
+            for r in (rows or []) if isinstance(r, dict) and r.get("secretKey")}
+
+
+def sync_from_infisical(env: dict, check_only: bool) -> int:
+    """--render / --check: .env is derived from Infisical, never the reverse."""
+    token = env.get("INFISICAL_TOKEN", "")
+    ws_id = env.get("INFISICAL_WORKSPACE_ID", "")
+    environment = env.get("INFISICAL_ENVIRONMENT", "prod")
+    missing = [n for n, v in (("INFISICAL_TOKEN", token),
+                              ("INFISICAL_WORKSPACE_ID", ws_id)) if not v]
+    base = env.get("INFISICAL_ADDR") or f"http://localhost:{env.get('INFISICAL_PORT', '8383')}"
+    if missing:
+        print(f"not configured: {', '.join(missing)} missing - run "
+              "scripts/infisical-setup.sh first.", file=sys.stderr)
+        return 2
+
+    api = Api(base)
+    api.token = token
+    try:
+        secrets = fetch_secrets(api, ws_id, environment)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    # INFISICAL_* is the bootstrap set: fetching it from the thing it unlocks
+    # would be circular, and it must stay in .env for this script to run.
+    managed = {k: v for k, v in secrets.items() if not k.startswith("INFISICAL_")}
+    added, drifted = [], []   # drifted = .env value differs from Infisical
+    for key, value in sorted(managed.items()):
+        if key not in env:
+            added.append(key)
+        elif env[key] != value:
+            drifted.append(key)
+        else:
+            continue
+        if not check_only:
+            write_env(key, value, env)
+
+    label = "check" if check_only else "render"
+    print(f"infisical [{label}]: {len(managed)} secret(s) in '{environment}'")
+    if check_only:
+        for key in drifted:
+            print(f"  DRIFT {key}: .env value differs from Infisical")
+        for key in added:
+            print(f"  MISSING {key}: in Infisical, not in .env")
+        if drifted or added:
+            print(f"  .env is NOT derived from Infisical ({len(drifted)} drifted, "
+                  f"{len(added)} missing) - run with --render")
+            return 1
+        print("  .env matches Infisical")
+        return 0
+    for key in drifted:
+        print(f"  updated {key}")
+    for key in added:
+        print(f"  added   {key}")
+    print(f"  {len(drifted)} updated, {len(added)} added (values never printed)")
+    return 0
+
+
 def main() -> int:
     env = load_env_file()
     force = "--force" in sys.argv
+    if "--check" in sys.argv or "--render" in sys.argv:
+        return sync_from_infisical(env, "--check" in sys.argv)
 
     base = (
         os.environ.get("INFISICAL_ADDR")

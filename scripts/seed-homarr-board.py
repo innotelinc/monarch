@@ -32,6 +32,10 @@ ICON = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{name}.png"
 
 # name -> (href, icon, tooltip). href doubles as the ping URL (status check).
 APPS = [
+    # -- The portal landing page: Magnate owns plans, checkout and the
+    #    subscriber's account, so "Subscribe" is the entry point every other
+    #    surface links to (see docs/operations.md -> Subscription platform).
+    ("Subscribe", "https://subscribe.innotel.us", "stripe", "Subscribe - the portal landing page: pick a plan, pay via Stripe, manage your account (Magnate)"),
     # -- Media stack already in the DB; this entry only fixes the stale URL --
     ("Jellyfin", "https://media.monarch.innotel.us", "jellyfin", "Jellyfin - stream movies & TV"),
     # -- Platform / stack services (added below the existing tiles) --

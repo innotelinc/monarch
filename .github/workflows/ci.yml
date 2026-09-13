@@ -37,6 +37,36 @@ jobs:
             echo "::warning:: .gitignore does not list .env"
           fi
 
+  edge-config:
+    name: Edge config sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The proxy map must forward to ports the compose file actually
+      # publishes: the live NPM can match a wrong row perfectly, which is how
+      # `tv` pointed at the Zeus portal's :3001 while the IPTV guide published
+      # 3011. Static, no NPM needed, works in both NPM modes.
+      - name: npm-hosts.conf ports match docker-compose publishes
+        run: python3 scripts/check-proxy-ports.py
+
+      # The Magnate tier map is a policy table the enforcer parses at runtime:
+      # a typo in it should fail here, not on a live entitlement run.
+      - name: Entitlement tier map is valid and the enforcer compiles
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          tiers = json.load(open("scripts/magnate-tiers.json"))
+          plans = tiers["plans"]
+          assert tiers["default_plan"] in plans, "default_plan must exist in plans"
+          for slug, policy in plans.items():
+              for key in ("streams", "quality_kbps", "profiles", "downloads"):
+                  assert key in policy, f"{slug}: missing {key}"
+          print(f"tiers: {len(plans)} plans, default {tiers['default_plan']}")
+          PY
+          python3 -m py_compile scripts/magnate-entitlements.py
+
   landing:
     name: Landing page sanity
     runs-on: ubuntu-latest
@@ -50,3 +80,16 @@ jobs:
           grep -qi '<title>' "$f" || { echo "::error::landing has no <title>"; exit 1; }
           grep -qi 'og:title' "$f" || { echo "::error::landing has no og:title"; exit 1; }
           echo "landing: ok"
+
+      # The portal contract: Magnate at subscribe.innotel.us is the ecosystem
+      # landing page AND the subscribing page (Monarch never takes a payment),
+      # so both public entry points must send users there. Removing the link
+      # silently would strand visitors on a page with nothing to subscribe to.
+      - name: Portal (subscribe.innotel.us) is linked from both entry points
+        run: |
+          set -euo pipefail
+          grep -q 'https://subscribe.innotel.us' web/landing/index.html \
+            || { echo "::error::landing does not link the portal (subscribe.innotel.us)"; exit 1; }
+          grep -q '"https://subscribe.innotel.us"' scripts/seed-homarr-board.py \
+            || { echo "::error::Homarr seeder has no Subscribe tile"; exit 1; }
+          echo "portal: ok"

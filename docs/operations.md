@@ -83,7 +83,7 @@ only touches services that are still unconfigured.
 | Whisparr   | http://localhost:6969 | xxx |
 | Bazarr     | http://localhost:6767 | subtitles; connected to Sonarr/Radarr |
 | qBittorrent | http://localhost:8080 | WebUI (enabled), login = your credentials, torrent port 6881 |
-| SABnzbd    | http://localhost:8081 | Usenet (optional) |
+| SABnzbd    | http://localhost:8082 | Usenet (optional); host port = `SABNZBD_PORT` (compose default 8082) |
 | Transmission | http://localhost:9091 | optional extra downloader |
 | Deluge     | http://localhost:8112 | optional; default WebUI password is `deluge` on first login |
 | autobrr    | http://localhost:7474 | optional; manual setup |
@@ -91,9 +91,9 @@ only touches services that are still unconfigured.
 | Authentik LDAP | localhost:389 / 636 | LDAP outpost - Jellyfin logins authenticate against it |
 | **Monarch AI** | http://localhost:8002 | `monarch-recs` - AI recommendations + smart search (internal API) |
 | **Monarch Health** | http://localhost:8003 | `monarch-health` - media health analytics (internal API) |
-| Nginx Proxy Manager | http://localhost:81 | `admin.monarch.innotel.us`; reverse proxy + wildcard SSL |
+| Nginx Proxy Manager | http://localhost:2081 | `admin.monarch.innotel.us`; reverse proxy + wildcard SSL (container `:81`) |
 | Clipbucket | http://localhost:8098 | `https://tube.innotel.us`; migrated from `.72`, database and files imported |
-| IPTV guide | http://localhost:3001 | `tv.monarch.innotel.us`; XMLTV guide (`/guide.xml`) for Jellyfin Live TV |
+| IPTV guide | http://localhost:3011 | `tv.monarch.innotel.us`; XMLTV guide (`/guide.xml`) for Jellyfin Live TV (host 3011 → container 3000) |
 | TVHeadend / NextPVR / Dispatcharr | 9981 / 8866 / 9191 | optional legacy live-TV backends (Jellyfin Live TV uses a native M3U tuner, so these are not required) |
 
 
@@ -216,7 +216,19 @@ Manager entirely through its API. Two modes (`.env`):
 
 Either way the script creates (or reconciles) one proxy host per entry. `@`
 is the **apex** — the base domain itself, which is the **main interface**
-users log into (the Homarr dashboard). Everything else is a subdomain:
+users log into (the Homarr dashboard). Everything else is a subdomain.
+
+A row's port is this host's published port, and it may be written as
+`${VAR:-default}`: use the **same variable and default the compose file
+publishes from** and one `.env` value drives both files. `sabnzbd` does this
+(`SABNZBD_PORT`); `scripts/check-proxy-ports.py` parses `docker-compose.yml`
+and the map with the deployer's own loader and **fails when a row cannot
+work** — it is a CI step and part of `monarch-drift-check`, and it is what
+catches a wrong port even when the live NPM matches the map perfectly
+(that is how `tv` forwarded to the Zeus portal's `:3001` while the IPTV guide
+published `3011`). Rows naming a service outside `docker-compose.yml`
+(`authentik-server` is the shared Cerulean stack) are reported as unverified,
+not as failures.
 
 | Subdomain | Service | Port | WebSockets |
 |-----------|---------|------|------------|
@@ -224,8 +236,8 @@ users log into (the Homarr dashboard). Everything else is a subdomain:
 | `app.monarch.innotel.us` | Homarr dashboard | 7575 | yes |
 | `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
 | `media.magnate.innotel.us` | Jellyfin via Magnate edge | 8097 → container 8096 | yes |
-| `tv.monarch.innotel.us` | IPTV/EPG guide | 3001 | - |
-| `admin.monarch.innotel.us` | Nginx Proxy Manager admin | 81 | - |
+| `tv.monarch.innotel.us` | IPTV/EPG guide | 3011 → container 3000 | - |
+| `admin.monarch.innotel.us` | Nginx Proxy Manager admin (SSO-gated) | 2081 | - |
 | `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
 
 (Billing hosts `subscribe.monarch.innotel.us` and `api.monarch.innotel.us`
@@ -253,13 +265,37 @@ NPM_DNS_CREDENTIALS={"auth_token":"your-cloudflare-api-token"}
 ```
 
 One-time DNS prerequisite (outside the script): a wildcard A record plus the
-apex A record (when BIND/TSIG dynamic DNS is configured — `DNS_TSIG_*` — the
-script writes both itself):
+apex A record:
 
 ```
 *.monarch.innotel.us   A   <this host's public IP>
 monarch.innotel.us     A   <this host's public IP>
 ```
+
+#### DNS records (Cerulean's Technitium)
+
+**Cerulean owns the DNS plane and it is Technitium over HTTP** — "no SSH, no
+TSIG, no nsupdate" (`cerulean-dns-platform` → docs/stack.md). When
+`NPM_FORWARD_HOST` is an IP and `TECHNITIUM_URL` is set, `npm-proxy-hosts.py`
+keeps records in sync itself:
+
+* a subdomain with **no** record gets an `A` (TTL 300) — the case this exists
+  for, a newly added line in `npm-hosts.conf`;
+* a name that **already resolves** is left exactly as it is. Monarch's hosts are
+  CNAMEs to the apex (`tv.monarch.innotel.us CNAME innotel.us`), which is where
+  the A record lives, and Technitium refuses an `A` alongside a `CNAME` — so the
+  script reports `already resolves (...) - left as is` rather than fighting it.
+
+Auth: `TECHNITIUM_TOKEN` (a persistent API token) wins, else
+`TECHNITIUM_USER`/`TECHNITIUM_PASSWORD` logs in per run. Point the URL at the
+LAN address of the Technitium Cerulean runs (`http://192.168.1.46:5380` on this
+host), never at a container name — the script runs on the host.
+
+The legacy `DNS_TSIG_*` / `nsupdate` path still works for a host that runs its
+own BIND, and prints a warning naming Technitium when it is used. The old
+standalone BIND at `192.168.1.80` is decommissioned: it no longer answers on
+:53, which is why the previous TSIG-based automation silently stopped writing
+records.
 
 For Cloudflare the API token needs **Zone:DNS:Edit** permission on the zone.
 Other DNS providers are supported via `NPM_DNS_PROVIDER` (route53, godaddy,
@@ -334,8 +370,9 @@ ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,
 #### Cerulean SSO gate for the media apps
 
 The media management apps (**Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
-Prowlarr, qBittorrent, Sabnzbd** and the `req.` Jellyseerr alias) do not speak
-OIDC - they only ship a local username/password form. "Sign in with Authentik"
+Prowlarr, qBittorrent, Sabnzbd**, the `req.` Jellyseerr alias and the **NPM
+admin UI** itself) do not speak OIDC - they only ship a local
+username/password form. "Sign in with Authentik"
 for them is an **nginx `auth_request` gate**: Nginx Proxy Manager asks the
 Cerulean Authentik embedded outpost first and only proxies the app when the
 request carries a valid SSO session. Their own login is switched to
@@ -358,9 +395,21 @@ python3 scripts/npm-proxy-hosts.py          # proxy hosts + the gate
 Turning it off, or exempting a host:
 
 ```
-NPM_FORWARD_AUTH=0                    # no gate anywhere
-NPM_FORWARD_AUTH_EXCLUDE=req,admin    # leave these two unauthenticated
+NPM_FORWARD_AUTH=0                 # no gate anywhere
+NPM_FORWARD_AUTH_EXCLUDE=req       # leave the Jellyseerr alias unauthenticated
 ```
+
+`admin` **is** gated, which is deliberate: the NPM admin UI was the last
+surface reachable with its own login alone. Keep an escape hatch in mind — if
+the gate is ever misconfigured, or Authentik is down, the UI is behind it, so
+either add `admin` to `NPM_FORWARD_AUTH_EXCLUDE` from a shell on the host (or
+over the NPM API) or fix it with `docker exec`. The proxy map is still
+rendered by NPM itself, so host access always remains.
+
+The **sign-in host is never gated**, whatever `npm-hosts.conf` says: a 401 on
+`auth.$MONARCH_DOMAIN` redirects to that same host, so a gate there loops onto
+itself and every gated host becomes unreachable. `npm-proxy-hosts.py` excludes
+it by construction and prints a warning when a line asked for `fa` anyway.
 
 Notes:
 
@@ -396,12 +445,46 @@ Notes:
 
 #### Subscription platform + billing
 
-**Magnate** (`subscribe.innotel.us`) is the source billing platform for all
-projects: visitors pick a plan and pay through Stripe Checkout, and Magnate
-provisions the subscriber into Authentik (`paid_users`). Monarch's own
-subscription/billing containers were removed in favor of it. See
-`.env.sample` for `APP_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-`JELLYFIN_URL` / `JELLYFIN_API_KEY` and `ACCOUNT_PORTAL_URL` / `REQUEST_URL`.
+**Magnate** (`subscribe.innotel.us`) is the **portal landing page and the
+subscribing page** for the ecosystem: visitors land there, pick a plan and pay
+through Stripe Checkout, and Magnate provisions the subscriber into Authentik
+(`paid_users`) — which is the group Monarch's SSO gate and Jellyfin LDAP login
+check. Monarch hosts no payment path, no pricing page and no plan copy; every
+"Subscribe" link in the stack (the Homarr board's **Subscribe** tile and the
+landing page) points at `SUBSCRIBE_URL` (`https://subscribe.innotel.us`), and CI
+fails if either entry point drops it. `req.innotel.us` stays the
+subscriber-facing request portal (Jellyseerr), and `ACCOUNT_PORTAL_URL` is the
+**Authentik self-service** page (password reset) — a different thing from the
+subscribe page. See `.env.sample` for `SUBSCRIBE_URL` / `APP_URL`,
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `JELLYFIN_URL` /
+`JELLYFIN_API_KEY` and `ACCOUNT_PORTAL_URL` / `REQUEST_URL`.
+
+#### Entitlements — Magnate's decision, Monarch's policy
+
+`paid_users` gates *access*; it does not constrain how a tier plays. That gap is
+closed by **`scripts/magnate-entitlements.py`** with
+**`scripts/magnate-tiers.json`** as the tier → playback table:
+
+| Piece | What it is |
+|-------|------------|
+| Decision | Magnate `GET /api/entitlements?plan=<slug>&user=<username\|email>` → `{entitled, reason, plan, slug, status, expires_at}`; `Authorization: Bearer $ENTITLEMENTS_API_TOKEN` when Magnate sets one |
+| Policy | `magnate-tiers.json`: `streams`, `quality_kbps` (0 = uncapped), `profiles` (advisory), `downloads` per plan slug (`basic` / `standard` / `premium` / `agents` / `magnate`, the slugs Magnate seeds) |
+| Applied to | Jellyfin `MaxActiveSessions` (when the build has the field), `RemoteClientBitrateLimit`, `EnableContentDownloading` |
+
+```
+python3 scripts/magnate-entitlements.py --check   # report only (drift-check runs this)
+python3 scripts/magnate-entitlements.py           # converge the policies
+python3 scripts/magnate-entitlements.py --disable-unentitled   # opt-in lockout
+```
+
+Two deliberate rules: an **unentitled user is reported, never silently
+disabled** (the local Jellyfin admin is not a Magnate subscriber — locking them
+out would be self-inflicted), and `exempt_users` in the tier file is skipped
+entirely. `profiles` is recorded rather than enforced, because Jellyfin has no
+per-user profile limit — it is what Magnate/Authentik are asked to allow.
+Jellyfin auth for this script is the `MediaBrowser Token=` header (the pinned
+v12 image answers 401 to `?api_key=` and `X-Emby-Token`), read from
+`JELLYFIN_API_KEY` or `/docker/appdata/init/jellyfin-api-key.txt`.
 
 Getting `JELLYFIN_API_KEY`: `monarch-init` exports the Jellyfin admin token on
 first boot to `/docker/appdata/init/jellyfin-api-key.txt` — copy it into
@@ -471,15 +554,30 @@ against the services:
 
 | Checked service | Invariants verified |
 |-----------------|---------------------|
-| Sonarr / Radarr / Lidarr / Whisparr | API reachable, forms auth configured, expected media root folder, qBittorrent download client |
+| Sonarr / Radarr / Lidarr / Whisparr | API reachable, `authenticationMethod=external` (the Cerulean SSO gate is the only login), expected media root folder, qBittorrent download client |
 | Prowlarr | qBittorrent download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
 | qBittorrent | WebUI login with the shared credentials, `movies`/`tv`/`music`/`xxx` categories |
-| Jellyfin | admin login, media libraries (Movies / TV Shows / Music / Other) |
+| Jellyfin | admin API access — the shared credentials when they still match, otherwise the exported admin token (`/docker/appdata/init/jellyfin-api-key.txt`; a diverged local admin password is reported as a note, not a failure) — plus media libraries (Movies / TV Shows / Music / Other) |
 | Jellyseerr | initialized, Jellyfin sign-in enabled |
-| Bazarr | API key readable, basic auth configured |
+| Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
-| Nginx Proxy Manager (local mode) | live proxy hosts match `scripts/npm-hosts.conf` — subdomain, forward host/port and websocket support (`npm-proxy-hosts.py --check`); skipped when the NPM container isn't running or no `NPM_ADMIN_*` credentials are set |
+| Infisical (once provisioned) | `.env` is still derived from the store — `infisical-setup.py --check` (read-only; skipped when `INFISICAL_TOKEN`/`INFISICAL_WORKSPACE_ID` are unset) |
+| Magnate (when `MAGNATE_URL` is set) | every managed user's Jellyfin policy matches its Magnate tier (`scripts/magnate-entitlements.py --check`, read-only; skipped when no Jellyfin API key) |
+| Nginx Proxy Manager (static) | `scripts/check-proxy-ports.py` — every `npm-hosts.conf` row forwards to a port `docker-compose.yml` publishes (or the container port); needs no credentials, runs in both NPM modes |
+| Nginx Proxy Manager (live) | live proxy hosts match `scripts/npm-hosts.conf` — subdomain, forward host/port and websocket support (`npm-proxy-hosts.py --check`); skipped when the NPM container isn't running and `NPM_MODE!=remote` / no `NPM_ADMIN_*` credentials |
 | Infra (host) | `/data` + `/docker/appdata` disk usage below 90%, probed containers not crash-looping (restart count), no stale images (recreate needed) |
+
+> **Jellyfin on the pinned build.** It reads the MediaBrowser header from
+> `Authorization`; the `X-Emby-*` spellings answer HTTP 400
+> (`Value cannot be null. (Parameter 'request.App')`) or 401 regardless of the
+> credentials — which is why `init/init.py`, `scripts/drift-check.sh` and
+> `scripts/magnate-entitlements.py` all send `Authorization: MediaBrowser …`.
+> Its local `admin` password is set by the first-run wizard and init cannot
+> re-sync it for an existing user (the password endpoints need the *current*
+> password), so it can diverge from `MONARCH_PASSWORD` after a change; for
+> host-side automation the exported admin token
+> (`/docker/appdata/init/jellyfin-api-key.txt`) is the credential to trust, and
+> subscribers sign in through the Authentik LDAP outpost rather than as `admin`.
 
 **Single source of truth:** what to check comes from
 `/docker/appdata/init/invariants.json`, which `monarch-init` emits from the
@@ -674,6 +772,8 @@ Add to the `jellyfin` service:
 ```
 
 #### SABnzbd Usenet client
-The `sabnzbd` service is already in the stack on host port 8081 (so it does
-not clash with qBittorrent on 8080). Use the TRASH-guide folder structure and
+The `sabnzbd` service is already in the stack on host port 8082 (so it does
+not clash with qBittorrent on 8080), published from `SABNZBD_PORT` — the same
+variable `scripts/npm-hosts.conf` forwards to, so moving the port moves both.
+Use the TRASH-guide folder structure and
 

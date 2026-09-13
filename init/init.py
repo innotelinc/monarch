@@ -10,9 +10,10 @@ python:3.12-slim, stdlib only - no pip packages needed). It configures:
                     the admin token (usable as an API key) to
                     /docker/appdata/init/jellyfin-api-key.txt
   * Sonarr/Radarr/
-    Lidarr/Whisparr - forms authentication with the shared credentials, root
-                    folder, qBittorrent download client, hardlink settings
-  * Prowlarr      - forms authentication, qBittorrent download client,
+    Lidarr/Whisparr - external auth (the Cerulean Authentik gate in front of
+                    each app is the only login), root folder, qBittorrent
+                    download client, hardlink settings
+  * Prowlarr      - external auth, qBittorrent download client,
                     registers the four *arr apps (full sync), and adds a
                     FlareSolverr indexer proxy (tag indexers 'cloudflare'
                     to route them through it)
@@ -646,7 +647,10 @@ def configure_jellyfin():
         status, text, j = _http(
             JELLYFIN_BASE, "/Users/AuthenticateByName", method="POST",
             body={"Username": USER, "Pw": PASS},
-            headers={"X-Emby-Authorization": auth_header},
+            # The pinned v12 build reads the MediaBrowser header from
+            # `Authorization`; `X-Emby-Authorization` is rejected with HTTP 400
+            # ("Value cannot be null. (Parameter 'request.App')").
+            headers={"Authorization": auth_header},
         )
         if status in (200, 201) and isinstance(j, dict) and j.get("AccessToken"):
             token = j["AccessToken"]
@@ -719,7 +723,7 @@ def configure_jellyfin():
         status, _, _ = _http(
             JELLYFIN_BASE, f"/Library/VirtualFolders?{qs}", method="POST",
             body={"LibraryOptions": {"EnableInternetProviders": True}},
-            headers={"X-Emby-Token": token},
+            headers=jellyfin_headers(token),
         )
         if status in (200, 204):
             _log(f"Added Jellyfin library '{lib['name']}' -> {lib['path']}")
@@ -736,7 +740,13 @@ def configure_jellyfin():
 
 
 def jellyfin_headers(token):
-    return {"X-Emby-Token": token}
+    """MediaBrowser Authorization header - the only spelling this build takes.
+
+    The pinned v12 image answers 401 to `?api_key=` and `X-Emby-Token`; the
+    MediaBrowser Authorization header is what works (scripts/magnate-entitlements.py
+    uses the same one).
+    """
+    return {"Authorization": f"MediaBrowser Token={token}"}
 
 
 def jellyfin_plugin_installed(token) -> bool:
@@ -1776,7 +1786,9 @@ def build_invariants() -> dict:
             "libraries": [lib["name"] for lib in JELLYFIN_LIBRARIES],
         },
         "jellyseerr": {"port": PORTS["jellyseerr"]},
-        "bazarr": {"port": PORTS["bazarr"], "auth_type": "none (Cerulean SSO gate)"},
+        # Bazarr keeps no local login: the Cerulean Authentik gate on
+        # bazarr.<domain> is the only one (drift-check asserts exactly that).
+        "bazarr": {"port": PORTS["bazarr"], "auth_type": "none"},
         "authentik": {"ldap_outpost": LDAP_OUTPOST_NAME},
     }
 
