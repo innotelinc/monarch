@@ -24,6 +24,11 @@ in the shared Cerulean stack - are reported as unverifiable, never as failures;
 container-forward mode (NPM_FORWARD_HOST=container) is why the container port
 is accepted as well as the published one.
 
+An app that has no OIDC of its own is fronted by an oauth2-proxy SSO gateway
+(`<service>-sso`), and its row therefore forwards at the port THAT service
+publishes, not the app's own. Such a row is a match, reported as "via <app>
+SSO" so the indirection stays visible.
+
 Usage:
 
   python3 scripts/check-proxy-ports.py
@@ -182,7 +187,7 @@ def main():
     print(f"  map:      {hosts_src}")
     print(f"  compose:  {args.compose}")
 
-    ok, problems, unverified = 0, [], []
+    ok, problems, unverified, gated = 0, [], [], []
     for host in hosts:
         service, port = host["forward"], host["port"]
         entry = publishes.get(service)
@@ -192,12 +197,21 @@ def main():
         if port in entry["published"] or port in entry["container"]:
             ok += 1
             continue
+        # The app's own login is off and it is fronted by an oauth2-proxy SSO
+        # gateway, so the row forwards at the gateway's published port.
+        gateway = publishes.get(f"{service}-sso")
+        if gateway and port in gateway["published"]:
+            ok += 1
+            gated.append(host["domain"])
+            continue
         published = ", ".join(str(p) for p in sorted(entry["published"])) or "none"
         container = ", ".join(str(p) for p in sorted(entry["container"])) or "none"
         problems.append(
             f"{host['domain']} -> {service}:{port} - docker-compose publishes "
             f"{published} and the container listens on {container} for {service}")
 
+    for domain_name in gated:
+        print(f"  via SSO gateway: {domain_name} (forwarded at its oauth2-proxy port)")
     for domain_name, service, port in unverified:
         print(f"  unverified: {domain_name} -> {service}:{port} is not a service "
               "in that compose file (external dependency - not checked)")
@@ -209,6 +223,7 @@ def main():
               f"{len(unverified)} unverified")
         return 1
     print(f"\n  OK: all {ok} row(s) forward to a published or container port"
+          + (f", {len(gated)} of them via an SSO gateway" if gated else "")
           + (f" ({len(unverified)} external row(s) not checked)" if unverified else ""))
     return 0
 

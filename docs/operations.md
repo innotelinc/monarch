@@ -399,81 +399,38 @@ Test the outpost from the host:
 ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,ou=users,dc=innotel,dc=us" -w ak-ldap-bind-2026 '(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)' cn
 ```
 
-#### Cerulean SSO gate for the media apps
+#### Cerulean SSO for the media apps
 
 The media management apps (**Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
-Prowlarr, qBittorrent, Sabnzbd**, the `req.` Jellyseerr alias and the **NPM
-admin UI** itself) do not speak OIDC - they only ship a local
-username/password form. "Sign in with Authentik"
-for them is an **nginx `auth_request` gate**: Nginx Proxy Manager asks the
-Cerulean Authentik embedded outpost first and only proxies the app when the
-request carries a valid SSO session. Their own login is switched to
-`external` ("a reverse proxy authenticated this user"), so there is exactly
-**one** prompt - Cerulean, shared across every `*.$MONARCH_DOMAIN` gate.
+Prowlarr, qBittorrent, Sabnzbd**), the `req.` Jellyseerr alias and the **NPM
+admin UI** itself do not speak OIDC - they only ship a local username/password
+form. "Sign in with Authentik" for them is an **oauth2-proxy SSO gateway**: it
+runs the browser through a real OIDC code flow against Cerulean Authentik and
+only then proxies the app. There is no nginx `auth_request` and no outpost
+anywhere in the path, and every gateway shares one `.innotel.us` session
+cookie, so there is exactly **one** prompt across every host.
 
 | Piece | Where | What it is |
 |-------|-------|------------|
-| Proxy provider | `scripts/authentik-forward-auth.py` | `Monarch NPM Forward Auth` - `forward_domain`, cookie domain `$MONARCH_DOMAIN`, attached to the embedded outpost |
-| nginx gate | `scripts/npm-proxy-hosts.py` + the `fa` flag in `scripts/npm-hosts.conf` | injects the `auth_request` snippet as the host's `advanced_config` |
-| App login | `monarch-init` (`set_monarch_app_auth`) | `authenticationMethod=external`, `authenticationRequired=disabledForLocalAddresses` |
+| SSO gateway | an `oauth2-proxy` sidecar deployed with each app | a real OIDC client registered in Authentik, sharing the `_innotel_sso` cookie |
+| Proxy host | `scripts/npm-proxy-hosts.py` | forwards the host at the gateway's port instead of the app's |
+| App login | `monarch-init` (`set_monarch_app_auth`) | `authenticationMethod=external` ("a reverse proxy authenticated this user"), so the app's own form is gone |
 
-Setup (idempotent - both scripts reconcile and support `--check`/`--dry-run`):
-
-```
-python3 scripts/authentik-forward-auth.py   # provider + application + outpost
-python3 scripts/npm-proxy-hosts.py          # proxy hosts + the gate
-```
-
-Turning it off, or exempting a host:
+Setup (the gateway deploys with the app on this host; this repo's script
+reconciles the proxy hosts and supports `--check`/`--dry-run`):
 
 ```
-NPM_FORWARD_AUTH=0                 # no gate anywhere
-NPM_FORWARD_AUTH_EXCLUDE=req       # leave the Jellyseerr alias unauthenticated
+python3 scripts/npm-proxy-hosts.py          # proxy hosts -> the gateways
 ```
 
-`admin` **is** gated, which is deliberate: the NPM admin UI was the last
-surface reachable with its own login alone. Keep an escape hatch in mind — if
-the gate is ever misconfigured, or Authentik is down, the UI is behind it, so
-either add `admin` to `NPM_FORWARD_AUTH_EXCLUDE` from a shell on the host (or
-over the NPM API) or fix it with `docker exec`. The proxy map is still
-rendered by NPM itself, so host access always remains.
+Nothing here writes a forward-auth gate, and nothing can: the snippet
+machinery and the `NPM_FORWARD_AUTH*` switches were removed. The way back in
+when Authentik is unreachable is the LAN admin port with `BREAKGLASS_LOGIN=1`
+on the NPM host - not a gate exemption.
 
-The **sign-in host is never gated**, whatever `npm-hosts.conf` says: a 401 on
-`auth.$MONARCH_DOMAIN` redirects to that same host, so a gate there loops onto
-itself and every gated host becomes unreachable. `npm-proxy-hosts.py` excludes
-it by construction and prints a warning when a line asked for `fa` anyway.
-
-Notes:
-
-* The **sign-in page** is served by the shared Authentik core
-  (`auth.capstone.innotel.us`), while the gate itself sets its session cookie on
-  `.$MONARCH_DOMAIN` - so one sign-in covers every Monarch-gated host. The
-  redirect must stay on a `$MONARCH_DOMAIN` host; a cross-domain sign-in URL
-  would set the cookie in the wrong place and loop (the script guards against
-  this if a sibling stack exports `NPM_AUTHENTIK_URL`).
-* **Jellyfin itself is not gated this way** - it has its own Authentik-backed
-  login through the LDAP outpost, and a forward-auth redirect would break
-  native Jellyfin apps and TV clients.
-* `https://req.innotel.us` (the subscriber-facing Jellyseerr, linked from
-  Magnate) is deliberately **not** gated; `req.monarch.innotel.us` is.
-* **Their own logins are off too**, so the gate really is the only prompt:
-  `monarch-init` no longer sets a Bazarr login (its settings API accepts only
-  `None`/`basic`/`form`, so `settings-auth-type` is left untouched and the
-  shipped default of no auth stands), `qBittorrent.conf` whitelists the NPM
-  host (`WebUI\AuthSubnetWhitelist=127.0.0.1/32,<NPM_IP>/32` +
-  `AuthSubnetWhitelistEnabled=true`) so auth stays on for every other source,
-  and Sabnzbd needs two settings in `sabnzbd.ini`:
-
-  ```
-  host_whitelist = <container-id>, sabnzbd.monarch.innotel.us, sabnzbd, localhost
-  verify_xff_header = 0
-  ```
-
-  `host_whitelist` gates Sabnzbd's DNS-rebinding check, which otherwise 403s
-  the new hostname; `verify_xff_header` must be off because NPM forwards the
-  real public client IP in `X-Forwarded-For` and Sabnzbd rejects any non-local
-  address there. Both are host-side `appdata` files, so a fresh install needs
-  them applied once (`docker stop <app>` → edit → `docker start <app>`).
+The **sign-in host is never fronted by a gateway**: a signed-out browser is
+sent to `auth.$MONARCH_DOMAIN`, so putting it behind one would loop onto
+itself and make every other host unreachable.
 
 #### Subscription platform + billing
 

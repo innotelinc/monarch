@@ -18,6 +18,55 @@ x-common-keys: &common-keys
     - 1.1.1.1
     - 1.0.0.1
 
+###############################################
+# Authentik SSO gateways (oauth2-proxy)
+###############################################
+# The media apps only ship a local username/password form (no OIDC/SAML), so
+# each one is fronted by a real OIDC relying party: oauth2-proxy runs the
+# browser through a code flow against Cerulean Authentik and only then proxies
+# the app. Every gateway shares one `_innotel_sso` cookie on .innotel.us, so a
+# single sign-in covers them all, and the apps' own login is switched off
+# (AuthenticationMethod=External), so Authentik is the only door.
+#
+# There is no nginx auth_request and no Authentik outpost anywhere in the path.
+# Endpoints are listed explicitly because Authentik advertises its *base* URL as
+# the issuer while the app-scoped endpoints live under /application/o/<slug>/,
+# which go-oidc's discovery issuer check would reject.
+#
+# The NPM proxy host for each app forwards here instead of to the app: ports
+# are on the HOST (NPM runs in its own container and reaches these by IP).
+x-sso-env: &sso-env
+  OAUTH2_PROXY_PROVIDER: oidc
+  OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
+  OAUTH2_PROXY_OIDC_ISSUER_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/
+  OAUTH2_PROXY_LOGIN_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/authorize/
+  OAUTH2_PROXY_REDEEM_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/token/
+  OAUTH2_PROXY_PROFILE_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/userinfo/
+  OAUTH2_PROXY_OIDC_JWKS_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/${MONARCH_SSO_APP:-monarch-media}/jwks/
+  OAUTH2_PROXY_CLIENT_ID: ${MONARCH_SSO_CLIENT_ID:-monarch-media}
+  OAUTH2_PROXY_CLIENT_SECRET: ${MONARCH_SSO_CLIENT_SECRET:-}
+  OAUTH2_PROXY_COOKIE_SECRET: ${SSO_COOKIE_SECRET:-}
+  OAUTH2_PROXY_COOKIE_NAME: _innotel_sso
+  OAUTH2_PROXY_COOKIE_DOMAINS: ${SSO_COOKIE_DOMAIN:-.innotel.us}
+  OAUTH2_PROXY_COOKIE_SECURE: "true"
+  OAUTH2_PROXY_COOKIE_SAMESITE: lax
+  OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+  OAUTH2_PROXY_ALLOWED_GROUPS: ${SSO_REQUIRED_GROUP:-cerulean-platform}
+  OAUTH2_PROXY_SCOPE: openid email profile groups
+  OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+  OAUTH2_PROXY_REVERSE_PROXY: "true"
+  OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+  OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+  OAUTH2_PROXY_WHITELIST_DOMAINS: ${SSO_COOKIE_DOMAIN:-.innotel.us}
+
+x-sso-gateway: &sso-gateway
+  image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.2
+  restart: unless-stopped
+  logging:
+    driver: json-file
+  networks:
+    default:
+
 services:
   ###############################################
   # JELLYFIN - Media Server
@@ -647,6 +696,92 @@ services:
 ###############################################
 # Named Volumes
 ###############################################
+
+  ###############################################
+  # SSO gateways — one per app that has no OIDC of its own
+  ###############################################
+  # Each listens on 4180 inside the stack and is published on a distinct host
+  # port; scripts/npm-hosts.conf forwards the matching proxy host at that port.
+  radarr-sso:
+    <<: *sso-gateway
+    container_name: radarr-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://radarr:7878
+    ports:
+      - "${RADARR_SSO_PORT:-14001}:4180"
+
+  sonarr-sso:
+    <<: *sso-gateway
+    container_name: sonarr-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://sonarr:8989
+    ports:
+      - "${SONARR_SSO_PORT:-14002}:4180"
+
+  lidarr-sso:
+    <<: *sso-gateway
+    container_name: lidarr-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://lidarr:8686
+    ports:
+      - "${LIDARR_SSO_PORT:-14003}:4180"
+
+  whisparr-sso:
+    <<: *sso-gateway
+    container_name: whisparr-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://whisparr:6969
+    ports:
+      - "${WHISPARR_SSO_PORT:-14004}:4180"
+
+  bazarr-sso:
+    <<: *sso-gateway
+    container_name: bazarr-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://bazarr:6767
+    ports:
+      - "${BAZARR_SSO_PORT:-14005}:4180"
+
+  prowlarr-sso:
+    <<: *sso-gateway
+    container_name: prowlarr-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://prowlarr:9696
+    ports:
+      - "${PROWLARR_SSO_PORT:-14006}:4180"
+
+  qbittorrent-sso:
+    <<: *sso-gateway
+    container_name: qbittorrent-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://qbittorrent:8080
+    ports:
+      - "${QBITTORRENT_SSO_PORT:-14007}:4180"
+
+  sabnzbd-sso:
+    <<: *sso-gateway
+    container_name: sabnzbd-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://sabnzbd:8080
+    ports:
+      - "${SABNZBD_SSO_PORT:-14008}:4180"
+
+  jellyseerr-sso:
+    <<: *sso-gateway
+    container_name: jellyseerr-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://jellyseerr:5055
+    ports:
+      - "${JELLYSEERR_SSO_PORT:-14009}:4180"
 
 volumes:
   clipbucket_db:

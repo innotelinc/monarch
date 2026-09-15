@@ -12,6 +12,7 @@
 # credentials. Never tracked: one leaked here (see the 2026-09-15 cleanup).
 .env.pre-*
 .env.*.bak
+.env.bak*
 
 # Cerulean Vault token copies (data/vault/token/<product>.token) — live credentials.
 data/vault/token/
