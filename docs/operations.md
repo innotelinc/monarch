@@ -416,6 +416,20 @@ cookie, so there is exactly **one** prompt across every host.
 | Proxy host | `scripts/npm-proxy-hosts.py` | forwards the host at the gateway's port instead of the app's |
 | App login | `monarch-init` (`set_monarch_app_auth`) | `authenticationMethod=external` ("a reverse proxy authenticated this user"), so the app's own form is gone |
 
+Because those apps trust the proxy for identity, the gateway has to be the *only*
+path in. Each app's host port is therefore bound to `127.0.0.1`
+(`radarr` `7878`, `sonarr` `8989`, `lidarr` `8686`, `whisparr` `6969`, `bazarr`
+`6767`, `prowlarr` `9696`, `qbittorrent` `8080`, `sabnzbd` `8082`, `jellyseerr`
+`5055`): the LAN address answers nothing, and the gateway reaches the app over the
+compose network by container name. qBittorrent's peer port (`6881`) is the one
+deliberate exception — it has to stay reachable.
+
+`scripts/verify-sso.py` is the committed regression test for all of this: it
+creates a throwaway Authentik identity, drives a real OIDC flow through every
+gateway above, asserts the session opens the app, asserts an identity outside
+`SSO_REQUIRED_GROUP` is refused, and checks that each app port answers on
+loopback and refuses on the LAN. Exit codes: 0 pass, 1 fail, 2 cannot run.
+
 Setup (the gateway deploys with the app on this host; this repo's script
 reconciles the proxy hosts and supports `--check`/`--dry-run`):
 
