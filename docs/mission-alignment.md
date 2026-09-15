@@ -14,7 +14,7 @@ prioritised** gap rather than an assumption.
 | Layer | Owner | Monarch's side of the contract | Status |
 |-------|-------|-------------------------------|--------|
 | Identity | **Authentik** (Cerulean core) | LDAP outpost + Jellyfin LDAP-Auth for streaming logins; embedded-outpost `auth_request` gate (`fa`) for the ten hosts with no OIDC of their own (media apps, the Jellyseerr alias and the NPM admin UI); `paid_users` group = access, `jellyfin_admins` = admins; the sign-in host is never gated | **Done** — no app has a second, local login prompt left |
-| Secrets | **Infisical** | `compose.infisical.yml` + `scripts/infisical-setup.sh` import the stack's secrets, and `infisical-setup.py --render/--check` makes `.env` **derived** from the store (rotating a secret in Infisical is the fix; `--check` exits 1 on drift) | **Partial** — the profile is opt-in and a host that has not provisioned the workspace still carries live values in `.env` |
+| Secrets | **Cerulean Vault** | HashiCorp Vault (KV v2) hosted by Cerulean is the store; `scripts/vault-migrate.py` moves this stack's plaintext values in (`--dry-run` reports what is not in the store yet), and `scripts/drift-check.sh` fails on a leftover `vault://` reference in `.env` | **Partial** — the store is authoritative, but this stack has no runtime resolver yet, so `.env` carries the resolved values on the host |
 | Storage | **ONYX** | Content stays on `/data` volumes; Monarch owns metadata only | **Not started** — roadmap, see §4 |
 | Revenue | **Magnate** | Billing, plans, coupons, trials and subscriptions live in Magnate — `subscribe.innotel.us` is the **portal landing page and the subscribing page**. Monarch consumes the entitlement decision (`GET /api/entitlements?plan=&user=`) and the `paid_users` group | **Done** — `scripts/magnate-entitlements.py` maps the plan to Jellyfin playback policy (streams, quality cap, downloads) and `drift-check` re-verifies it; profiles stay advisory (see §4) |
 | Trust | **Cerulean** | Wildcard certs via the NPM edge (DNS challenge); DNS records written through Cerulean's **Technitium HTTP API** (no TSIG/nsupdate) | **Done** — new subdomains get A records automatically; a name that already resolves (Monarch's CNAMEs) is left as is |
@@ -60,11 +60,11 @@ The product brief lists `app`, `api`, `admin`, `stream` and `tv`. Monarch runs
    ONYX-backed store, the path contracts in `monarch-init` are unchanged, and
    `docs/operations.md` records the migration the way the `.72` → `.46` move is
    recorded.
-2. **Infisical-first secrets.** `.env` is still the source of truth on a host
-   that has not provisioned the workspace. "Done" means
-   `scripts/infisical-setup.sh` is the documented path for every secret
-   (including `NPM_*`, `AUTHENTIK_*`, `AUTH_OIDC_*`) and `.env` only carries the
-   bootstrap keys.
+2. **Vault-first secrets.** `.env` is still the source of truth on a host that
+   has not moved its values into the store. "Done" means every secret
+   (including `NPM_*`, `AUTHENTIK_*`, `AUTH_OIDC_*`) lives in Cerulean Vault at
+   `cerulean/monarch`, resolution happens before the stack starts rather than in
+   a human's head, and `.env` only carries the bootstrap keys.
 3. **Entitlement depth.** The plan → policy mapping ships, but two edges remain:
    the **stream limit** is applied only where the Jellyfin build exposes
    `MaxActiveSessions`, and **profile limits** stay advisory because Jellyfin has
@@ -94,11 +94,11 @@ The mission's non-negotiables, checked one by one:
 | **Self-hosted, complete ownership** | Every service is a container in this repo; the only external dependency is Stripe Checkout (Magnate) and optional metadata/CDN providers you choose. Live/install ISO + offline bundle exist for air-gapped installs. |
 | **Own your user data** | Profiles, watch history, playback state and analytics live in `/data`/`/docker/appdata`; nothing is sent to a third-party recommendation service (`monarch-recs` is local TF‑IDF). |
 | **Identity is Authentik's, not Monarch's** | No second user store: `paid_users` gates access, LDAP gates streaming login, and no app keeps a competing password form. |
-| **Secrets are Infisical's** | `.env` is derived (`--render`) and verified (`--check`); nothing writes secrets back. |
+| **Secrets are Cerulean Vault's** | The store is `cerulean/monarch`; `vault-migrate.py` moves values in and `drift-check` fails on an unresolved reference. Nothing in the stack writes secrets back. |
 | **Revenue is Magnate's** | `subscribe.innotel.us` is the landing and subscribing page; Monarch never touches a card, a price, or an invoice. |
 | **Storage is ONYX's** | Content paths are designed to move behind ONYX without changing `monarch-init` contracts (gap 1). |
 | **Every service wired on first boot** | `monarch-seed` + `monarch-init` are idempotent single sources of truth; `drift-check` repairs drift automatically. |
-| **Everything is verifiable** | `check-proxy-ports.py`, `npm-proxy-hosts.py --check`, `magnate-entitlements.py --check`, `infisical-setup.py --check`, `drift-check.sh` — each claim on this page has a command. |
+| **Everything is verifiable** | `check-proxy-ports.py`, `npm-proxy-hosts.py --check`, `magnate-entitlements.py --check`, `vault-migrate.py --dry-run`, `drift-check.sh` — each claim on this page has a command. |
 
 ## 6. Deliberately out of scope here
 
@@ -120,7 +120,7 @@ Jellyfin already owns the database, search and streaming concerns:
 python3 scripts/check-proxy-ports.py             # edge map ↔ compose publishes
 python3 scripts/npm-proxy-hosts.py --check       # live NPM ↔ edge map (needs creds)
 python3 scripts/magnate-entitlements.py --check  # Magnate plan → Jellyfin policy
-python3 scripts/infisical-setup.py --check       # .env derived from the store?
+python3 scripts/vault-migrate.py --dry-run       # what is not in Cerulean Vault yet
 bash scripts/drift-check.sh                     # the running stack, read-only
 git grep -n "subscribe.innotel.us"              # the portal entry points (values table)
 git grep -niE "onyx"                            # today: docs/landing only (gap 1)

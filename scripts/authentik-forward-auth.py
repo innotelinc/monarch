@@ -37,7 +37,9 @@ Environment (.env is read when present):
   AUTHENTIK_FORWARD_INVALIDATION_FLOW invalidation flow slug, default
                               default-invalidation-flow
   AUTHENTIK_FORWARD_GROUP     optional group that must be a member to pass the
-                              gate ('' = any authenticated Authentik user)
+                              gate ('' = any authenticated Authentik user).
+                              Enforced with a policy binding on the application:
+                              the setting alone restricts nothing.
 
 Usage:
   python3 scripts/authentik-forward-auth.py            # create/update
@@ -135,6 +137,22 @@ class Ak:
                 return item
         return None
 
+    def get_application(self, slug: str) -> dict | None:
+        """Fetch an application by slug, tolerating the list endpoint's gaps.
+
+        Authentik's application list can silently DROP an application while
+        still counting it (`pagination.count` > len(results), with no next
+        page), and `?search=<slug>` reports count=1 with zero results for the
+        same object. Looking applications up through `find()` therefore
+        reported a perfectly healthy `olympus-npm-forward-auth` as missing.
+        A direct slug GET always resolves it, so try that first and only fall
+        back to the list.
+        """
+        try:
+            return self.get(f"/core/applications/{slug}/")
+        except ApiError:
+            return self.find("/core/applications/", slug=slug)
+
 
 def flatten_flows(ak: Ak) -> dict[str, str]:
     """Map flow slug -> pk for the whole (small) flow list."""
@@ -199,7 +217,9 @@ def main() -> int:
                   file=sys.stderr)
             return 1
         print(f"PASS access gate group: {gate_group} (pk {group['pk']})")
+        gate_group_pk = group["pk"]
     else:
+        gate_group_pk = None
         print("PASS access gate: any authenticated Authentik user "
               "(set AUTHENTIK_FORWARD_GROUP to require a group)")
 
@@ -254,9 +274,10 @@ def main() -> int:
     # ---- application -------------------------------------------------------
     if provider_pk:
         try:
-            application = ak.find("/core/applications/", slug=app_slug)
+            application = ak.get_application(app_slug)
         except ApiError as exc:
-            print(f"FAIL could not list applications: {exc}", file=sys.stderr)
+            print(f"FAIL could not look up application {app_slug!r}: {exc}",
+                  file=sys.stderr)
             return 1
         if application is None:
             if args.check:
@@ -266,9 +287,9 @@ def main() -> int:
                 print(f"  [dry-run] would create application {app_slug!r} "
                       f"-> provider pk {provider_pk}")
             else:
-                ak.post("/core/applications/",
-                        {"name": provider_name, "slug": app_slug,
-                         "provider": provider_pk})
+                application = ak.post("/core/applications/",
+                                      {"name": provider_name, "slug": app_slug,
+                                       "provider": provider_pk})
                 print(f"PASS created application {app_slug!r}")
         elif application.get("provider") != provider_pk:
             if args.check:
@@ -284,6 +305,38 @@ def main() -> int:
                 print(f"PASS repointed application {app_slug!r} -> pk {provider_pk}")
         else:
             print(f"PASS application {app_slug!r} already bound to the provider")
+
+    # ---- group access gate -------------------------------------------------
+    # Authentik enforces AUTHENTIK_FORWARD_GROUP with a policy binding ON THE
+    # APPLICATION: the embedded outpost evaluates the application's bindings on
+    # every forward-auth request. Looking the group up (the old behaviour) only
+    # proved it existed - the gate stayed open to any authenticated user.
+    app_pk = (application or {}).get("pk")
+    if gate_group_pk and app_pk:
+        try:
+            binding = ak.find("/policies/bindings/", target=app_pk,
+                              group=gate_group_pk)
+        except ApiError as exc:
+            print(f"FAIL could not list policy bindings: {exc}", file=sys.stderr)
+            return 1
+        if binding is None:
+            if args.check:
+                drift.append(f"application {app_slug!r} is not bound to group "
+                             f"{gate_group!r}")
+                print(f"DRIFT application {app_slug!r} not restricted to group "
+                      f"{gate_group!r}")
+            elif args.dry_run:
+                print(f"  [dry-run] would bind application {app_slug!r} to group "
+                      f"{gate_group!r} (only its members pass)")
+            else:
+                ak.post("/policies/bindings/",
+                        {"target": app_pk, "group": gate_group_pk,
+                         "order": 0, "enabled": True, "negate": False})
+                print(f"PASS bound application {app_slug!r} to group "
+                      f"{gate_group!r} - only its members pass the gate")
+        else:
+            print(f"PASS application {app_slug!r} already restricted to group "
+                  f"{gate_group!r}")
 
     # ---- embedded outpost attachment --------------------------------------
     try:

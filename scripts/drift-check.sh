@@ -38,8 +38,8 @@ set -uo pipefail
 #     - media libraries exist
 #   Jellyseerr:
 #     - initialized, Jellyfin sign-in enabled
-#   Infisical (SecretOps, once provisioned):
-#     - .env is still derived from the store (infisical-setup.py --check)
+#   Cerulean Vault (SecretOps):
+#     - .env holds materialized values, with no unresolved vault:// reference
 #   Magnate (RevenueOps, when MAGNATE_URL is set):
 #     - every managed user's Jellyfin policy matches its Magnate tier
 #       (scripts/magnate-entitlements.py --check, read-only)
@@ -178,6 +178,10 @@ fi
 
 FAILS=0
 FAIL_LINES=()
+# Set when the live NPM proxy hosts drift from npm-hosts.conf. The healer is
+# `npm-proxy-hosts.py` (the reconciler), NOT monarch-init — tracked here because
+# the two are fixed by different programs.
+NPM_DRIFT=0
 say()  { [ "$QUIET" -eq 0 ] && echo "$@"; }
 indent() { sed 's/^/  /'; }   # prefix each line of stdin with two spaces
 fail() { echo "DRIFT-FAIL: $*" >&2; FAIL_LINES+=("$*"); FAILS=$((FAILS + 1)); }
@@ -482,21 +486,21 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
-# Infisical (SecretOps): is .env still derived from the store?
+# Cerulean Vault (SecretOps): does .env hold materialized values?
 # ───────────────────────────────────────────────────────────────────────────
-# Read-only. Infisical is the source of truth for secrets; if it is provisioned
-# (.env carries INFISICAL_TOKEN/WORKSPACE_ID) the .env on this host must match
-# it, or a rotated secret is live only on one side of the boundary.
-if [ -n "${INFISICAL_TOKEN:-}" ] && [ -n "${INFISICAL_WORKSPACE_ID:-}" ]; then
-  if inf_out=$(python3 scripts/infisical-setup.py --check 2>&1); then
-    say "ok: .env is derived from Infisical"
-    [ "$QUIET" -eq 0 ] && printf '%s\n' "$inf_out" | indent
-  else
-    fail "infisical: .env drifted from the Infisical workspace"
-    printf '%s\n' "$inf_out" | indent >&2
-  fi
+# Read-only. Cerulean Vault is the source of truth for secrets, and this stack
+# has no runtime resolver — so .env must carry the resolved value, never a
+# reference. A leftover `vault://` (or retired `infisical://`) reference would
+# reach the container as a literal string: configured-looking, and not a
+# credential. Which plaintext values are not in the store yet is what
+# `python3 scripts/vault-migrate.py --from-env-file .env --dry-run` reports.
+if [ ! -f "$ENV_FILE" ]; then
+  say "ok: Cerulean Vault (skipped - no $ENV_FILE)"
+elif vault_refs=$(grep -nE '^[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*(vault|infisical)://' "$ENV_FILE"); then
+  fail "cerulean-vault: unresolved secret references in $ENV_FILE"
+  printf '%s\n' "$vault_refs" | indent >&2
 else
-  say "ok: Infisical (skipped - no INFISICAL_TOKEN/WORKSPACE_ID in .env)"
+  say "ok: Cerulean Vault (no unresolved references in $ENV_FILE)"
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -633,6 +637,7 @@ if [ "$npm_container" -eq 1 ] \
       say "ok: npm proxy hosts match npm-hosts.conf"
       [ "$QUIET" -eq 0 ] && printf '%s\n' "$npm_out" | indent
     else
+      NPM_DRIFT=1
       fail "npm: proxy hosts drifted from npm-hosts.conf"
       printf '%s\n' "$npm_out" | indent >&2
     fi
@@ -727,6 +732,19 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
       docker compose -f docker-compose.yml run --rm monarch-init >/dev/null 2>&1 || true
     fi
     echo "drift-check: monarch-init finished - re-verifying..." >&2
+    # Proxy-host drift is healed by the reconciler, not by monarch-init: init
+    # seeds the stack, it does not manage NPM. Without this the NPM half of the
+    # heal is a no-op, the rate limiter suppresses the next attempt, and the same
+    # alert returns every interval while nothing ever applies npm-hosts.conf.
+    # Runs only when the check actually reported that drift.
+    if [ "$NPM_DRIFT" -eq 1 ]; then
+      echo "drift-check: reconciling NPM proxy hosts from npm-hosts.conf..." >&2
+      if python3 scripts/npm-proxy-hosts.py >/dev/null 2>&1; then
+        echo "drift-check: NPM proxy hosts reconciled" >&2
+      else
+        echo "drift-check: NPM reconciler failed (see: scripts/npm-proxy-hosts.py)" >&2
+      fi
+    fi
     # Re-run the check suite WITHOUT --heal (avoids a heal loop). The exit code
     # of that run reports whether the stack healed.
     exec bash "$0" --quiet

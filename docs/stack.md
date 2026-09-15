@@ -54,37 +54,32 @@ provides, and explicitly does not own.
 The platform's SecretOps is **Cerulean Vault** — HashiCorp Vault, KV v2, hosted by
 Cerulean — with `vault://<mount>/<path>#<key>` references in `.env`.
 
-### Legacy: the Infisical profile
-
-This stack currently still imports its credentials into an **Infisical** workspace and the
-stack's `.env` is **derived** from it — one
-direction only. `INFISICAL_*` is the bootstrap set that has to stay in `.env`
-(the address, workspace id, environment and service token that get you in);
-everything else is rendered from the store, never hand-edited:
+Cerulean mints this stack's **path-scoped** token (its policy covers only
+`cerulean/data/monarch`, never a sibling's secrets) and renews it in place. Copy
+it to `./data/vault/token/monarch.token`, then move any plaintext values across:
 
 ```bash
-# generate the required keys and add them to .env
-openssl rand -base64 32   # INFISICAL_ENCRYPTION_KEY
-openssl rand -hex 16      # INFISICAL_AUTH_SECRET
-openssl rand -hex 16      # INFISICAL_DB_PASSWORD
-
-# start the profile and provision the workspace + import .env secrets
-docker compose -f docker-compose.yml -f compose.infisical.yml --profile infisical up -d
-bash scripts/infisical-setup.sh
+VAULT_ADDR=http://<cerulean-host>:8200 \
+  VAULT_TOKEN_FILE=./data/vault/token/monarch.token \
+  VAULT_PREFIX=cerulean VAULT_PATH=monarch \
+  python3 scripts/vault-migrate.py --from-env-file .env \
+    --keys MONARCH_PASSWORD,HOMARR_SECRET_ENCRYPTION_KEY,NPM_PASSWORD
 ```
+
+`vault-migrate.py` never prints a value, unions with whatever is already at the
+path (so a re-run is a no-op, not an overwrite), and accepts either `.env` or a
+legacy Infisical workspace as its source. `--dry-run` lists the keys that are not
+in the store yet, which is the drift view for this stack:
 
 ```bash
-python3 scripts/infisical-setup.py --check    # is .env derived from the store?
-python3 scripts/infisical-setup.py --render   # pull every secret into .env
+python3 scripts/vault-migrate.py --from-env-file .env --dry-run  # what is not in the store
+bash scripts/drift-check.sh                                      # the running stack, read-only
 ```
 
-`--check` never writes and reports key names only (never values); it exits 1 on
-drift, `monarch-drift-check` runs it, and `--render` is the fix. This is what
-makes a rotated secret land on the host instead of living only in one of the
-two places.
-
-See [compose.infisical.yml](../compose.infisical.yml) and
-[scripts/infisical-setup.py](../scripts/infisical-setup.py) for details.
+This stack has no runtime resolver, so `.env` must hold the **resolved value** — a
+`vault://` reference left in place reaches the container as a literal string.
+`drift-check` fails on any it finds, which is what keeps a rotated secret from
+living only in one of the two places.
 
 ## Golden rules
 

@@ -13,6 +13,11 @@
 .env.pre-*
 .env.*.bak
 
+# Cerulean Vault token copies (data/vault/token/<product>.token) — live credentials.
+data/vault/token/
+data/vault/init/
+data/vault/file/
+
 # Live USB / release build output
 .live-build/
 dist/live-usb/

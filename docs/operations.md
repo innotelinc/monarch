@@ -208,7 +208,10 @@ Manager entirely through its API. Two modes (`.env`):
   at `http://localhost:81`.
 - `NPM_MODE=remote` - reuse an existing NPM server: the NPM container is
   **not** started, and setup drives the remote server's API
-  (`NPM_BASE_URL`, e.g. `https://proxy.innotel.us`). The remote server
+  (`NPM_BASE_URL`, e.g. `http://192.168.1.46:81` - the LAN address of the
+  NPM host; do **not** point it at the public admin UI
+  `https://proxy.innotel.us`, which is Authentik-gated and would 302 the
+  API calls to the SSO sign-in). The remote server
   forwards to this host, so set `NPM_FORWARD_HOST` to the address it can
   reach this host at - a LAN IP (e.g. `192.168.1.46`), public IP, or
   hostname (instead of `container`). The ports in `npm-hosts.conf` are
@@ -663,7 +666,7 @@ against the services:
 | Jellyseerr | initialized, Jellyfin sign-in enabled |
 | Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
-| Infisical (once provisioned) | `.env` is still derived from the store — `infisical-setup.py --check` (read-only; skipped when `INFISICAL_TOKEN`/`INFISICAL_WORKSPACE_ID` are unset) |
+| Cerulean Vault | `.env` holds materialized values with no unresolved `vault://` reference — the drift-check greps for leftovers (read-only; `scripts/vault-migrate.py --dry-run` shows which plaintext values are not in the store yet) |
 | Magnate (when `MAGNATE_URL` is set) | every managed user's Jellyfin policy matches its Magnate tier (`scripts/magnate-entitlements.py --check`, read-only; skipped when no Jellyfin API key) |
 | Nginx Proxy Manager (static) | `scripts/check-proxy-ports.py` — every `npm-hosts.conf` row forwards to a port `docker-compose.yml` publishes (or the container port); needs no credentials, runs in both NPM modes |
 | Nginx Proxy Manager (live) | live proxy hosts match `scripts/npm-hosts.conf` — subdomain, forward host/port, websocket support and the SSO gate — and no host in `MONARCH_DOMAIN` is live that the conf no longer lists (`npm-proxy-hosts.py --check`; remove a retired host with `--prune`); skipped when the NPM container isn't running and `NPM_MODE!=remote` / no `NPM_ADMIN_*` credentials |

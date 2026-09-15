@@ -88,7 +88,10 @@ DEFAULT_HOSTS = [
     # this forwards to the published IPTV guide (npm-hosts.conf carries the
     # same line for real deployments).
     ("tv",        "iptv",                     3011, False),
-    ("admin",     "nginx-proxy-manager",       81, False),
+    # NPM Edge's admin UI, reached on its own loopback inside the NPM
+    # container (npm-hosts.conf carries the same line for real deployments):
+    # the app only trusts the edge's identity headers over loopback.
+    ("admin",     "127.0.0.1",                 81, False),
     ("req",       "jellyseerr",               5055, True),
 ]
 
@@ -270,8 +273,9 @@ def resolve_forward(host, forward_mode):
     ("container" for a local NPM, or this host's IP for a REMOTE one). A row may
     instead name its own upstream - an IP or a dotted hostname - which then
     always wins. Container names never contain a dot, so the two forms cannot be
-    confused: `admin ${NPM_HOST_IP} 81 fa` reaches the NPM admin UI on the NPM
-    box itself, while every other row still follows the global mode.
+    confused: `admin 127.0.0.1 81 fa` reaches the NPM admin UI on its own
+    loopback (where nginx runs, and the only place it believes the edge's
+    identity headers), while every other row still follows the global mode.
 
     This is why admin.<domain> needs an override at all: the admin UI does not
     run on this Docker host (the compose "npm" profile is optional and is not
