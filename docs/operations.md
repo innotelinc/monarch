@@ -441,8 +441,12 @@ through Stripe Checkout, and Magnate provisions the subscriber into Authentik
 check. Monarch hosts no payment path, no pricing page and no plan copy; every
 "Subscribe" link in the stack (the Homarr board's **Subscribe** tile and the
 landing page) points at `SUBSCRIBE_URL` (`https://subscribe.innotel.us`), and CI
-fails if either entry point drops it. `req.innotel.us` stays the
-subscriber-facing request portal (Jellyseerr), and `ACCOUNT_PORTAL_URL` is the
+fails if either entry point drops it. `req.innotel.us` is the
+subscriber-facing request portal (Jellyseerr) — it fronts the app through the
+`jellyseerr-sso` gateway like `req.monarch.innotel.us`, so it needs an Authentik
+session too; its callback is registered on the `monarch-media` provider. It is a
+**manual** proxy host (outside `MONARCH_DOMAIN`), so no run of
+`npm-proxy-hosts.py` maintains it. `ACCOUNT_PORTAL_URL` is the
 **Authentik self-service** page (password reset) — a different thing from the
 subscribe page. See `.env.sample` for `SUBSCRIBE_URL` / `APP_URL`,
 `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `JELLYFIN_URL` /

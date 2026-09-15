@@ -51,8 +51,26 @@ x-sso-env: &sso-env
   OAUTH2_PROXY_COOKIE_SECURE: "true"
   OAUTH2_PROXY_COOKIE_SAMESITE: lax
   OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+  # Two flags without which nobody can sign in at all, both measured live on the
+  # edge gateway (see npm/docs/stack.md):
+  #   * Authentik's `email` scope mapping sets email_verified: false, and
+  #     oauth2-proxy refuses such a token -> the callback dies with
+  #     "email in id_token (...) isn't verified" (HTTP 500).
+  #   * without the groups claim, --allowed-groups restricts nothing, so any
+  #     authenticated identity is admitted.
+  OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true"
+  OAUTH2_PROXY_OIDC_GROUPS_CLAIM: groups
   OAUTH2_PROXY_ALLOWED_GROUPS: ${SSO_REQUIRED_GROUP:-cerulean-platform}
   OAUTH2_PROXY_SCOPE: openid email profile groups
+  # Server-side sessions: a cookie session for an identity in thirty groups
+  # exceeds 4KB, and the several Set-Cookie headers that follow overflow the
+  # edge's proxy_buffer_size -> nginx 502s the callback that would finish the
+  # login. The store is shared by every gateway on the platform, so one
+  # Authentik sign-in covers all of them.
+  OAUTH2_PROXY_SESSION_STORE_TYPE: redis
+  OAUTH2_PROXY_REDIS_CONNECTION_URL: redis://:${SSO_SESSION_REDIS_PASSWORD:-}@${SSO_SESSION_REDIS_HOST:-192.168.1.46}:${SSO_SESSION_REDIS_PORT:-16380}/0
+  OAUTH2_PROXY_PASS_ACCESS_TOKEN: "false"
+  OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "false"
   OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
   OAUTH2_PROXY_REVERSE_PROXY: "true"
   OAUTH2_PROXY_PASS_USER_HEADERS: "true"
@@ -107,7 +125,9 @@ services:
     image: ghcr.io/seerr-team/seerr:latest
     init: true
     ports:
-      - 5055:5055
+      # Loopback only: the <service>-sso gateway reaches the app over the
+      # compose network by name, so the LAN must not be a second door.
+      - 127.0.0.1:5055:5055
     environment:
       PUID: 1000
       PGID: 1000
@@ -125,7 +145,7 @@ services:
     container_name: sonarr
     image: ghcr.io/hotio/sonarr:latest
     ports:
-      - 8989:8989
+      - 127.0.0.1:8989:8989
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/sonarr:/config
@@ -139,7 +159,7 @@ services:
     container_name: radarr
     image: ghcr.io/hotio/radarr:latest
     ports:
-      - 7878:7878
+      - 127.0.0.1:7878:7878
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/radarr:/config
@@ -153,7 +173,7 @@ services:
     container_name: lidarr
     image: ghcr.io/hotio/lidarr:latest
     ports:
-      - 8686:8686
+      - 127.0.0.1:8686:8686
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/lidarr:/config
@@ -170,7 +190,7 @@ services:
     # is treated as a failed auth). v2-develop includes that fix.
     image: ghcr.io/hotio/whisparr:v2-develop
     ports:
-      - 6969:6969
+      - 127.0.0.1:6969:6969
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/whisparr:/config
@@ -187,7 +207,7 @@ services:
     container_name: prowlarr
     image: ghcr.io/hotio/prowlarr:latest
     ports:
-      - 9696:9696
+      - 127.0.0.1:9696:9696
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/prowlarr:/config
@@ -200,7 +220,7 @@ services:
     container_name: bazarr
     image: ghcr.io/hotio/bazarr:latest
     ports:
-      - 6767:6767
+      - 127.0.0.1:6767:6767
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/bazarr:/config
@@ -255,7 +275,9 @@ services:
       monarch-seed:
         condition: service_completed_successfully
     ports:
-      - 8080:8080
+      # WebUI is loopback only (the qbittorrent-sso gateway fronts it); the
+      # torrenting port must stay reachable, so it is deliberately not bound.
+      - 127.0.0.1:8080:8080
       - 6881:6881
       - 6881:6881/udp
     environment:
@@ -282,8 +304,8 @@ services:
       # sabnzbd.<domain> to ${SABNZBD_PORT:-8082} - the same variable, so the
       # edge and the publish move together (checked by
       # scripts/check-proxy-ports.py).
-      - ${SABNZBD_PORT:-8082}:8080
-      - 9090:9090
+      - 127.0.0.1:${SABNZBD_PORT:-8082}:8080
+      - 127.0.0.1:9090:9090
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/sabnzbd:/config
