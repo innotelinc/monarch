@@ -239,7 +239,7 @@ forms cannot be confused). This is not cosmetic: with the old
 upstream fails*, because this stack's own optional `npm` profile is not running
 and nothing listens on :2081 — `https://admin.monarch.innotel.us` was dead while
 every other host worked. `NPM_HOST_IP` must be set in `.env`; the row resolves
-to `192.168.1.71:81` here, the same upstream `admin.zeus.innotel.us` uses.
+to `192.168.1.46:81` here, the same upstream `admin.zeus.innotel.us` uses.
 
 | Subdomain | Service | Port | WebSockets |
 |-----------|---------|------|------------|
@@ -304,7 +304,7 @@ monarch.innotel.us     A   <this host's public IP>
 #### DNS records (Cerulean's Technitium)
 
 **Cerulean owns the DNS plane and it is Technitium over HTTP** — "no SSH, no
-TSIG, no nsupdate" (`cerulean-dns-platform` → docs/stack.md). When
+TSIG, no nsupdate" (`cerulean` → docs/stack.md). When
 `NPM_FORWARD_HOST` is an IP and `TECHNITIUM_URL` is set, `npm-proxy-hosts.py`
 keeps records in sync itself:
 

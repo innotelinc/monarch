@@ -580,7 +580,7 @@ class NpmClient:
 # Dynamic DNS: Cerulean's Technitium HTTP API (the ecosystem's DNS plane)
 # ---------------------------------------------------------------------------
 # Cerulean owns DNS and replaced RFC2136/nsupdate/SSH+BIND with Technitium over
-# HTTP - "no SSH, no TSIG, no nsupdate" (cerulean-dns-platform docs/stack.md).
+# HTTP - "no SSH, no TSIG, no nsupdate" (cerulean docs/stack.md).
 # Monarch's A records go there. The legacy DNS_TSIG_* path below still works for
 # a host that runs its own BIND, and says so out loud when it is used.
 

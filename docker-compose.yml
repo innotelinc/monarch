@@ -2,6 +2,10 @@
 # Common Keys for all apps
 ###############################################
 
+# Project name is pinned so container/volume names never depend on where this
+# repo is checked out (the mesh puts it in 3-media/monarch).
+name: monarch
+
 x-common-keys: &common-keys
   restart: unless-stopped
   logging:

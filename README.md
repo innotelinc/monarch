@@ -202,10 +202,10 @@ Monarch is licensed under the GNU Affero General Public License v3.0 or later (A
 
 Monarch is the ecosystem's **MediaOps** platform — streaming, media libraries, recommendations, and live TV in the
 [**Innotel Platform Stack**](https://github.com/innotelinc/innotel-platform-stack) — the
-canonical single-responsibility architecture where Authentik owns identity, Infisical owns
+canonical single-responsibility architecture where Authentik owns identity, Cerulean Vault owns
 secrets, Cerulean owns trust, ONYX owns storage, Magnate owns revenue, NPM Edge owns the edge, and every other
 platform is a business function that consumes them. See
 [docs/stack.md](docs/stack.md) for this platform's owns/consumes boundaries and its
-Infisical secret setup, and [docs/mission-alignment.md](docs/mission-alignment.md) for the
+Cerulean Vault secret setup, and [docs/mission-alignment.md](docs/mission-alignment.md) for the
 capability-by-capability scorecard against the mission — what ships, what is delegated, and
 the gaps in priority order.

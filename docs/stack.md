@@ -29,7 +29,7 @@ provides, and explicitly does not own.
 ## Consumes
 
 - Authentik — identity, SSO, paid_users access
-- Infisical — secrets, API keys
+- Cerulean Vault — secrets, API keys
 - ONYX — media storage
 - Magnate — subscriptions and entitlements
 - Cerulean — certificates and trust
@@ -46,13 +46,18 @@ provides, and explicitly does not own.
 >
 > **Alignment scorecard:** [docs/mission-alignment.md](mission-alignment.md) maps every mission
 > capability (streaming, live TV, profiles, recommendations, analytics, tiers) to what this
-> repo actually ships, what is delegated to Authentik/Infisical/ONYX/Magnate, and the gaps in
+> repo actually ships, what is delegated to Authentik/Cerulean Vault/ONYX/Magnate, and the gaps in
 > priority order — with the commands that verify each claim.
 
-## Secrets (Infisical)
+## Secrets (Cerulean Vault)
 
-Secrets for this platform live in **Infisical** (SecretOps): credentials are imported
-into an Infisical workspace and the stack's `.env` is **derived** from it — one
+The platform's SecretOps is **Cerulean Vault** — HashiCorp Vault, KV v2, hosted by
+Cerulean — with `vault://<mount>/<path>#<key>` references in `.env`.
+
+### Legacy: the Infisical profile
+
+This stack currently still imports its credentials into an **Infisical** workspace and the
+stack's `.env` is **derived** from it — one
 direction only. `INFISICAL_*` is the bootstrap set that has to stay in `.env`
 (the address, workspace id, environment and service token that get you in);
 everything else is rendered from the store, never hand-edited:
@@ -83,7 +88,7 @@ See [compose.infisical.yml](../compose.infisical.yml) and
 
 ## Golden rules
 
-- **Authentik = Identity** · **Infisical = Secrets** · **Cerulean = Trust** ·
+- **Authentik = Identity** · **Cerulean Vault = Secrets** · **Cerulean = Trust** ·
   **ONYX = Storage** · **Magnate = Revenue** · **NPM Edge = Edge** — everything else is a business function.
 - No platform duplicates another's responsibility.
 - No credit in commits, footers, or headers to anyone but the project owner.
