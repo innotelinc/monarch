@@ -8,6 +8,10 @@
 # a copy of .env is still a copy of the secrets, and must never be committed.
 .env.bak
 *.env.bak
+# Env snapshots (pre-migration backups, .env.bak-<ts>, …) — these hold live
+# credentials. Never tracked: one leaked here (see the 2026-09-15 cleanup).
+.env.pre-*
+.env.*.bak
 
 # Live USB / release build output
 .live-build/
