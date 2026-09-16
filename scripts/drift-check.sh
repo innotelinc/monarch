@@ -486,6 +486,33 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
+# Is the database Homarr has open the one on disk?
+# ───────────────────────────────────────────────────────────────────────────
+# SQLite is opened by inode. Replace db.sqlite under a *running* container - a
+# migration, a restore - and the copy unlinks the file the server is using, so
+# the server keeps reading a deleted inode while the real data sits on disk
+# untouched. The symptom is not an error: Homarr looks freshly installed and
+# redirects every route to the /init wizard, which on this SSO-only deployment
+# cannot be completed at all (there is no username/password form) - the
+# instance is simply unenterable. Measured on `.56` after the move: the DB on
+# disk held the user, the board and its 44 items while `ls -l /proc/*/fd` in the
+# container showed `/appdata/db/db.sqlite (deleted)`. `docker restart homarr` is
+# the fix; this check is what turns it into a reported drift instead of an
+# unexplained sign-in failure.
+if ! docker inspect homarr >/dev/null 2>&1; then
+  say "ok: Homarr database file (skipped - no homarr container)"
+elif [ "$(docker inspect -f '{{.State.Running}}' homarr 2>/dev/null)" != "true" ]; then
+  say "ok: Homarr database file (skipped - homarr not running)"
+else
+  homarr_deleted=$(docker exec homarr sh -c 'ls -l /proc/[0-9]*/fd 2>/dev/null | grep "db.sqlite (deleted)" | wc -l' 2>/dev/null || printf '0')
+  case "$homarr_deleted" in
+    ''|*[!0-9]*) say "ok: Homarr database file (not readable from this host)" ;;
+    0) say "ok: the database Homarr has open is the file on disk" ;;
+    *) fail "homarr: the running container still holds a DELETED db.sqlite open ($homarr_deleted handle(s)) - it is reading the file that was replaced under it, so it behaves like a fresh install: every route redirects to the /init wizard, which an SSO-only deployment cannot complete. Restart it: docker restart homarr" ;;
+  esac
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # Cerulean Vault (SecretOps): does .env hold materialized values?
 # ───────────────────────────────────────────────────────────────────────────
 # Read-only. Cerulean Vault is the source of truth for secrets, and this stack

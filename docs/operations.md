@@ -542,6 +542,20 @@ a key problem from the outside:
   tiles just stop working. If `.env` and the running container ever disagree,
   put `.env` back to the **container's** value — that is the one the ciphertext
   was made with — do not generate a new one.
+- **Restart `homarr` after replacing `db.sqlite`.** SQLite is opened by
+  inode, not by path: copy a DB in under a *running* container and the process
+  keeps the old file, which the copy just unlinked. Restore a database this way
+  — a migration, a backup — and Homarr carries on against the deleted inode,
+  which after a restart-free swap looks like a brand-new install: it answers
+  every route with a redirect to `/init`, the "Welcome to Homarr" wizard. On an
+  SSO-only deployment that wizard is a dead end (there is no username/password
+  form to finish it with), so the instance simply cannot be entered. Measured
+  after this stack's move to `.56`: the on-disk DB held the user, the board and
+  its 44 items, while `lsof` showed the server holding
+  `/appdata/db/db.sqlite (deleted)`. `docker restart homarr` reopens the file
+  on disk and the login page comes back with its **Login with Cerulean** button.
+  When a restore is the reason, stop `homarr` first and copy the file in while it
+  is down — the ordering hazard is the whole trap.
 
 `monarch-drift-check` asserts `.env` and the running container carry the same
 key, and `jellyfin-admin-password.py --check-apps` then proves the *decrypted*
