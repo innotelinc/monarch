@@ -209,13 +209,26 @@ class Client:
         opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self.jar), NoRedirect()
         )
-        try:
-            with opener.open(req, timeout=timeout) as resp:
-                return (resp.status, resp.headers.get("Location"),
-                        resp.read().decode("utf-8", "replace"))
-        except urllib.error.HTTPError as err:
-            return (err.code, err.headers.get("Location"),
-                    (err.read() or b"").decode("utf-8", "replace"))
+        # A read timeout is retried once before it is reported. This check walks
+        # nine apps through the IdP in quick succession, and the one thing that
+        # kept happening on a healthy deployment was a single stalled read —
+        # which, unhandled, surfaced as a traceback from inside urllib rather
+        # than as a result. A genuine outage fails the retry too, and then says
+        # so in the vocabulary of this file instead of `TimeoutError`.
+        for attempt in (1, 2):
+            try:
+                with opener.open(req, timeout=timeout) as resp:
+                    return (resp.status, resp.headers.get("Location"),
+                            resp.read().decode("utf-8", "replace"))
+            except urllib.error.HTTPError as err:
+                return (err.code, err.headers.get("Location"),
+                        (err.read() or b"").decode("utf-8", "replace"))
+            except (TimeoutError, socket.timeout) as err:
+                if attempt == 2:
+                    raise CheckFailed(
+                        f"no response from {req.full_url[:80]} within {timeout}s "
+                        f"(tried twice): {err}"
+                    ) from err
 
     def cookie(self, name):
         for c in self.jar:
