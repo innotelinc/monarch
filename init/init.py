@@ -333,7 +333,23 @@ def ak_grant_ldap_search(bind_user: dict, provider_pk: str) -> tuple:
                   "permissions": ["authentik_providers_ldap.search_full_directory"]})
         if status in (200, 201, 204):
             return True, ""
-        return False, f"per-user search grant failed (HTTP {status})"
+        if status != 404:
+            return False, f"per-user search grant failed (HTTP {status})"
+        # Authentik 2026.8 removed the assigned_by_users route but exposes the
+        # equivalent role membership API. Keep the permission object-scoped to
+        # this LDAP provider; the role is not granted any global permissions.
+        role = ak_ensure_role(LDAP_SEARCH_ROLE)
+        role_pk = role.get("pk")
+        if not role_pk or not ak_role_assign_permission(
+                role_pk, "authentik_providers_ldap.search_full_directory",
+                model="authentik_providers_ldap.ldapprovider", object_pk=provider_pk):
+            return False, "LDAP search permission role could not be assigned"
+        status, _, _ = ak_request(
+            "POST", f"/rbac/roles/{role_pk}/add_user/",
+            body={"pk": int(pk)})
+        if status in (200, 201, 204):
+            return True, ""
+        return False, f"LDAP search role membership failed (HTTP {status})"
     role = ak_ensure_role(LDAP_SEARCH_ROLE)
     role_pk = role.get("pk")
     ak_role_assign_permission(
