@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Monarch Media</title>
+  <desc id="desc">A modern, elegant Monarch Media title card in obsidian, ivory, and champagne gold.</desc>
+  <defs>
+    <linearGradient id="obsidian" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#08090b"/><stop offset=".52" stop-color="#111316"/><stop offset="1" stop-color="#070809"/></linearGradient>
+    <radialGradient id="light"><stop stop-color="#d8b56d" stop-opacity=".12"/><stop offset=".45" stop-color="#8e6b36" stop-opacity=".035"/><stop offset="1" stop-color="#08090b" stop-opacity="0"/></radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f2d99a"/><stop offset=".48" stop-color="#caa35d"/><stop offset="1" stop-color="#8e6b36"/></linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="26"/></filter>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#obsidian)"/>
+  <ellipse cx="960" cy="430" rx="570" ry="450" fill="url(#light)"/>
+  <g fill="none" stroke="#caa35d" opacity=".18">
+    <circle cx="960" cy="420" r="290" stroke-width="1"/><circle cx="960" cy="420" r="370" stroke-width="1"/>
+  </g>
+  <g stroke="#caa35d" opacity=".5" fill="none" stroke-width="1"><path d="M160 124H540"/><path d="M1380 124H1760"/><path d="M160 956H540"/><path d="M1380 956H1760"/></g>
+  <g fill="#d8b56d"><circle cx="560" cy="124" r="3"/><circle cx="1360" cy="124" r="3"/><circle cx="560" cy="956" r="3"/><circle cx="1360" cy="956" r="3"/></g>
+  <g transform="translate(960 365)">
+    <circle r="190" fill="#d8b56d" opacity=".07" filter="url(#glow)"/>
+    <circle r="142" fill="none" stroke="url(#gold)" stroke-width="2" opacity=".9"/>
+    <circle r="129" fill="none" stroke="#caa35d" stroke-width="1" opacity=".3"/>
+    <path d="M-12 92V-67M12 92V-67" stroke="#f2d99a" stroke-width="7" stroke-linecap="round"/>
+    <path d="M-8-58C-56-114-87-122-110-99C-136-74-108-28-19 14M8-58C56-114 87-122 110-99C136-74 108-28 19 14" fill="none" stroke="url(#gold)" stroke-width="9" stroke-linecap="round"/>
+    <path d="M-18 15C-89 65-111 93-83 106C-52 121-24 87-7 42M18 15C89 65 111 93 83 106C52 121 24 87 7 42" fill="none" stroke="#caa35d" stroke-width="8" stroke-linecap="round"/>
+    <path d="M-6-75C-28-111-39-126-59-139M6-75C28-111 39-126 59-139" fill="none" stroke="#f2d99a" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="-61" cy="-141" r="4" fill="#f2d99a"/><circle cx="61" cy="-141" r="4" fill="#f2d99a"/>
+  </g>
+  <text x="960" y="690" text-anchor="middle" fill="#f5f0e4" font-family="Georgia,Times New Roman,serif" font-size="108" font-weight="400" letter-spacing="25">MONARCH</text>
+  <text x="960" y="765" text-anchor="middle" fill="#d8b56d" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="22" font-weight="600" letter-spacing="12">MEDIA PLATFORM</text>
+  <path d="M780 816H1140" stroke="url(#gold)" stroke-width="1"/>
+  <text x="960" y="872" text-anchor="middle" fill="#aaa69d" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" font-weight="400" letter-spacing="6">YOUR LIBRARY · BEAUTIFULLY ORGANIZED</text>
+</svg>

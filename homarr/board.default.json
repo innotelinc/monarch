@@ -724,11 +724,11 @@
       "logoImageUrl": "/imgs/logo/logo.png",
       "faviconUrl": "/imgs/favicon/favicon-squared.png",
       "backgroundImageUrl": "",
-      "customCss": "",
+      "customCss": ".mantine-AppShell-main{background:radial-gradient(900px 500px at 70% 0%,rgba(202,163,93,.10),transparent 70%),#08090b!important}.mantine-AppShell-navbar,.mantine-AppShell-header{background:#101214!important;border-color:#2b2d30!important}.mantine-Button-root{--button-bg:#caa35d!important;color:#08090b!important}.mantine-Card-root,.mantine-Paper-root{background:#101214!important;border-color:#2b2d30!important}.mantine-Text-root{color:#f5f0e4}.mantine-Anchor-root{color:#d8b56d!important}",
       "colors": {
-        "primary": "indigo",
-        "secondary": "cyan",
-        "shade": 7
+        "primary": "yellow",
+        "secondary": "gray",
+        "shade": 9
       },
       "appOpacity": 100,
       "gridstack": {
