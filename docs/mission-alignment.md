@@ -80,10 +80,36 @@ The product brief lists `app`, `api`, `admin`, `stream` and `tv`. Monarch runs
    Administrator, Organization Owner, Platform Admin) map today onto two
    Authentik groups. "Done" means the group set exists in the shared Authentik
    provisioning and the gate's `AUTHENTIK_FORWARD_GROUP` can name them.
-7. **Observability.** No Prometheus/Grafana/Loki in this repo; `monarch-health`,
-   `drift-check` (6-hourly, self-healing) and the Telegram alerts are the
-   monitoring surface. Acceptable for the current scale — worth revisiting when
-   the stream count justifies it.
+7. **Observability.** Prometheus/Grafana/node-exporter now run on this host (the
+   shared `innotel-metrics` stack), but Monarch's own services emit no metrics;
+   `monarch-health`, `drift-check` (6-hourly, self-healing) and the Telegram
+   alerts are the application-level surface. Worth revisiting when the stream
+   count justifies it.
+
+## 4b. Closed since the last revision (17 September 2026)
+
+These were gaps; they are now done and verified live:
+
+- **Jellyfin signs in through Cerulean Authentik only.** The OIDC/RBAC plugin is
+  loaded and configured against the `monarch-media` provider (issuer mode
+  `per_provider`, group mapping `paid_users` → access, `jellyfin_admins` →
+  admins), branding starts the Cerulean flow automatically, and the local
+  provider audit passes with only the documented break-glass `admin` enabled
+  (`dhunter` disabled). The browser no longer sees a Jellyfin password form.
+- **The public door is one address.** `media.magnate.innotel.us` terminates at
+  the Cerulean edge and hands off to Authentik first — a true SSO flow rather
+  than an unprotected direct login.
+- **Live TV and qBittorrent complete their init.** The M3U tuner + XMLTV
+  provider are configured (previously a 503 during restart), and qBittorrent's
+  WebUI credentials survive a restart (persistent login verified, HTTP 204).
+- **Authentik per-user LDAP search grant** works on 2026.8: the role-based
+  `rbac/roles/{uuid}/add_user/` fallback replaced the removed per-user endpoint,
+  still scoped to `search_full_directory` on the LDAP provider only.
+- **Branding ships with the repo.** The obsidian/champagne splash (source SVG in
+  `assets/`, installed 1920×1080 PNG), coordinated light variant, monogram, the
+  restyled landing page and the Homarr board theme are all in-tree rather than
+  hand-applied.
+
 
 ## 5. Values
 
