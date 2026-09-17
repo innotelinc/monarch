@@ -127,6 +127,16 @@ LDAP_BASE_DN = os.environ.get("AUTHENTIK_LDAP_BASE_DN", "dc=innotel,dc=us")
 LDAP_OUTPOST_NAME = os.environ.get("AUTHENTIK_LDAP_OUTPOST", "jellyfin-ldap")
 LDAP_APP_SLUG = os.environ.get("AUTHENTIK_LDAP_APP_SLUG", "jellyfin-ldap")
 LDAP_OUTPOST_TOKEN = os.environ.get("AUTHENTIK_LDAP_TOKEN", "ak-ldap-outpost-2026")
+# The address a *browser* is sent to, which is not the one this script talks to:
+# `AUTHENTIK_BASE_URL` is the LAN address of the Cerulean Authentik, so a
+# password-reset link built from it answers nothing for the person clicking it.
+# `MONARCH_SSO_AUTHENTIK_BASE` is the published name the SSO gateways already
+# send users to.
+LDAP_PUBLIC_URL = (
+    os.environ.get("MONARCH_SSO_AUTHENTIK_BASE")
+    or os.environ.get("AUTHENTIK_PUBLIC_URL")
+    or AUTHENTIK_BASE_URL
+).strip().rstrip("/")
 LDAP_SEARCH_ROLE = "jellyfin-ldap-search"
 # The LDAP provider's bind flow is executed ANONYMOUSLY by the outpost (the
 # outpost answers its identification/password stages with the bind DN+
@@ -878,6 +888,16 @@ def install_ldap_plugin_via_release(token) -> bool:
         return False
 
 
+def ldap_plugin_config_path() -> str:
+    """Where the LDAP-Auth plugin reads its config from.
+
+    Plugin configs live in {data}/plugins/configurations/ (same as the bundled
+    TMDb/MusicBrainz configs), named after the assembly.
+    """
+    return os.path.join(APPDATA, "jellyfin", "data", "plugins", "configurations",
+                        f"{LDAP_PLUGIN_NAME}.xml")
+
+
 def write_ldap_plugin_config() -> tuple[str, str]:
     """Write the LDAP-Auth plugin config file. Returns (path, xml)."""
     bind_dn = f"cn={LDAP_BIND_USER},ou=users,{LDAP_BASE_DN}"
@@ -913,13 +933,10 @@ def write_ldap_plugin_config() -> tuple[str, str]:
   <LdapProfileImageFormat>Default</LdapProfileImageFormat>
   <EnableAllFolders>true</EnableAllFolders>
   <EnabledFolders />
-  <PasswordResetUrl>http://localhost:9000/if/user/</PasswordResetUrl>
+  <PasswordResetUrl>{LDAP_PUBLIC_URL}/if/user/</PasswordResetUrl>
 </PluginConfiguration>
 """
-    # Plugin configs live in {data}/plugins/configurations/ (same as the
-    # bundled TMDb/MusicBrainz configs), named after the assembly.
-    path = os.path.join(APPDATA, "jellyfin", "data", "plugins", "configurations",
-                        f"{LDAP_PLUGIN_NAME}.xml")
+    path = ldap_plugin_config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(xml)
@@ -928,14 +945,6 @@ def write_ldap_plugin_config() -> tuple[str, str]:
     except Exception:
         pass
     return path, xml
-
-
-def _config_unchanged(path: str, xml: str) -> bool:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return fh.read() == xml
-    except OSError:
-        return False
 
 
 @arrived("jellyfin ldap wiring")
@@ -960,10 +969,22 @@ def configure_jellyfin_ldap():
         _issues.append("jellyfin-ldap: AUTHENTIK_LDAP_BIND_TOKEN is not set in docker-compose.yml")
         return False
 
+    # Read BEFORE writing. This used to write first and compare afterwards, and a
+    # file always equals what was just written to it — so `needs_restart` was never
+    # true and a rotated bind token sat on disk while Jellyfin kept serving the old
+    # one out of memory. That is the whole failure this ordering avoids: the plugin
+    # re-reads its config only on a restart.
+    path = ldap_plugin_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            previous = fh.read()
+    except OSError:
+        previous = None
+
     path, xml = write_ldap_plugin_config()
     _log(f"LDAP-Auth plugin config written -> {path}")
 
-    needs_restart = not _config_unchanged(path, xml)
+    needs_restart = previous != xml
     if not jellyfin_plugin_installed(token):
         _log("Installing the LDAP-Auth plugin (catalog, then GitHub release)...")
         ok = install_ldap_plugin_via_catalog(token)

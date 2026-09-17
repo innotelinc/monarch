@@ -106,8 +106,16 @@ services:
     ports:
       # Host 8097 → container 8096: 8096 on this host belongs to the capstone
       # Control Center (dashboard), so Jellyfin shifts to the next free port.
-      # NPM edge: media.magnate.innotel.us → <host>:8097
-      - 8097:8096
+      #
+      # LOOPBACK ONLY. This was `- 8097:8096`, and the edge forwarded both
+      # media.innotel.us and media.magnate.innotel.us straight to it — the one
+      # public name on this host with no Cerulean gate in front of it. Jellyfin
+      # has a login of its own (against the Authentik LDAP directory), which is
+      # not the same thing as the platform's single sign-on, and it was the
+      # reason a browser could reach a Jellyfin login form without ever passing
+      # Authentik. The gateway below is the door now, and it reaches the app by
+      # name over the compose network.
+      - 127.0.0.1:8097:8096
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/jellyfin:/config
@@ -356,12 +364,18 @@ services:
   ###############################################
   # REQUESTRR - Discord Bot
   ###############################################
+  # LOOPBACK ONLY, and it is the last port on this host that was not. The
+  # Discord bot itself is outbound-only, so nothing here breaks by closing the
+  # LAN: it is the *config UI* on :4545 that was reachable with its own login,
+  # which is the posture every other app on this host gave up (see
+  # ips/docs/sign-in-posture.md §5 — this is the second of its two options,
+  # taken by way of requestrr-sso below rather than instead of it).
   requestrr:
     <<: *common-keys
     container_name: requestrr
     image: thomst08/requestrr:latest
     ports:
-      - 4545:4545
+      - 127.0.0.1:4545:4545
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/requestrr:/root/config
@@ -458,8 +472,10 @@ services:
     container_name: iptv
     image: ghcr.io/iptv-org/epg:master
     ports:
-      # Host 3011 (container 3000): :3001 is the Zeus portal.
-      - 3011:3000
+      # Host 3011 (container 3000): :3001 is the Zeus portal. Loopback only, for
+      # the reason on Jellyfin above: the public name is the SSO gateway's, and
+      # nothing on the LAN needs a second door to a guide file.
+      - 127.0.0.1:3011:3000
     environment:
       # Re-grab the guide twice a day; 8 parallel requests speeds it up.
       CRON_SCHEDULE: "0 0,12 * * *"
@@ -483,7 +499,9 @@ services:
     image: ghcr.io/innotelinc/monarch-clipbucket:latest
     build: ./clipbucket
     ports:
-      - ${CLIPBUCKET_PORT:-8098}:80
+      # Loopback only: tube.innotel.us is fronted by clipbucket-sso, which
+      # reaches the app by name over the compose network.
+      - 127.0.0.1:${CLIPBUCKET_PORT:-8098}:80
     environment:
       PUID: 1000
       PGID: 1000
@@ -804,6 +822,80 @@ services:
       OAUTH2_PROXY_UPSTREAMS: http://jellyseerr:5055
     ports:
       - "${JELLYSEERR_SSO_PORT:-14009}:4180"
+
+  ###############################################
+  # The three names that were still wide open
+  ###############################################
+  # Same gate as the nine above, added 17 Sep 2026 for the services that had a
+  # public name and no relying party in front of it: Jellyfin (media.innotel.us
+  # and media.magnate.innotel.us), Clipbucket (tube.innotel.us) and the IPTV
+  # guide (tv.monarch.innotel.us). Each app is bound to loopback in this file, so
+  # its gateway is not one door among two — it is the only one.
+  #
+  # Jellyfin still asks for its own sign-in afterwards, against the Authentik
+  # LDAP directory; that is Jellyfin's user model, not a second platform login.
+  jellyfin-sso:
+    <<: *sso-gateway
+    container_name: jellyfin-sso
+    environment:
+      <<: *sso-env
+      # ── The one exception to "the gateway is the only door" ────────────────
+      # Auth is skipped for every path that is NOT the web UI. The API surface
+      # (`/Users/…`, `/Items`, `/socket`, `/emby/…`) is reached by native TV and
+      # mobile clients, which speak the Jellyfin API rather than open a sign-in
+      # page — and Jellyfin authenticates that surface itself, with the token
+      # such a client obtained by signing in once against the LDAP directory
+      # (Cerulean identities). The page paths keep demanding an Authentik
+      # session, so a browser still passes the platform's sign-in before the
+      # form appears.
+      #
+      # Measured against this image and this rule rather than assumed: /Users/…,
+      # /Items, /socket and /emby/System/Info/Public answer 200 (passed through)
+      # while /, /web/ and /web/index.html answer 403 with no session. The
+      # negative match is what makes it one line — oauth2-proxy documents `!=`
+      # as "skip when the path does NOT match", so this is the API in, the page
+      # gated, and nothing else.
+      OAUTH2_PROXY_SKIP_AUTH_ROUTES: "!=^/(web(/.*)?)?$"
+      OAUTH2_PROXY_UPSTREAMS: http://jellyfin:8096
+    ports:
+      - "${JELLYFIN_SSO_PORT:-14010}:4180"
+
+  clipbucket-sso:
+    <<: *sso-gateway
+    container_name: clipbucket-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://clipbucket:80
+    ports:
+      - "${CLIPBUCKET_SSO_PORT:-14011}:4180"
+
+  iptv-sso:
+    <<: *sso-gateway
+    container_name: iptv-sso
+    environment:
+      <<: *sso-env
+      # guide.xml is fetched by machines as often as by people: the consumers
+      # on this compose network address `http://iptv:3000` directly and are
+      # unaffected, which is what makes gating the public name safe.
+      OAUTH2_PROXY_UPSTREAMS: http://iptv:3000
+    ports:
+      - "${IPTV_SSO_PORT:-14012}:4180"
+
+  # The Discord bot's admin console, and the last app here without a gate. Its
+  # name is inside MONARCH_DOMAIN, so unlike the three above it is a normal
+  # `npm-hosts.conf` row (requestrr -> 14013) rather than an edge change.
+  requestrr-sso:
+    <<: *sso-gateway
+    container_name: requestrr-sso
+    environment:
+      <<: *sso-env
+      # Upstream is the app by name over the compose network, which is why the
+      # loopback publish above closes nothing the gateway needs. There is no
+      # skip-auth route: the bot talks to Discord, not to this port, so no
+      # machine consumer of :4545 exists to preserve.
+      OAUTH2_PROXY_UPSTREAMS: http://requestrr:4545
+    ports:
+      - "${REQUESTRR_SSO_PORT:-14013}:4180"
 
 volumes:
   clipbucket_db:

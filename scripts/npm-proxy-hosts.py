@@ -36,7 +36,9 @@ Configuration comes from environment variables or the repo's .env file:
 
 Flags:  --dry-run    print the plan without touching NPM
         --skip-ssl   skip certificate creation (hosts without a cert)
-        --hosts-only manage proxy hosts only (no certificate work)
+        --hosts-only manage proxy hosts only (no certificate work). Existing
+                     hosts keep the certificate they already have; a host with
+                     none is written without one (or pass NPM_CERT_ID)
         --check      read-only: fail when a live proxy host differs from
                      npm-hosts.conf, including a host in THIS domain that the
                      conf no longer lists (retired)
@@ -432,7 +434,22 @@ class NpmClient:
 
     def upsert_proxy_host(self, token, host_id, domain, forward_host, forward_port,
                           certificate_id, websockets, dry_run=False,
-                          host_fields=None, advanced_config="client_max_body_size 0;"):
+                          host_fields=None, advanced_config="client_max_body_size 0;",
+                          existing=None):
+        """Create or update one proxy host.
+
+        `certificate_id` of 0 means "this run resolved no certificate", and it is
+        **not** the same as "this host has no certificate". NPM treats the field
+        as a value, not as "leave it alone" — so on an update the existing
+        host's certificate is carried over instead, and only a host that never
+        had one is written without TLS. That distinction cost the zone its
+        certificates once: a `--hosts-only` run (which does no certificate work
+        by design) wrote `certificate_id: 0, ssl_forced: false` on every host it
+        touched, including the dashboard and the auth host, and the next browser
+        to arrive got NPM's default untrusted certificate.
+        """
+        if host_id and not certificate_id and existing:
+            certificate_id = existing.get("certificate_id") or 0
         host_fields = host_fields or {"websockets": "websockets_support",
                                       "caching": "caching"}
         body = {
@@ -852,6 +869,14 @@ def main():
             # nginx auth_request.
             if "outpost.goauthentik.io" in (existing.get("advanced_config") or ""):
                 problems.append("advanced_config still carries a forward-auth gate")
+            # No certificate on a public host is drift. This is what makes a
+            # `--hosts-only` run that wrote `certificate_id: 0` fail here rather
+            # than silently downgrade every name in the zone to NPM's default
+            # untrusted certificate. A zone that genuinely runs without certs
+            # (`--skip-ssl`) is checking with `--skip-ssl` too, which is what
+            # suppresses this line.
+            if not args.skip_ssl and not existing.get("certificate_id"):
+                problems.append("serves no TLS certificate (certificate_id=0)")
             if problems:
                 print(f"  DRIFT: {domain_name} -> " + "; ".join(problems))
                 drifted += 1
@@ -898,7 +923,8 @@ def main():
             host["port"], cert_id or None,
             host["websockets"], dry_run=args.dry_run,
             host_fields=host_fields,
-            advanced_config="client_max_body_size 0;")
+            advanced_config="client_max_body_size 0;",
+            existing=existing)
         # Keep DNS in sync: write the A record for the subdomain when the
         # forward target is an IP and a DNS mechanism is configured.
         if is_ip_address(forward_host):

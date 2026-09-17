@@ -67,6 +67,111 @@ jobs:
           PY
           python3 -m py_compile scripts/magnate-entitlements.py
 
+  scripts:
+    name: Script checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The script unit tests cover the sign-in posture this repo enforces on
+      # apps that have a login of their own: `seerr-login-methods.py` turns
+      # Seerr's email-and-password sign-in off so the Cerulean-backed Jellyfin
+      # account is the only one, and the tests assert it sends one field (the
+      # API merges a partial body) and fails while the setting is still on.
+      # `jellyfin-login-methods.py` is the same posture one level down — every
+      # account Jellyfin holds in its own database is a second password outside
+      # Authentik — and its tests pin the two things that would be wrong
+      # quietly: that the policy endpoint *replaces* rather than merges (so the
+      # whole policy travels back), and that a build which does not report
+      # AuthenticationProviderId exits 2 instead of passing.
+      - name: Script unit tests
+        run: python3 -m unittest discover -s scripts/tests -t scripts/tests -v
+
+      - name: Python syntax
+        run: python3 -m py_compile scripts/*.py scripts/tests/*.py
+
+  # The sign-in posture is only worth having if the pieces that enforce it stay
+  # wired to each other. The unit tests above cover what the checker *does*;
+  # this covers that it is still called, still documented, and still fed the
+  # same account and the same bind credentials. None of it needs a live
+  # Jellyfin, so drift shows up here rather than on the host.
+  posture:
+    name: Sign-in posture wiring
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The live half lives in drift-check.sh. If that call is dropped the
+      # checker keeps passing in CI while never running against the deployment
+      # it exists for.
+      - name: drift-check still enforces the Jellyfin posture
+        run: |
+          set -euo pipefail
+          f=scripts/drift-check.sh
+          grep -q 'jellyfin-login-methods.py --check' "$f" \
+            || { echo "::error::$f no longer runs the Jellyfin login-methods check"; exit 1; }
+          grep -q 'jellyfin-login-methods.py --apply' "$f" \
+            || { echo "::error::$f does not say how to remediate a local account"; exit 1; }
+          echo "posture: drift-check wired"
+
+      # LDAP is what makes every Jellyfin account Authentik's rather than
+      # Jellyfin's own. If the template stops carrying the bind token — or a
+      # hardcoded one creeps back in — the plugin's binds fail and Jellyfin
+      # silently falls back to its own passwords, which is the exact drift
+      # `jellyfin-login-methods.py` reports one level down.
+      - name: The LDAP plugin config is written from the deployed bind token
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+
+          source = pathlib.Path("init/init.py").read_text(encoding="utf-8")
+          assert 'LDAP_BIND_TOKEN = os.environ.get("AUTHENTIK_LDAP_BIND_TOKEN"' in source, \
+              "init.py no longer reads AUTHENTIK_LDAP_BIND_TOKEN"
+          assert "<LdapBindPassword>{LDAP_BIND_TOKEN}</LdapBindPassword>" in source, \
+              "the plugin template no longer writes the deployed bind token"
+          assert "<LdapServer>{LDAP_SERVER}</LdapServer>" in source, \
+              "the plugin template no longer writes the configured LDAP server"
+          print("posture: plugin config is templated from the deployment")
+          PY
+
+      # One account is allowed to sign in outside Authentik, and two scripts
+      # have to agree on which. Divergence is not loud: the checker calls the
+      # real admin a stray, and `--apply` then tries to disable the account the
+      # deployment depends on.
+      - name: Both scripts name the same break-glass account
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+
+          def default_user(path):
+              source = pathlib.Path(path).read_text(encoding="utf-8")
+              marker = 'JELLYFIN_ADMIN_USER", "'
+              at = source.find(marker)
+              assert at != -1, f"{path} no longer defaults JELLYFIN_ADMIN_USER"
+              return source[at + len(marker):].split('"', 1)[0]
+
+          checker = default_user("scripts/jellyfin-login-methods.py")
+          setter = default_user("scripts/jellyfin-admin-password.py")
+          assert checker == setter, (
+              f"break-glass account disagrees: jellyfin-login-methods.py says "
+              f"{checker!r}, jellyfin-admin-password.py says {setter!r}"
+          )
+          print(f"posture: both scripts keep {checker!r}")
+          PY
+
+      # A posture nobody documents is a posture that gets deleted by the next
+      # person tidying the README.
+      - name: The posture is documented
+        run: |
+          set -euo pipefail
+          grep -q 'jellyfin-login-methods.py' README.md \
+            || { echo "::error::README no longer documents the Jellyfin posture"; exit 1; }
+          grep -q 'jellyfin-login-methods.py' docs/operations.md \
+            || { echo "::error::docs/operations.md no longer documents the Jellyfin posture"; exit 1; }
+          echo "posture: documented"
+
   landing:
     name: Landing page sanity
     runs-on: ubuntu-latest

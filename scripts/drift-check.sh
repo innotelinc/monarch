@@ -461,6 +461,46 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
+# The apps' own sign-in methods
+# ───────────────────────────────────────────────────────────────────────────
+# The gateways prove a Cerulean session for the *name*; they say nothing about
+# the credential form behind it. Two of these apps keep a second, local store of
+# credentials, and each is a way in that no gateway covers: Seerr's
+# email-and-password sign-in, and any Jellyfin account its own database owns
+# instead of the LDAP outpost. That is why a user disabled in Authentik could
+# still sign in to them.
+#
+# Neither is configuration in this repo, so nothing else can see it drift back:
+# Seerr re-enables local sign-in on a settings import, and Jellyfin's first-run
+# wizard or an administrator in its UI creates a local account. Both scripts are
+# read-only here — `--apply` is the operator's move (docs/operations.md).
+#
+# Exit 2 is "cannot judge" in both, and it is reported as a skip rather than a
+# pass: a key that could not be read, or a build that does not say which provider
+# owns an account, is not evidence that the posture holds.
+seerr_login_out=$(python3 scripts/seerr-login-methods.py --check 2>&1)
+seerr_login_code=$?
+if [ "$seerr_login_code" -eq 0 ]; then
+  say "ok: Seerr's only sign-in is the Cerulean (Jellyfin) account"
+elif [ "$seerr_login_code" -eq 2 ]; then
+  say "note: Seerr's sign-in methods could not be read (skipped) - $(printf '%s' "$seerr_login_out" | tail -1)"
+else
+  fail "jellyseerr: local (email + password) sign-in is enabled - run scripts/seerr-login-methods.py --apply"
+  printf '%s\n' "$seerr_login_out" | indent >&2
+fi
+
+jellyfin_login_out=$(python3 scripts/jellyfin-login-methods.py --check 2>&1)
+jellyfin_login_code=$?
+if [ "$jellyfin_login_code" -eq 0 ]; then
+  say "ok: Jellyfin's only local account is the break-glass admin"
+elif [ "$jellyfin_login_code" -eq 2 ]; then
+  say "note: Jellyfin's local accounts could not be judged (skipped) - $(printf '%s' "$jellyfin_login_out" | tail -1)"
+else
+  fail "jellyfin: a local account can sign in outside Authentik - run scripts/jellyfin-login-methods.py --apply"
+  printf '%s\n' "$jellyfin_login_out" | indent >&2
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # Homarr's integration-secret encryption key
 # ───────────────────────────────────────────────────────────────────────────
 # Homarr encrypts every stored integration secret - including the Jellyfin API

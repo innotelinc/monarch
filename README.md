@@ -125,6 +125,22 @@ Authentik bootstrap admin…). Subscriber access flows through **Magnate** billi
 checkout → `paid_users` group → LDAP bind succeeds → Jellyfin login works; cancel → user
 inactive → login blocked.
 
+Every public name is fronted by a Cerulean (Authentik) gateway, and two of those apps keep
+a second store of credentials of their own — so gating the name is not the whole job. Each
+is checked by a script, because neither is configuration in this repo and either can be
+re-enabled by an app-side action (a settings import, Jellyfin's first-run wizard, an admin
+in its UI):
+
+| App | What it would otherwise keep | Command |
+|---|---|---|
+| Jellyseerr | `localLogin` — an email-and-password store Seerr owns | `scripts/seerr-login-methods.py --check` / `--apply` |
+| Jellyfin | accounts in Jellyfin's own database rather than the LDAP outpost | `scripts/jellyfin-login-methods.py --check` / `--apply` |
+
+With both clean, the *only* credential that opens Seerr is the Cerulean-backed Jellyfin
+account, and the only local Jellyfin account is the break-glass `admin` that
+`jellyfin-admin-password.py` keeps in step with `.env`. `drift-check` runs both as checks
+(it reports them as drift, and as a skip when they cannot be read — never as a pass).
+
 ## 🖥️ Platforms
 
 The Docker stack runs on **linux/amd64** and **linux/arm64** hosts — every

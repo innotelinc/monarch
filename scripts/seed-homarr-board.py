@@ -57,6 +57,11 @@ APPS = [
     ("qBittorrent", "https://qbittorrent.monarch.innotel.us", "qbittorrent", "qBittorrent - torrent client"),
     ("SABnzbd", "https://sabnzbd.monarch.innotel.us", "sabnzbd", "SABnzbd - usenet client"),
     ("Whisparr", "https://whisparr.monarch.innotel.us", "whisparr", "Whisparr - adult collection manager"),
+    #    Requestrr's console used to be a LAN tile to <host>:4545, which was
+    #    also the reason that port answered on the LAN at all. It has a gate and
+    #    a name now (requestrr-sso, 14013, this domain), so the tile is a name
+    #    like every other one here.
+    ("Requestrr", "https://requestrr.monarch.innotel.us", "discord", "Requestrr - Discord request bot (admin console)"),
     # -- Platform / stack services (added below the existing tiles) --
     ("Monarch", "https://monarch.innotel.us", "jellyfin", "Monarch - this dashboard (apex origin)"),
     ("Capstone", "https://dashboard.capstone.innotel.us", "openai", "Capstone - voice AI agent platform dashboard"),
@@ -75,10 +80,6 @@ APPS = [
     ("Atlas", "https://atlas.innotel.us", "gitea", "Atlas - DevOps / coding platform"),
     ("Oasis", "https://oasis.innotel.us", "mailcow", "Oasis - mail platform"),
     ("ZapIt", "https://zapit.innotel.us", "linkwarden", "ZapIt - short links"),
-    # -- LAN-only services: no NPM host exists, so the tile points at the
-    #    container's published port on this host instead of a name that does
-    #    not resolve.
-    ("Requestrr", "http://192.168.1.46:4545", "discord", "Requestrr - Discord request bot (LAN)"),
 ]
 
 # Tiles to REMOVE from the board (the app row is kept, so re-adding a tile is a

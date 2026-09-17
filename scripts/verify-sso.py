@@ -18,7 +18,8 @@ whole posture rests on two things holding at once, and both are asserted here:
   3. The app ports are not a second door. With their own logins switched off,
      `<host>:7878` would be an unauthenticated media manager, so every app UI
      must answer on loopback and refuse on the host's LAN address. The shared
-     session store is checked the same way.
+     session store is asserted at the address the gateways dial — it runs on the
+     edge host, not this one — and must still refuse an unauthenticated command.
 
 The temporary identities are deleted on the way out, including when a check
 fails. Nothing here is destructive: no container is started, stopped or edited.
@@ -32,6 +33,8 @@ Config (environment, falling back to this repo's .env):
     MONARCH_SSO_BASE            base domain (default MONARCH_DOMAIN,
                                 else monarch.innotel.us)
     LAN_IP                      the host's LAN address (default: auto-detected)
+    SSO_SESSION_REDIS_HOST      the shared session store's address (default the
+                                edge host, where the store runs)
 
 Exit codes: 0 = pass, 1 = a check failed, 2 = cannot run (unconfigured or the
 deployment is unreachable).
@@ -58,8 +61,17 @@ OUTSIDER_USER = "e2e-monarch-outsider"
 SESSION_COOKIE = "_innotel_sso"
 
 # Public names this zone owns, in the order it is worth checking them. Every one
-# is fronted by an oauth2-proxy gateway (radarr-sso … jellyseerr-sso) and every
+# is fronted by an oauth2-proxy gateway (radarr-sso … requestrr-sso) and every
 # gateway is a client of the same Authentik application.
+#
+# The last four are not `*.{base}` names — they are the estate's names for the
+# three apps that were reachable without a gate until 2026-09-16 (Jellyfin on
+# media.*, Clipbucket on tube.*) plus the Discord bot's console. They are here
+# because the gate is only real if the name forwards to it: a name whose edge
+# forward still points at the app's own port fails on the sign-in check, and one
+# whose callback is missing from the provider fails at the redirect. Both are
+# findings, not flakiness — and both were true when this list was written, which
+# is why the row is asserted rather than assumed.
 SUBDOMAINS = [
     ("radarr", "radarr.{base}"),
     ("sonarr", "sonarr.{base}"),
@@ -73,6 +85,11 @@ SUBDOMAINS = [
     # the apex domain, and this zone's alias for it.
     ("jellyseerr", "req.innotel.us"),
     ("jellyseerr (alias)", "req.{base}"),
+    ("requestrr", "requestrr.{base}"),
+    ("jellyfin", "media.innotel.us"),
+    ("jellyfin (magnate name)", "media.magnate.innotel.us"),
+    ("clipbucket", "tube.innotel.us"),
+    ("iptv", "tv.{base}"),
 ]
 
 # (label, port) — bound to 127.0.0.1 only. Every one of these apps is configured
@@ -89,13 +106,26 @@ LAN_ONLY_PORTS = [
     ("qbittorrent", 8080),
     ("sabnzbd", 8082),
     ("jellyseerr", 5055),
+    # Added with their gateways: these four answered on the LAN address until
+    # 2026-09-16 — Jellyfin with a login form of its own, Clipbucket likewise,
+    # the IPTV guide with no auth at all, and requestrr's console with its own
+    # password. Each is now 127.0.0.1 only, so an answer here is the hole this
+    # list exists to catch, whether or not the gateway in front is healthy.
+    ("jellyfin", 8097),
+    ("clipbucket", 8098),
+    ("iptv", 3011),
+    ("requestrr", 4545),
 ]
 
 # The shared oauth2-proxy session store (see the npm repo's compose.cerulean.yml)
-# is published on the docker0 gateway only: every bridge reaches that, the LAN
-# cannot.
+# runs on the *edge* host, not this one, so that one Authentik sign-in covers
+# every gateway on the platform. The media stack moved to a server of its own
+# and the store stayed behind: neither its loopback nor its docker0 gateway is
+# reachable across a host boundary, which is why it is published on that host's
+# LAN address and why a gateway pointed anywhere else exits on
+# "dial tcp 172.17.0.1:16380: connect: connection refused" rather than degrading.
 SESSION_STORE_PORT = 16380
-SESSION_STORE_HOST = "172.17.0.1"
+SESSION_STORE_HOST = "192.168.1.46"
 
 OK = "\033[32mPASS\033[0m"
 BAD = "\033[31mFAIL\033[0m"
@@ -171,7 +201,9 @@ class Config:
         self.token = pick("AUTHENTIK_BOOTSTRAP_TOKEN", "AUTHENTIK_API_TOKEN")
         self.group = pick("SSO_REQUIRED_GROUP", default="cerulean-platform")
         self.lan_ip = (args.host_ip or pick("LAN_IP") or detect_lan_ip())
-        self.session_store_host = pick("DOCKER_BRIDGE_GATEWAY", default=SESSION_STORE_HOST)
+        self.session_store_host = pick("SSO_SESSION_REDIS_HOST",
+                                      "DOCKER_BRIDGE_GATEWAY",
+                                      default=SESSION_STORE_HOST)
         self.password = "E2e-Sso-" + os.urandom(6).hex() + "!Aa1"
         self.verbose = args.verbose
         self.targets = [(label, host.format(base=self.base)) for label, host in SUBDOMAINS]
@@ -371,6 +403,22 @@ def port_state(ip, port, timeout=4.0):
         return False
 
 
+def redis_reply(ip, port, timeout=4.0):
+    """Send a bare PING to redis and return its reply, or None if it stays quiet.
+
+    The store is password-protected, so a healthy one answers
+    `-NOAUTH Authentication required.` — a plain `+PONG` would mean an open
+    session store that anything on the LAN could read other people's sessions
+    from.
+    """
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            sock.sendall(b"PING\r\n")
+            return sock.recv(256).decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+
+
 def sso_login(client, cfg, app, username, allow_idp_denial=False):
     """Drive a full authorization-code flow against one gateway, leaving the
     sealed session in the client's jar.
@@ -519,13 +567,20 @@ def main():
                   f"{label}: {cfg.lan_ip}:{port} refused on the LAN — its gateway is the only door")
             check(port_state("127.0.0.1", port), f"{label}: 127.0.0.1:{port} answers")
 
-        # ── 5. the shared session store is off the LAN too ─────────────────
-        print("[5] the shared SSO session store is off the LAN")
-        check(not port_state(cfg.lan_ip, SESSION_STORE_PORT),
-              f"session store: {cfg.lan_ip}:{SESSION_STORE_PORT} refused on the LAN")
+        # ── 5. the shared session store answers, and is still guarded ───────
+        # This used to assert the store was off the LAN and answering on the
+        # docker0 gateway. Neither survived the split: the store stayed on the
+        # edge host, so it is published on THAT host's LAN address for the
+        # stacks that moved away, and this host has no store of its own. What
+        # still has to hold is that every gateway can reach it and that
+        # reaching it is not the same as being let in.
+        print("[5] the shared SSO session store answers the gateways")
         check(port_state(cfg.session_store_host, SESSION_STORE_PORT),
               f"session store: {cfg.session_store_host}:{SESSION_STORE_PORT} answers "
               f"(the address every gateway dials)")
+        reply = redis_reply(cfg.session_store_host, SESSION_STORE_PORT)
+        check(reply is not None and "NOAUTH" in reply,
+              f"session store: unauthenticated PING -> {reply!r} (expected NOAUTH)")
 
         if failures:
             print(f"\n{BAD} — {failures} target(s) did not pass", file=sys.stderr)

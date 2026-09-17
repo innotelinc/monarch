@@ -402,8 +402,10 @@ ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,
 #### Cerulean SSO for the media apps
 
 The media management apps (**Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
-Prowlarr, qBittorrent, Sabnzbd**), the `req.` Jellyseerr alias and the **NPM
-admin UI** itself do not speak OIDC - they only ship a local username/password
+Prowlarr, qBittorrent, Sabnzbd**), the `req.` Jellyseerr alias, **Jellyfin**
+(`media.*` — its sign-in page, not its API), **Clipbucket** (`tube.innotel.us`),
+the **IPTV guide** (`tv.<domain>`) and the **requestrr console**, plus the **NPM
+admin UI** itself, do not speak OIDC - they only ship a local username/password
 form. "Sign in with Authentik" for them is an **oauth2-proxy SSO gateway**: it
 runs the browser through a real OIDC code flow against Cerulean Authentik and
 only then proxies the app. There is no nginx `auth_request` and no outpost
@@ -420,15 +422,94 @@ Because those apps trust the proxy for identity, the gateway has to be the *only
 path in. Each app's host port is therefore bound to `127.0.0.1`
 (`radarr` `7878`, `sonarr` `8989`, `lidarr` `8686`, `whisparr` `6969`, `bazarr`
 `6767`, `prowlarr` `9696`, `qbittorrent` `8080`, `sabnzbd` `8082`, `jellyseerr`
-`5055`): the LAN address answers nothing, and the gateway reaches the app over the
+`5055`, `jellyfin` `8097`, `clipbucket` `8098`, `iptv` `3011`, `requestrr`
+`4545`): the LAN address answers nothing, and the gateway reaches the app over the
 compose network by container name. qBittorrent's peer port (`6881`) is the one
 deliberate exception — it has to stay reachable.
+
+The four most recent additions were the apps that had a public name and no gate
+at all until 2026-09-16. One of them carries a deliberate exception worth knowing
+before reading a log:
+
+- **Jellyfin's API is passed through to native clients.** TV and mobile clients
+  speak `/Users/…`, `/Items`, `/socket` and `/emby/…` rather than opening a sign-in
+  page, and Jellyfin authenticates that surface itself against the LDAP directory.
+  So `jellyfin-sso` carries one `OAUTH2_PROXY_SKIP_AUTH_ROUTES` line
+  (`!=^/(web(/.*)?)?$`) that skips auth for every path that is *not* the web UI:
+  the page keeps demanding a Cerulean session, the API authenticates the client's
+  own token. Measured against that image before it was written in — `/Users/…`,
+  `/Items`, `/socket` and `/emby/System/Info/Public` answer 200 while `/`, `/web/`
+  and `/web/index.html` answer 403 without a session. Re-opening `8097` on the LAN
+  is not the fix if a client breaks; a skip-auth rule for that client is.
 
 `scripts/verify-sso.py` is the committed regression test for all of this: it
 creates a throwaway Authentik identity, drives a real OIDC flow through every
 gateway above, asserts the session opens the app, asserts an identity outside
 `SSO_REQUIRED_GROUP` is refused, and checks that each app port answers on
 loopback and refuses on the LAN. Exit codes: 0 pass, 1 fail, 2 cannot run.
+
+##### The four recent names, as deployed (2026-09-17)
+
+Each is now a gateway with an edge forward pointing *at the gateway*, verified by
+driving the name: `media.innotel.us`, `media.magnate.innotel.us`, `tube.innotel.us`
+and `tv.monarch.innotel.us` all answer `302` to
+`auth.cerulean.innotel.us/application/o/authorize/` with `client_id=monarch-media`,
+and the provider holds a redirect URI for every one of them plus
+`requestrr.monarch.innotel.us` (16 in total). Before the change the first three
+were `502` — the edge still forwarded to `.56:8097` / `.56:8098`, which are
+loopback-only now.
+
+**Two steps of that change are not this repo's to make, and both bit once:**
+
+- **The `media.*` and `tube.*` forwards live in the edge** (Magnate owns the
+  media names, the archive side the tube one). They are NPM proxy hosts, not
+  `npm-hosts.conf` rows, so `scripts/npm-proxy-hosts.py` cannot manage them — and
+  its `--prune` deliberately refuses to touch anything outside
+  `MONARCH_DOMAIN`. Changing them is an NPM API change (or the admin UI) on the
+  edge host; `tv.*` and `requestrr.*` *are* this zone's rows and are handled by
+  the script.
+- **A proxy host's TLS is part of its state, and the script used to drop it.**
+  `--hosts-only` does no certificate work, and the update body carried
+  `certificate_id: 0` — which NPM writes as a value rather than reading as "leave
+  it alone". One run therefore stripped the wildcard certificate (id 48) and
+  `ssl_forced` from all sixteen hosts in this domain, including the dashboard and
+  the auth host. It is fixed in two places: the script now carries an existing
+  host's certificate over when a run resolves none, and `--check` flags
+  `serves no TLS certificate (certificate_id=0)` as drift (suppressed by
+  `--skip-ssl`, which is what a genuinely cert-less zone checks with). If it ever
+  happens again, the pre-change values are in the 02:00 NPM backup
+  (`backups/npm-backup-<date>-020000.tar.gz`, table `proxy_host`).
+
+#### The apps' own sign-in methods
+
+The gateway proves a Cerulean session for the *name*. It says nothing about the
+credential form behind it, and two of these apps keep a store of their own — a
+way in that no gateway covers, and the reason a user disabled in Authentik could
+still sign in:
+
+| App | What it keeps | Check | Repair |
+|-----|---------------|-------|--------|
+| Jellyseerr | `main.localLogin` — "Enable Local Sign-In": email and password, in Seerr's own store | `python3 scripts/seerr-login-methods.py --check` | `--apply` |
+| Jellyfin | accounts in Jellyfin's own database rather than the LDAP outpost | `python3 scripts/jellyfin-login-methods.py --check` | `--apply` |
+
+Neither is configuration in this repo, which is why the two scripts exist rather
+than `.env` keys: Seerr re-enables local sign-in on a settings import, and
+Jellyfin's first-run wizard (or an administrator in its UI) creates a local
+account. `scripts/drift-check.sh` runs both as checks and fails on drift.
+
+What each one deliberately leaves alone:
+
+- **Seerr's Jellyfin sign-in stays on.** Turning it off too would leave a gateway
+  that authenticates nobody *into Seerr*: the proxy proves a session for the name,
+  but Seerr still needs its own, and the Jellyfin account is how a user gets one
+  without a second password. The password is what is removed, not the sign-in.
+- **Jellyfin's break-glass `admin`.** It is the one local account Monarch wants
+  (`jellyfin-admin-password.py` keeps its password in step with
+  `MONARCH_PASSWORD` and mints the durable API key the services use), so the check
+  passes when it is the only local account left and `--apply` never touches it.
+  Everything else local is *disabled* rather than deleted: the login is refused,
+  the watch history and the account id survive, and the account can be handed back
+  to the LDAP provider by enabling it again.
 
 Setup (the gateway deploys with the app on this host; this repo's script
 reconciles the proxy hosts and supports `--check`/`--dry-run`):
