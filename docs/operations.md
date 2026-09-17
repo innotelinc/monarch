@@ -952,3 +952,12 @@ not clash with qBittorrent on 8080), published from `SABNZBD_PORT` — the same
 variable `scripts/npm-hosts.conf` forwards to, so moving the port moves both.
 Use the TRASH-guide folder structure and
 
+
+
+### Nightly disk cleanup
+
+`scripts/docker-cleanup.sh` (mirrored from ips, canonical there) runs nightly at
+04:17 via `/etc/cron.d/docker-cleanup`: build cache (2 GB kept), dangling and
+unreferenced images, containers exited for more than a day, and container logs
+over 50 MB (trimmed to 10 MB). Volumes are never touched. Run it manually with
+`DRY_RUN=1 scripts/docker-cleanup.sh` to preview.
