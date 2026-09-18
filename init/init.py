@@ -44,10 +44,14 @@ Secrets/state written under /docker/appdata/init/:
 """
 
 import base64
+import fcntl
+import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
+import struct
 import sys
 import time
 import urllib.error
@@ -92,15 +96,31 @@ JELLYFIN_LIBRARIES = [
     {"name": "Other", "type": "mixed", "path": "/data/media/xxx"},
 ]
 
-# qBittorrent categories matching each *arr root folder (hardlinks-friendly
-# layout). Shared with configure_qbittorrent() AND emitted in the invariants
-# manifest so the drift check asserts the exact same categories.
-QBT_CATEGORIES = {
-    "movies": "/data/torrents/movies",
-    "tv": "/data/torrents/tv",
-    "music": "/data/torrents/music",
-    "xxx": "/data/torrents/xxx",
-}
+# qBittorrent categories, one per *arr: named by the category that app's
+# download client sends, saving INSIDE the downloads tree. Both halves matter,
+# and each one is a different failure when it is wrong:
+#
+#   * the NAME has to be the string the app sends (`tvCategory` in Sonarr and
+#     Whisparr, `movieCategory` in Radarr, `musicCategory` in Lidarr). A download
+#     tagged with a category qBittorrent does not know is saved to the DEFAULT
+#     path, so the name is what decides whether the per-category path is used;
+#   * the PATH has to sit outside every library root. A category pointing at
+#     /data/media/<type> is exactly what makes each app warn "Download client
+#     qBittorrent places downloads in the root folder /data/media/<type>", and it
+#     drops an unfinished album into the music library for Jellyfin to scan.
+#
+# Derived from MONARCH_APPS so the name an app is told and the name that exists
+# here cannot be two different strings. Shared with configure_qbittorrent(),
+# scripts/arr-download-categories.py and the invariants manifest, so the drift
+# check asserts the same map init applies.
+QBT_CATEGORIES = {app["category"]: f"/data/torrents/{app['media']}" for app in MONARCH_APPS}
+
+# How a Servarr app spells "the category this download client files under". There
+# is no plain `category` field in any of these schemas - that name matches
+# nothing, which is how every app went without one: the client was created from
+# the schema with `category` set, no field matched, and the value was dropped
+# silently while the client was reported as configured.
+CATEGORY_FIELDS = ("tvCategory", "movieCategory", "musicCategory", "category")
 
 # Every hostname the *arr apps answer to (init/arr-allowlist.txt, mounted at
 # /init). An *arr refuses any Host it was not told about with a bare 400 - so
@@ -1661,13 +1681,51 @@ def lidarr_root_folder_defaults(base, key):
     return extra
 
 
+def category_field(resource: dict):
+    """The field that holds this app's download-client category, or None.
+
+    The spelling is the app's own: Sonarr and Whisparr send `tvCategory`,
+    Radarr `movieCategory`, Lidarr `musicCategory`. Almost every Servarr
+    resource calls a value like this `category`, which is why the bug here was
+    invisible - a schema built with `category` set had no field by that name, so
+    the value was dropped and the client was still reported as configured.
+    """
+    fields = {f.get("name"): f for f in resource.get("fields") or []}
+    for name in CATEGORY_FIELDS:
+        if name in fields:
+            return fields[name]
+    return None
+
+
 def ensure_qbt_client(base, api, key, category):
-    """Add (or confirm) the qBittorrent download client via the schema."""
+    """Add the qBittorrent download client, or correct the one that exists.
+
+    A client that is present with the WRONG category is the failure this used to
+    miss. It returned "exists" on the implementation name alone, so a hand-set
+    category survived every run of monarch-init: the app then asks qBittorrent
+    for a category init never created, and either the download falls back to the
+    default save path or - when the hand-set name exists too, as a stray
+    `lidarr` -> /data/media/music did - it lands in the library root. That is the
+    health warning "Download client qBittorrent places downloads in the root
+    folder /data/media/music", and restarting init never cleared it.
+    """
     status, _, j = _http(base, f"/api/{api}/downloadclient", headers={"X-Api-Key": key})
-    if status == 200 and isinstance(j, list):
-        for client in j:
-            if client.get("implementation") == "QBittorrent":
-                return True, "exists"
+    clients = j if status == 200 and isinstance(j, list) else []
+    existing = [c for c in clients
+                if isinstance(c, dict) and c.get("implementation") == "QBittorrent"]
+    if existing:
+        client = existing[0]
+        field = category_field(client)
+        if field is None or field.get("value") == category:
+            return True, "exists"
+        previous = field.get("value")
+        field["value"] = category
+        # Servarr has no per-field endpoint: the whole resource travels back.
+        st, _, _ = _http(base, f"/api/{api}/downloadclient/{client['id']}", method="PUT",
+                         body=client, headers={"X-Api-Key": key})
+        if st in (200, 202):
+            return True, f"category {previous!r} -> {category!r}"
+        return False, f"could not correct the category (HTTP {st})"
 
     status, _, schema = _http(base, f"/api/{api}/downloadclient/schema",
                               headers={"X-Api-Key": key})
@@ -1687,13 +1745,16 @@ def ensure_qbt_client(base, api, key, category):
         "useSsl": False,
         "username": USER,
         "password": PASS,
-        "category": category,
         "urlBase": "",
     }
     for field in payload.get("fields", []):
         name = field.get("name")
         if name in values:
             field["value"] = values[name]
+    field = category_field(payload)
+    if field is None:
+        return False, "this build's QBittorrent schema has no category field"
+    field["value"] = category
     payload["name"] = "qBittorrent"
     payload["enable"] = True
     status, _, _ = _http(base, f"/api/{api}/downloadclient", method="POST",
@@ -1974,6 +2035,45 @@ def configure_prowlarr():
 # qBittorrent
 # ---------------------------------------------------------------------------
 
+def _interface_ipv4(name: str):
+    """(address, netmask) of one IPv4 interface — asked of the kernel, no tools."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        packed = struct.pack("256s", name[:15].encode())
+        # SIOCGIFADDR / SIOCGIFNETMASK; the IPv4 address sits at byte 20.
+        address = socket.inet_ntoa(fcntl.ioctl(sock.fileno(), 0x8915, packed)[20:24])
+        netmask = socket.inet_ntoa(fcntl.ioctl(sock.fileno(), 0x891b, packed)[20:24])
+    return address, netmask
+
+
+def network_shared_with(peer: str) -> str:
+    """The CIDR of the network that reaches `peer`, or '' if it cannot be told.
+
+    Used to tell qBittorrent which subnet to trust, so the SSO gateway's calls
+    arrive without a second login. Discovered rather than configured: Docker
+    allocates the subnet (`172.18.0.0/16` on the current host) and init already
+    resolves `peer` by name on that same network, so the answer is read off the
+    interface that contains the peer's address - a literal would silently stop
+    matching on the next host to build this stack.
+    """
+    try:
+        peer_ip = socket.gethostbyname(peer)
+    except OSError:
+        return ""
+    target = ipaddress.ip_address(peer_ip)
+    for _index, name in socket.if_nameindex():
+        try:
+            address, netmask = _interface_ipv4(name)
+        except OSError:
+            continue
+        try:
+            network = ipaddress.ip_network(f"{address}/{netmask}", strict=False)
+        except ValueError:
+            continue
+        if target in network:
+            return str(network)
+    return ""
+
+
 @arrived("qBittorrent setup")
 def configure_qbittorrent():
     _log("--- qBittorrent ---")
@@ -1996,32 +2096,69 @@ def configure_qbittorrent():
         _log("WARNING: qBittorrent login failed - categories NOT created.")
         return False
 
-    # Categories matching each *arr root folder (hardlinks-friendly layout).
-    categories = QBT_CATEGORIES
+    # ── Categories: create what is missing, correct what has drifted ────────
+    # Reconciled rather than create-only. A category is not "done" because the
+    # name exists: `lidarr` existed and pointed at /data/media/music, which is
+    # how the downloads-in-the-library-root warning survived every run. A name
+    # the manifest does not carry is pruned for the same reason - it is either a
+    # duplicate of one it does (`radarr` alongside `movies`) or a stray whose
+    # path sits inside a library, and either way the apps are told the
+    # manifest's names, so a stray can only mislead.
     status, _, existing = _http(QBT_BASE, "/api/v2/torrents/categories", opener=opener)
-    if status == 200 and isinstance(existing, dict):
-        have = set(existing.keys())
-    else:
-        have = set()
-    for cat, save_path in categories.items():
-        if cat in have:
+    live = existing if status == 200 and isinstance(existing, dict) else {}
+    for cat, save_path in QBT_CATEGORIES.items():
+        current = (live.get(cat) or {}).get("savePath")
+        if current == save_path:
             continue
+        if cat in live:
+            verb, path = "editCategory", f"'{cat}' {current!r} -> {save_path!r}"
+        else:
+            verb, path = "createCategory", f"'{cat}' -> {save_path!r}"
         # The WebUI API takes form-encoded params, not a JSON body.
-        st, _, _ = _http(QBT_BASE, "/api/v2/torrents/createCategory", method="POST",
+        st, _, _ = _http(QBT_BASE, f"/api/v2/torrents/{verb}", method="POST",
                          body={"category": cat, "savePath": save_path},
                          opener=opener, raw_form=True)
         if st in (200, 201):
-            _log(f"qBittorrent category '{cat}' -> {save_path}")
+            _log(f"qBittorrent category {path}")
         else:
-            _issues.append(f"qBittorrent: category '{cat}' could not be created (HTTP {st})")
+            _issues.append(f"qBittorrent: category '{cat}' could not be set (HTTP {st})")
+    strays = sorted(set(live) - set(QBT_CATEGORIES))
+    if strays:
+        st, _, _ = _http(QBT_BASE, "/api/v2/torrents/removeCategories", method="POST",
+                         body={"categories": "\n".join(strays)},
+                         opener=opener, raw_form=True)
+        if st in (200, 201, 204):
+            _log(f"qBittorrent categories removed (not in the manifest): "
+                 f"{', '.join(strays)}")
+        else:
+            _issues.append("qBittorrent: stray categories could not be removed "
+                           f"({', '.join(strays)}) - HTTP {st}")
 
     # Default save path + no temp dir so category paths are used as-is.
     # setPreferences takes its settings as a `json` form field.
     prefs = {"save_path": "/data/torrents", "temp_path_enabled": False}
+    # ── Cerulean SSO is the only door ───────────────────────────────────────
+    # qBittorrent keeps a password of its own (monarch-seed writes it, and
+    # drift-check logs in with it), so a user who reaches the WebUI through
+    # qbittorrent-sso still meets a SECOND login: the one the app asks for. The
+    # WebUI is published on loopback only and the gateway is the sole route to
+    # it, so the app can be told to trust the subnet the gateway calls from and
+    # never ask. The subnet is discovered, not configured: Docker picks it, and a
+    # literal here would stop matching on the next host to build the stack.
+    trust = network_shared_with("qbittorrent")
+    if trust:
+        prefs["bypass_auth_subnet_whitelist_enabled"] = True
+        prefs["bypass_auth_subnet_whitelist"] = trust
+    else:
+        _issues.append("qBittorrent: could not discover the subnet the SSO gateway "
+                       "shares with it, so the WebUI still asks for its own "
+                       "password behind Cerulean")
     st, _, _ = _http(QBT_BASE, "/api/v2/app/setPreferences", method="POST",
                      body={"json": json.dumps(prefs)}, opener=opener, raw_form=True)
     if st in (200, 204):
-        _log("qBittorrent default save path set to /data/torrents")
+        _log(f"qBittorrent default save path set to /data/torrents"
+             + (f", WebUI auth bypassed for {trust} (the SSO gateway's subnet)"
+                if trust else ""))
     else:
         _issues.append(f"qBittorrent: setPreferences failed (HTTP {st})")
 
@@ -2314,7 +2451,18 @@ def build_invariants() -> dict:
         "qbt": {
             "port": PORTS["qbt"],
             "categories": sorted(QBT_CATEGORIES.keys()),
+            # name -> save path, so the host side (scripts/arr-download-
+            # categories.py) reconciles the same map init just applied instead
+            # of carrying a second copy of it. A category whose NAME is right
+            # and whose PATH is a library root is the failure that went
+            # unnoticed - both halves have to be checkable.
+            "category_paths": QBT_CATEGORIES,
             "save_path": "/data/torrents",
+            # The WebUI's own password is never the door: qbittorrent-sso is, and
+            # the app trusts the subnet the gateway calls from. Asserted live by
+            # drift-check (a whitelist that got emptied puts the second login
+            # back in front of every user).
+            "sso_bypass": True,
         },
         "jellyfin": {
             "port": PORTS["jellyfin"],

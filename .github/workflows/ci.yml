@@ -133,6 +133,16 @@ jobs:
             || { echo "::error::$f no longer runs arr-allowed-hosts.py - a *arr left off the allowlist refuses Prowlarr with 400"; exit 1; }
           grep -q 'prowlarr-indexers.py --check --offline' "$f" \
             || { echo "::error::$f no longer runs prowlarr-indexers.py --check --offline - 'Prowlarr holds no indexers' goes unreported"; exit 1; }
+          # Filling Prowlarr does not fill the apps: only an application sync
+          # delivers an indexer, so Prowlarr can be full and every *arr empty
+          # with all four app tests green. Nothing else in the timer counts that.
+          grep -q 'arr-sync.py --check' "$f" \
+            || { echo "::error::$f no longer runs arr-sync.py --check - 'Prowlarr is full and the apps received nothing' goes unreported"; exit 1; }
+          # Where a download lands is two settings that fail silently: the
+          # category name each app sends and the path qBittorrent maps it to.
+          # The app only hints at a wrong path on its own Health page.
+          grep -q 'arr-download-categories.py --check' "$f" \
+            || { echo "::error::$f no longer runs arr-download-categories.py --check - 'downloads land in the library root' goes unreported"; exit 1; }
           # And the two readers of the shared list must both still read it.
           for reader in init/init.py scripts/arr-allowed-hosts.py; do
             grep -q 'arr-allowlist.txt' "$reader" \
@@ -245,6 +255,44 @@ jobs:
             grep -q "$checker" docs/operations.md \
               || { echo "::error::docs/operations.md no longer documents $checker"; exit 1; }
           done
+          # The *arr tools are three steps of one chain - the Host allowlist, the
+          # indexers in Prowlarr, and the sync that delivers them - and each one
+          # looks like "the previous one silently worked" when it is dropped.
+          for checker in arr-allowed-hosts.py prowlarr-indexers.py arr-sync.py \
+                         arr-download-categories.py; do
+            grep -q "$checker" docs/operations.md \
+              || { echo "::error::docs/operations.md no longer documents $checker"; exit 1; }
+          done
+
+      # The download client's category is spelled after the media type in every
+      # Servarr app (tvCategory/movieCategory/musicCategory) - there is no plain
+      # `category` field. The client used to be created with `category` set, so
+      # no field matched, no app was ever given one, and the value was dropped
+      # while the client was reported as configured. That is silent: the app just
+      # keeps whatever name it had, and qBittorrent falls back to the default
+      # save path. Pin both halves.
+      - name: init reconciles the download category under the app's own field name
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+
+          source = pathlib.Path("init/init.py").read_text(encoding="utf-8")
+          for spelling in ("tvCategory", "movieCategory", "musicCategory"):
+              assert spelling in source, \
+                  f"init.py no longer knows that Servarr spells the category {spelling}"
+          assert 'field = category_field(payload)' in source, \
+              "init.py no longer sets the category through the field the app has"
+          assert 'def category_field(' in source, \
+              "the field-name lookup is gone - a plain `category` matches nothing"
+          # The paths have to sit outside every library root, and the names have
+          # to be the ones MONARCH_APPS tells the apps, or the two drift apart.
+          assert 'QBT_CATEGORIES = {app["category"]: f"/data/torrents/{app[\'media\']}"' in source, \
+              "QBT_CATEGORIES no longer derives from MONARCH_APPS"
+          assert '"category_paths": QBT_CATEGORIES' in source, \
+              "the invariants manifest no longer carries the name -> path map"
+          print("posture: download categories are named by the apps and emitted with their paths")
+          PY
           # The page is published rather than gated, and that decision belongs
           # where the next operator looks before re-adding a gate.
           grep -q 'OAUTH2_PROXY_SKIP_AUTH_ROUTES' docker-compose.yml \

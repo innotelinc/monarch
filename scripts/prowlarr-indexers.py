@@ -18,6 +18,7 @@ is given up on.
 
 Usage:
     scripts/prowlarr-indexers.py --check         # do the ones already there work?
+    scripts/prowlarr-indexers.py --repair        # tag the blocked ones for the proxy
     scripts/prowlarr-indexers.py --dry-run       # what would be added
     scripts/prowlarr-indexers.py                 # add and verify
     scripts/prowlarr-indexers.py --privacy public,semiPrivate
@@ -163,6 +164,34 @@ def _reason(body: object) -> str:
     return str(body)[:200]
 
 
+def _definition_key(entry: dict) -> str:
+    """The definition's id — the thing Prowlarr enforces uniqueness on.
+
+    NOT the display name: for a Cardigann definition the two differ, because the
+    stored `definitionName` is the definition's id (`btdirectory`) while the
+    schema's `name` is the human label (`BTdirectory`). Comparing labels re-tries
+    every indexer already held, and Prowlarr answers each one "Should be unique"
+    — a request to every tracker in the list, and a report that calls a present
+    indexer a failed candidate while a genuinely new one slips through as
+    "already there".
+    """
+    return str(entry.get("definitionName") or entry.get("name")
+               or entry.get("implementation") or "")
+
+
+def parse_privacy(value: str) -> tuple[str, ...]:
+    """The privacy classes named on the command line, compared case-insensitively.
+
+    A definition reports `public`, `semiPrivate` or `private`, and it is
+    compared lowercased — so `--privacy public,semiPrivate`, the invocation this
+    script's own usage block and docs/operations.md both show, matched nothing
+    for the second class and ran the narrower set without saying so: sixty-four
+    definitions were never attempted. The case comes from the command line, so
+    it is normalised here.
+    """
+    return tuple(part.strip().lower() for part in value.split(",") if part.strip())
+
+
 def _needs_flaresolverr(reason: str) -> bool:
     return bool(re.search(r"cloudflare|cloud flare|blocked by", reason, re.IGNORECASE))
 
@@ -247,13 +276,34 @@ def repair(prowlarr: Prowlarr, tag: int, workers: int) -> int:
     return fixed
 
 
+def repairs_only(prowlarr: Prowlarr, workers: int) -> int:
+    """Tag the indexers already held that turn out to need the proxy.
+
+    Separate from `add` because it is the other half of the same fault and the
+    cheaper one: a stack can hold fifty indexers that all answer and fifteen
+    that are blocked, and fixing the fifteen should not mean re-testing six
+    hundred definitions. Refuses when Prowlarr has no indexer proxy configured -
+    the tag would be written, the indexer would still be blocked, and the run
+    would report a repair that changed nothing.
+    """
+    status, proxies = prowlarr.get("/indexerproxy")
+    if status != 200 or not isinstance(proxies, list) or not proxies:
+        print("no indexer proxy is configured in Prowlarr, so the 'cloudflare' tag "
+              "would change nothing - configure FlareSolverr first "
+              "(Settings -> Indexers -> Indexer Proxies)", file=sys.stderr)
+        return 1
+    tag = prowlarr.tag_id(CLOUDFLARE_TAG)
+    fixed = repair(prowlarr, tag, workers)
+    print(f"tagged {fixed} indexer(s) for '{(proxies[0] or {}).get('name') or 'the proxy'}'")
+    return 0
+
+
 def add(prowlarr: Prowlarr, privacy: tuple[str, ...], workers: int, dry_run: bool) -> int:
     existing = prowlarr.indexers()
-    present = {i.get("definitionName") or i.get("name") for i in existing}
+    present = {_definition_key(indexer) for indexer in existing}
     candidates = [entry for entry in prowlarr.schema()
                   if (entry.get("privacy") or "").lower() in privacy]
-    todo = [entry for entry in candidates
-            if (entry.get("name") or entry.get("implementation")) not in present]
+    todo = [entry for entry in candidates if _definition_key(entry) not in present]
 
     print(f"{len(candidates)} definition(s) marked {', '.join(privacy)}; "
           f"{len(existing)} already in Prowlarr, {len(todo)} to try")
@@ -318,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="seconds to wait for one indexer request (default 30)")
     parser.add_argument("--check", action="store_true",
                         help="only report whether the indexers already in Prowlarr answer")
+    parser.add_argument("--repair", action="store_true",
+                        help="only tag the indexers already in Prowlarr that need the proxy")
     parser.add_argument("--offline", action="store_true",
                         help="with --check, only ask that Prowlarr holds an enabled indexer "
                              "(no tracker is contacted)")
@@ -343,8 +395,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.check:
             return check(prowlarr, args.workers, offline=args.offline)
-        return add(prowlarr, tuple(p.strip() for p in args.privacy.split(",") if p.strip()),
-                   args.workers, args.dry_run)
+        if args.repair:
+            return repairs_only(prowlarr, args.workers)
+        return add(prowlarr, parse_privacy(args.privacy), args.workers, args.dry_run)
     except ProwlarrError as error:
         print(f"prowlarr: {error}", file=sys.stderr)
         return 1

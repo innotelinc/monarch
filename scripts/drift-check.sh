@@ -380,8 +380,72 @@ except Exception:
     esac
   done < <(manifest_list "['qbt']['categories']")
   [ -z "$missing" ] || fail "qbittorrent: categories missing:$missing (have: '$cats')"
+
+  # A category is two settings, and the NAME alone is not the interesting one:
+  # `lidarr` existed and saved to /data/media/music, which is why Lidarr warned
+  # "places downloads in the root folder" while this check passed. Compare the
+  # paths the manifest records as well.
+  curl -s -b "$qbt_cj" "http://localhost:$QBT_PORT/api/v2/torrents/categories" > "/tmp/drift-qbt-cats.$$" 2>/dev/null
+  qbt_paths=$(python3 - "$MANIFEST" "/tmp/drift-qbt-cats.$$" <<'PY'
+import json, sys
+manifest, live_path = sys.argv[1], sys.argv[2]
+qbt = (json.load(open(manifest)) or {}).get("qbt") or {}
+want = qbt.get("category_paths")
+try:
+    live = json.load(open(live_path))
+except Exception:
+    live = {}
+if not want:
+    print("note: the manifest carries no category paths (predates the map)")
+    raise SystemExit(0)
+for name, path in sorted(want.items()):
+    got = (live.get(name) or {}).get("savePath")
+    if got != path:
+        print(f"FAIL {name}: saves to {got!r}, expected {path!r}")
+for name in sorted(set(live) - set(want)):
+    print(f"FAIL stray category {name!r} (not in the manifest)")
+PY
+)
+  rm -f "/tmp/drift-qbt-cats.$$"
+  if printf '%s' "$qbt_paths" | grep -q '^FAIL'; then
+    fail "qbittorrent: a category saves somewhere other than the manifest says - a path inside /data/media/<type> is what each *arr reports as 'Download client qBittorrent places downloads in the root folder'; run scripts/arr-download-categories.py"
+    printf '%s\n' "$qbt_paths" | indent >&2
+  fi
+
+  # Cerulean is the only door. qBittorrent keeps a password of its own, so a
+  # user who reaches the WebUI through qbittorrent-sso meets a SECOND login
+  # unless the app trusts the subnet the gateway calls from. An emptied
+  # whitelist is silent: the app simply asks again.
+  qbt_prefs=$(curl -s -b "$qbt_cj" "http://localhost:$QBT_PORT/api/v2/app/preferences" | python3 -c "
+import sys, json
+prefs = json.load(sys.stdin)
+enabled = prefs.get('bypass_auth_subnet_whitelist_enabled')
+whitelist = (prefs.get('bypass_auth_subnet_whitelist') or '').strip()
+print('ok' if (enabled and whitelist) else f'not-trusted (enabled={enabled}, whitelist={whitelist!r})')" 2>/dev/null)
+  if [ "$qbt_prefs" = "ok" ]; then
+    say "ok: qBittorrent trusts the SSO gateway's subnet, so Cerulean is the only login"
+  else
+    fail "qbittorrent: the WebUI does not trust the SSO gateway's subnet ($qbt_prefs) - every user meets qBittorrent's own login AFTER Cerulean; re-run monarch-init (configure_qbittorrent sets it)"
+  fi
   say "ok: qbittorrent (login ok, categories='$cats')"
   rm -f "$qbt_cj"
+fi
+
+# The same question asked the other way round: does each *arr tell qBittorrent the
+# category the manifest names? Servarr spells it `tvCategory`/`movieCategory`/
+# `musicCategory`, so a client created with a plain `category` has no category at
+# all - and the download falls back to the default save path, or into a hand-set
+# category that points at a library root. The apps report this only as a warning
+# on their own Health page, which is why it is checked here.
+dload_cats_out=$(python3 scripts/arr-download-categories.py --check 2>&1)
+dload_cats_code=$?
+if [ "$dload_cats_code" -eq 0 ]; then
+  say "ok: every *arr files its downloads under the manifest's qBittorrent categories"
+elif [ "$dload_cats_code" -eq 1 ]; then
+  say "note: qBittorrent or an *arr is not reachable from here (download categories skipped) - $(printf '%s' "$dload_cats_out" | grep -m1 FAIL)"
+else
+  fail "downloads: an *arr sends a qBittorrent category the manifest does not name, or qBittorrent's paths drifted (arr-download-categories.py exit $dload_cats_code) - downloads land in the default path or in a library root; run scripts/arr-download-categories.py (it restarts nothing)"
+  printf '%s\n' "$dload_cats_out" | indent >&2
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -614,6 +678,26 @@ elif [ "$prowlarr_idx_code" -eq 1 ]; then
 else
   fail "prowlarr: no enabled indexer (prowlarr-indexers.py exit $prowlarr_idx_code) - searches look empty rather than unconfigured; run scripts/prowlarr-indexers.py to add the ones that work, and --check to test the ones already there"
   printf '%s\n' "$prowlarr_idx_out" | indent >&2
+fi
+
+# And the last link: Prowlarr's list only reaches an app during an application
+# sync, so Prowlarr can be full - seventy indexers, every app test green - while
+# every *arr holds none of them. That is the state an operator reads as
+# "Prowlarr is not registering its indexers", and the only thing that separates
+# it from the supported state is a number, so it is counted rather than assumed:
+# each app must hold at least one indexer whose base URL is Prowlarr's own proxy
+# path. Fewer than Prowlarr has is normal (Prowlarr will not sync an indexer that
+# returns no results in that app's categories); none at all is not.
+# Exit 2 is the finding, 1 is "no Prowlarr here".
+arr_sync_out=$(python3 scripts/arr-sync.py --check 2>&1)
+arr_sync_code=$?
+if [ "$arr_sync_code" -eq 0 ]; then
+  say "ok: every *arr holds the indexers Prowlarr syncs to it"
+elif [ "$arr_sync_code" -eq 1 ]; then
+  say "note: Prowlarr or an *arr app is not reachable from here (arr-sync skipped) - $(printf '%s' "$arr_sync_out" | grep -m1 FAIL)"
+else
+  fail "*arr: an app holds none of Prowlarr's indexers, or Prowlarr's own app test fails (arr-sync.py exit $arr_sync_code) - Prowlarr is full and the app searches nothing; run scripts/arr-sync.py to sync the four apps"
+  printf '%s\n' "$arr_sync_out" | indent >&2
 fi
 
 # ───────────────────────────────────────────────────────────────────────────

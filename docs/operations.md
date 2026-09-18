@@ -1096,9 +1096,17 @@ the indexer carries the `cloudflare` tag.
 
 ```bash
 python3 scripts/prowlarr-indexers.py --check             # test every indexer already added
+python3 scripts/prowlarr-indexers.py --repair            # tag the blocked ones for the proxy
 python3 scripts/prowlarr-indexers.py                     # add the public ones that answer
 python3 scripts/prowlarr-indexers.py --privacy public,semiPrivate   # try the closed-signup ones too
 ```
+
+`--repair` is the cheap half and the one to run first: it tags **only** the
+indexers already in the list that a second attempt through the proxy fixes, so
+fixing fifteen blocked ones does not mean re-testing six hundred definitions. It
+refuses to run when Prowlarr holds no indexer proxy, because the tag would then
+be written, the indexer would still be blocked, and the run would report a repair
+that changed nothing.
 
 It adds nothing it has not just tested, retries a Cloudflare failure through the
 proxy (tagging the indexer when that works), and repairs the ones already in the
@@ -1106,6 +1114,76 @@ list the same way. Definitions marked `private` are never attempted: they want a
 account. `--check --offline` (what the drift timer runs) only asks whether an
 enabled indexer exists, because testing thirty trackers every six hours is a way
 to earn a ban — the deep test is the operator's command above.
+
+#### Prowlarr is full but an *arr still has no indexers
+Filling Prowlarr's list does not put anything into the apps. Prowlarr only offers
+an indexer to each app during an **application sync**, so a deployment whose apps
+were registered — or whose indexers were added — after the last sync shows
+Prowlarr with seventy indexers, all four app tests green, and every *arr holding
+none. That is "Prowlarr is not registering its indexers", and the missing step is
+the sync.
+
+```bash
+python3 scripts/arr-sync.py --check   # exit 2 = an app received nothing, 1 = not reachable
+python3 scripts/arr-sync.py           # sync all four, wait, then report what arrived
+```
+
+An app "has received" when it holds an indexer whose base URL is Prowlarr's own
+proxy path (`<prowlarrUrl>/<id>/`), which is what a synced indexer looks like —
+not a count of everything Prowlarr holds. **Fewer than Prowlarr has is the
+supported state**: Prowlarr deliberately will not sync an indexer that returns no
+results in that app's categories (its FAQ: "Prowlarr will not sync X Indexer to
+App"), so an app holding a subset of Prowlarr's list is correct while holding none
+is not. Only the zero is a finding, and `scripts/drift-check.sh` fails on it.
+
+#### An *arr warns "Download client qBittorrent places downloads in the root folder /data/media/<type>"
+A download's destination is two settings, and each one fails on its own without
+looking like the other:
+
+* **the category name each *arr sends.** Servarr spells it after the media type —
+  `tvCategory` (Sonarr, Whisparr), `movieCategory` (Radarr), `musicCategory`
+  (Lidarr). There is no plain `category` field, so a client created with
+  `category` set is created with no category at all and the value is dropped
+  silently. A download with a category qBittorrent does not know is saved to the
+  **default** save path, not to a per-category one;
+* **the save path qBittorrent maps that name to.** A category pointing at
+  `/data/media/<type>` puts an unfinished album straight into the music library
+  for Jellyfin to scan — and that is the warning above.
+
+The manifest is one source of truth for both: each *arr's category comes from
+`MONARCH_APPS`, and `qbt.category_paths` maps those names into the downloads tree
+(`/data/torrents/<type>`, hardlink-friendly and outside every library root).
+`monarch-init` reconciles both — it corrects a drifted path, creates a missing
+category, removes one the manifest does not name, and PUTs the *arr's corrected
+download client — but only while it runs, so a deployment that was configured by
+hand before that survives until one of these does the same on a live host:
+
+```bash
+python3 scripts/arr-download-categories.py --check   # exit 2 = drift, 1 = not reachable
+python3 scripts/arr-download-categories.py           # correct it (restarts nothing)
+```
+
+Run it after changing a category in the WebUI by hand, and after a host was
+brought up from an older checkout. `scripts/drift-check.sh` runs the `--check`,
+compares the category **paths** (not just the names - a right name at a wrong path
+is exactly the case above), and rejects a category the manifest does not carry.
+
+#### qBittorrent still asks for a password after signing in through Cerulean
+qBittorrent keeps a WebUI password of its own (`monarch-seed` writes
+`MONARCH_USERNAME`/`MONARCH_PASSWORD` into it, and the drift check logs in with
+it), so arriving through `qbittorrent-sso` used to meet a **second** login: the
+one the app itself shows. The WebUI is published on loopback only and
+`qbittorrent-sso` is the sole route to it, so `monarch-init` tells the app to
+trust the subnet the gateway calls from (`bypass_auth_subnet_whitelist`) and it
+stops asking — Cerulean is then the only credential either way.
+
+The subnet is **discovered, not configured**: Docker allocates it
+(`172.18.0.0/16` on this host) and init reads it off the interface that contains
+`qbittorrent`'s address, so a host that builds the stack with a different pool is
+not left with a whitelist that matches nothing. If `drift-check` reports
+`the WebUI does not trust the SSO gateway's subnet`, re-run `monarch-init`
+(`configure_qbittorrent` sets it) — an emptied whitelist is otherwise silent, and
+the app simply starts asking again.
 
 #### DNS check
 `sudo docker exec -it radarr cat /etc/resolv.conf` — the stack pins

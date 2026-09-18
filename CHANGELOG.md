@@ -31,6 +31,72 @@ are written by hand and describe the behaviour change, not the commits.
   are tagged now (Prowlarr's own test passes through the proxy), and the stack
   has 72 indexers instead of 2 - Sonarr 22, Radarr 12, Lidarr 13, Whisparr 6
   after a sync, the counts differing by category as they should.
+- **Downloads landed in the library, and every \*arr warned about it.** Sonarr,
+  Radarr, Lidarr and Whisparr each reported "Download client qBittorrent places
+  downloads in the root folder /data/media/<type>", and `lidarr`'s category in
+  qBittorrent did exactly that - an unfinished album was written straight into
+  the music library for Jellyfin to scan. Two settings were wrong at once:
+  Servarr spells the download client's category after the media type
+  (`tvCategory`/`movieCategory`/`musicCategory`) and **has no plain `category`
+  field**, so the client was created with `category` set, no field matched, the
+  value was dropped, and every app kept whatever name it had been given by hand
+  (`tv-sonarr`, `radarr`, `lidarr`, `tv-whisparr`). The categories those names
+  referred to had been created by hand too - pointing at `/data/media/<type>` -
+  while the four the manifest names (`tv`/`movies`/`music`/`xxx`, saving into
+  `/data/torrents/<type>`) sat unused. `monarch-init` now reconciles both halves
+  (correcting a path, creating a missing category, removing names the manifest
+  does not carry, and PUTing the app's corrected client), the categories derive
+  from `MONARCH_APPS` so the name an app is told and the name that exists cannot
+  be two strings, and the manifest carries the name -> path map so
+  `scripts/arr-download-categories.py` can apply and verify the same thing on a
+  live host - `drift-check` compares the **paths**, which nothing did before.
+- **qBittorrent asked for its own password after Cerulean.** Arriving through
+  `qbittorrent-sso` worked and then presented the app's own login form, so the
+  identity that opened the stack was asked to sign in again with a credential
+  it does not have. The WebUI is published on loopback only and the gateway is
+  its only route, so `monarch-init` now tells qBittorrent to trust the subnet the
+  gateway calls from (`bypass_auth_subnet_whitelist`) - discovered from the
+  interface that shares that subnet, not a literal - and Cerulean is the only
+  credential. `drift-check` asserts the whitelist is still in place, because
+  an emptied one is silent: the app simply starts asking again.
+- **An \*arr holding no indexers while Prowlarr holds dozens: the missing step
+  was the sync, and nothing checked it.** Filling Prowlarr's list does not put
+  anything into an app - Prowlarr only offers an indexer to each app during an
+  application sync - so Prowlarr can be full, all four app tests green, and
+  Sonarr, Radarr, Lidarr and Whisparr each holding none of it. That is the state
+  that reads as "Prowlarr is not registering its indexers". `scripts/arr-sync.py`
+  now performs the sync and *counts what arrived*: an app has received when it
+  holds an indexer whose base URL is Prowlarr's own proxy path
+  (`<prowlarrUrl>/<id>/`). Fewer than Prowlarr has is the supported state -
+  Prowlarr deliberately will not sync an indexer that returns no results in that
+  app's categories - so only "none received", and a failing app test, are
+  findings. `scripts/drift-check.sh` fails on both, which nothing did before.
+- **The `cloudflare` tag is what makes FlareSolverr do anything, and 15 of the
+  indexers already in Prowlarr did not have it.** They were present, enabled, and
+  blocked - the state that makes a search look empty rather than unconfigured -
+  while the stack's own FlareSolverr was running and configured as an indexer
+  proxy. `scripts/prowlarr-indexers.py --repair` is now a first-class step: it
+  tags only the indexers a second attempt through the proxy fixes, so repairing
+  fifteen does not mean re-testing six hundred definitions, and it refuses to run
+  at all when Prowlarr holds no indexer proxy, because then the tag would be
+  written, the indexer would still be blocked, and the run would report a repair
+  that changed nothing. Verified live: 17 indexers tagged, and every one of them
+  answers Prowlarr's own test through the proxy.
+- **`prowlarr-indexers.py` re-tested every indexer it already held, and skipped
+  one it did not.** The dedup compared the definition's *display name*
+  (`BTdirectory`) against Prowlarr's stored `definitionName`, which for a
+  Cardigann definition is its id (`btdirectory`) - so all 74 held indexers were
+  re-offered, Prowlarr answered each with `Should be unique`, and the report
+  called present indexers failed candidates while a definition whose label
+  collided with another slipped through as "already there". Uniqueness is on the
+  definition id, and that is what is compared now.
+- **`--privacy public,semiPrivate` never matched a `semiPrivate` definition.**
+  The classes on the command line were compared to the definitions' lowercased
+  `privacy` value without normalising case, so the invocation this script's own
+  usage block and `docs/operations.md` both show ran the narrower set without
+  saying so: 64 definitions were never attempted. Live, the same flag now
+  reports `152 definition(s) marked public, semiprivate; 74 already in Prowlarr,
+  78 to try` instead of `88 ... 14 to try`.
 - **A Cerulean identity can sign in again - in Jellyfin, and therefore in Seerr
   and on the TV clients.** Three unrelated faults had stacked up, and all three
   read as "Jellyfin is broken" from a login form that answers HTTP 500 for a
