@@ -524,22 +524,27 @@ else
   printf '%s\n' "$jellyfin_oidc_out" | indent >&2
 fi
 
-# ...and the plugin that draws the button is pinned rather than remembered.
-# Jellyfin's catalog does not carry it and its own meta.json ships no
-# `sourceUrl`, so before init/jellyfin-oidc-plugin.json the only record of what
-# was installed was a zip in /tmp: a rebuilt host came back with a login form
-# and no SSO, and a swapped build looked like nothing at all. The check is a
-# hash comparison against the pin, because "a .dll is present" is not the
-# question - an older build still renders a button that fails later.
-oidc_plugin_out=$(python3 scripts/jellyfin-oidc-plugin.py --check 2>&1)
-oidc_plugin_code=$?
-if [ "$oidc_plugin_code" -eq 0 ]; then
-  say "ok: Jellyfin's SSO button comes from the pinned OIDC plugin"
-elif [ "$oidc_plugin_code" -eq 2 ]; then
-  say "note: the Jellyfin OIDC plugin pin could not be judged (skipped) - $(printf '%s' "$oidc_plugin_out" | tail -1)"
+# ...and the plugin *builds* are pinned rather than remembered. Neither plugin
+# says which one it is: the OIDC plugin's meta.json ships no `sourceUrl` and the
+# LDAP plugin reports an empty version list, so before init/jellyfin-plugins.json
+# the only record of what was installed was a zip in /tmp - a rebuilt host came
+# back with a login form and no SSO, a swapped build looked like nothing at all,
+# and LDAP-Auth v23 installed beside v24 (which Jellyfin loads together, casting
+# the plugin's config type across two load contexts) answered HTTP 500 for a
+# correct password exactly as it did for a wrong one.
+#
+# So the check is a hash comparison against the pin, plus a count of the folders
+# carrying each assembly: "a .dll is present" is not the question, and "there is
+# one of them" is part of the answer.
+plugins_out=$(python3 scripts/jellyfin-plugin-pin.py --check 2>&1)
+plugins_code=$?
+if [ "$plugins_code" -eq 0 ]; then
+  say "ok: Jellyfin's LDAP and OIDC plugins are the pinned builds, one copy each"
+elif [ "$plugins_code" -eq 2 ]; then
+  say "note: the Jellyfin plugin pins could not be judged (skipped) - $(printf '%s' "$plugins_out" | tail -1)"
 else
-  fail "jellyfin: the OIDC plugin is not the pinned build - run scripts/jellyfin-oidc-plugin.py --install, then restart Jellyfin; see docs/operations.md"
-  printf '%s\n' "$oidc_plugin_out" | indent >&2
+  fail "jellyfin: a plugin is not the pinned build, or is installed twice - run scripts/jellyfin-plugin-pin.py --install, then restart Jellyfin; see docs/operations.md"
+  printf '%s\n' "$plugins_out" | indent >&2
 fi
 
 # The LDAP outpost is Jellyfin's credential store now that the page is published,
@@ -561,21 +566,6 @@ if [ "$ldap_path_code" -eq 0 ]; then
 else
   fail "jellyfin: the LDAP login path is broken (verify-ldap.py exit $ldap_path_code) - every Cerulean identity gets HTTP 500 from the login form; see docs/operations.md 'A Cerulean identity cannot sign in'"
   printf '%s\n' "$ldap_path_out" | indent >&2
-fi
-
-# Two folders carrying the same auth plugin is not cosmetic. Jellyfin loads
-# both, the plugin's configuration type is then cast across two load contexts,
-# and every authentication throws InvalidCastException - so the login form
-# answers 500 for the right password and the wrong one alike, which reads as
-# "the password is wrong" to whoever is typing it. Measured on this deployment
-# on 2026-09-18, where `LDAP-Auth` (v23) and `LDAP Authentication_24.0.0.0` (v24)
-# both held the assembly.
-dup_auth_folders=$(find /docker/appdata/jellyfin/data/plugins -maxdepth 2 \
-  -name 'LDAP-Auth.dll' -not -path '*superseded*' 2>/dev/null | wc -l)
-if [ "$dup_auth_folders" -le 1 ]; then
-  say "ok: one copy of the Jellyfin LDAP plugin is installed"
-else
-  fail "jellyfin: $dup_auth_folders copies of LDAP-Auth.dll are installed - Jellyfin loads all of them and every authentication throws InvalidCastException (HTTP 500). Retire the older folder; see docs/operations.md"
 fi
 
 # ───────────────────────────────────────────────────────────────────────────

@@ -10,8 +10,8 @@ python:3.12-slim, stdlib only - no pip packages needed). It configures:
                     the admin token (usable as an API key) to
                     /docker/appdata/init/jellyfin-api-key.txt, wires the
                     LDAP-Auth plugin at the Authentik outpost, and installs
-                    the pinned OIDC plugin (init/jellyfin-oidc-plugin.json)
-                    plus its config, so its login page offers Cerulean
+                    the pinned plugins (init/jellyfin-plugins.json) plus the
+                    OIDC plugin's config, so its login page offers Cerulean
                     Authentik
   * Sonarr/Radarr/
     Lidarr/Whisparr - external auth (the Cerulean Authentik gate in front of
@@ -118,9 +118,15 @@ AUTHENTIK_BOOTSTRAP_TOKEN = os.environ.get("AUTHENTIK_BOOTSTRAP_TOKEN", "").stri
 # Jellyfin LDAP-Auth plugin (authenticates logins against the Authentik LDAP
 # outpost). The bind user/token/group/base DN must match what Magnate
 # provisions in Authentik (same defaults in docker-compose.yml).
+#
+# The plugin is installed from Jellyfin's own catalog when it can be. That fetch
+# used to fall back to "the latest GitHub release" and, when even that failed, to
+# a hand-installed folder - which is how LDAP-Auth v23 ended up sitting beside v24
+# and made every authentication throw InvalidCastException (HTTP 500 on the login
+# form for a right password and a wrong one alike). The fallback is the pin now.
 LDAP_PLUGIN_NAME = "LDAP-Auth"
+LDAP_PLUGIN_NAMES = ("LDAP-Auth", "LDAP Authentication")   # the catalog's, and its meta.json's
 LDAP_PLUGIN_CATALOG_REPO = "https://repo.jellyfin.org/files/plugin/manifest.json"
-LDAP_PLUGIN_GH_RELEASES = "https://api.github.com/repos/jellyfin/jellyfin-plugin-ldapauth/releases/latest"
 LDAP_SERVER = os.environ.get("AUTHENTIK_LDAP_SERVER", "authentik-ldap")
 LDAP_PORT = os.environ.get("AUTHENTIK_LDAP_PORT", "3389")
 LDAP_BIND_USER = os.environ.get("AUTHENTIK_LDAP_BIND_USER", "authentik-ldap")
@@ -151,18 +157,16 @@ LDAP_SEARCH_ROLE = "jellyfin-ldap-search"
 LDAP_BIND_FLOW_SLUG = "default-authentication-flow"
 LDAP_INVALIDATION_FLOW_SLUG = "default-provider-invalidation-flow"
 
-# Jellyfin OIDC plugin (the *Cerulean Authentik* button on Jellyfin's own login
-# page). Jellyfin's catalog does not carry it, so until now it was installed by
-# hand and a rebuilt host came back with a login form and no SSO. It is pinned
-# instead: `init/jellyfin-oidc-plugin.json` records the release and BOTH hashes
-# (the zip, and the assembly inside it), and it is the same file
-# `scripts/jellyfin-oidc-plugin.py` and `drift-check.sh` read - so a fresh
-# install, a repair and the drift check all mean the same build when they say
-# "the plugin".
-OIDC_PLUGIN_PIN = os.environ.get("OIDC_PLUGIN_PIN", "/init/jellyfin-oidc-plugin.json")
-OIDC_PLUGIN_ASSEMBLY = "Jellyfin.Plugin.OIDC.dll"
+# Jellyfin plugins, pinned. Both are load-bearing and neither records which
+# build it is (the OIDC plugin's meta.json ships no sourceUrl; the LDAP plugin
+# reports an empty versions list), so `init/jellyfin-plugins.json` records the
+# release and BOTH hashes per plugin - the zip, and the assembly inside it. It is
+# the same file `scripts/jellyfin-plugin-pin.py` and `drift-check.sh` read, so a
+# fresh install, a repair and the drift check all mean the same build when they
+# say "the plugin". The OIDC plugin is the *Cerulean Authentik* button on
+# Jellyfin's own login page, which Jellyfin's catalog does not carry.
+PLUGIN_PINS_FILE = os.environ.get("JELLYFIN_PLUGIN_PINS", "/init/jellyfin-plugins.json")
 OIDC_PLUGIN_CONFIG = "Jellyfin.Plugin.OIDC.xml"
-OIDC_PLUGIN_DIRNAME = "OIDC-RBAC"
 # The provider id is the plugin's (it builds `…/sso/OIDC/Callback/{id}` from it
 # and the deployment registered exactly that path), the rest is this zone's -
 # the same Authentik application the oauth2-proxy gateways already use.
@@ -896,9 +900,18 @@ def jellyfin_ensure_api_key(token, name=None) -> str:
 
 
 def jellyfin_plugin_installed(token) -> bool:
+    """Whether Jellyfin has an LDAP auth plugin loaded.
+
+    Matched on the name it reports, not on the folder it lives in: upstream calls
+    it "LDAP-Auth" in its catalog entry and "LDAP Authentication" in its own
+    meta.json, and the folder is Jellyfin's to name. Retired copies report
+    `Superseded` and are not loaded, so they do not count as installed — the
+    build itself is `scripts/jellyfin-plugin-pin.py`'s job, not this call's.
+    """
     status, _, j = _http(JELLYFIN_BASE, "/Plugins", headers=jellyfin_headers(token))
     if status == 200 and isinstance(j, list):
-        return any(p.get("Name") == LDAP_PLUGIN_NAME for p in j)
+        return any(p.get("Name") in LDAP_PLUGIN_NAMES
+                   and p.get("Status") != "Superseded" for p in j)
     return False
 
 
@@ -910,7 +923,7 @@ def install_ldap_plugin_via_catalog(token) -> bool:
         headers=jellyfin_headers(token))
     if status != 200 or not isinstance(entries, list):
         return False
-    entry = next((e for e in entries if e.get("Name") == LDAP_PLUGIN_NAME), None)
+    entry = next((e for e in entries if e.get("Name") in LDAP_PLUGIN_NAMES), None)
     if not entry:
         return False
     body = {"Name": entry.get("Name"), "Version": entry.get("Version"),
@@ -921,46 +934,17 @@ def install_ldap_plugin_via_catalog(token) -> bool:
     return status in (200, 202, 204)
 
 
-def install_ldap_plugin_via_release(token) -> bool:
-    """Fallback: download the plugin zip straight from the GitHub release."""
-    try:
-        with urllib.request.urlopen(LDAP_PLUGIN_GH_RELEASES, timeout=30) as resp:
-            release = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception as exc:  # noqa: BLE001
-        _log(f"WARNING: could not query GitHub for the LDAP plugin release: {exc}")
-        return False
-    asset = next((a for a in release.get("assets", []) if a.get("name", "").endswith(".zip")), None)
-    if not asset:
-        _log("WARNING: no .zip asset on the LDAP plugin GitHub release.")
-        return False
-    # Jellyfin's data dir is /config/data (JELLYFIN_DATA_DIR), so plugins
-    # live under data/plugins/, NOT config/plugins/. It discovers plugins by
-    # scanning subdirectories for meta.json, so the zip must land in
-    # plugins/<PluginName>/.
-    plugins_dir = os.path.join(APPDATA, "jellyfin", "data", "plugins")
-    plugin_dir = os.path.join(plugins_dir, LDAP_PLUGIN_NAME)
-    os.makedirs(plugin_dir, exist_ok=True)
-    tmp = os.path.join(plugin_dir, asset["name"])
-    try:
-        urllib.request.urlretrieve(asset["browser_download_url"], tmp)
-        with zipfile.ZipFile(tmp) as zf:
-            zf.extractall(plugin_dir)
-        os.remove(tmp)
-        # Jellyfin runs as uid/gid 1000; the plugin must be readable (and
-        # writable for its config) by that user.
-        for root, _dirs, files in os.walk(plugin_dir):
-            for name in files:
-                ensure_owner(os.path.join(root, name))
-            ensure_owner(root)
-        ensure_owner(plugin_dir)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        _log(f"WARNING: LDAP plugin download/extract failed: {exc}")
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return False
+def install_ldap_plugin_via_pin() -> bool:
+    """Fallback install: the pinned release, verified, into the pinned folder.
+
+    The catalog is asked first because it is upstream's own distribution, but it
+    is not trusted to pick the *build*: this is the path that used to fetch
+    "GitHub's latest release" and, when that failed, leave whatever folder was
+    there. That is how LDAP-Auth v23 ended up installed beside v24, which made
+    every authentication return HTTP 500. The pin is one build, in one folder,
+    checked before it is written.
+    """
+    return install_pinned_plugin(pin_for("ldap"))
 
 
 def ldap_plugin_config_path() -> str:
@@ -1026,64 +1010,90 @@ def write_ldap_plugin_config() -> tuple[str, str]:
 # Jellyfin OIDC plugin (the SSO button on Jellyfin's own login page)
 #
 # Two halves have to agree, and both are written here from the deployment's own
-# values: the plugin binary (pinned in init/jellyfin-oidc-plugin.json) and its
-# config (the provider, this zone's client id/secret, and the group -> library
-# mappings). They fail in opposite-looking ways - a config with no Authority
+# values: the plugin binary (pinned in init/jellyfin-plugins.json) and its config
+# (the provider, this zone's client id/secret, and the group -> library mappings). They fail in opposite-looking ways - a config with no Authority
 # renders a button that dies inside Authentik, and a provider that never got the
 # callback dies at the redirect with `redirect_uri does not match` - so
 # `scripts/jellyfin-oidc-sso.py` judges both afterwards, in drift-check.
 # ---------------------------------------------------------------------------
 
-def load_oidc_pin() -> dict:
-    """The pinned release, as init/jellyfin-oidc-plugin.json records it."""
-    with open(OIDC_PLUGIN_PIN, "r", encoding="utf-8") as fh:
-        pin = json.load(fh)
-    for key in ("asset", "asset_sha256", "assembly", "assembly_sha256", "plugin_dir"):
-        if not pin.get(key):
-            raise ValueError(f"{OIDC_PLUGIN_PIN} does not pin {key!r}")
-    return pin
+def load_plugin_pins() -> list[dict]:
+    """Every pinned plugin, as init/jellyfin-plugins.json records it."""
+    with open(PLUGIN_PINS_FILE, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    plugins = payload.get("plugins") if isinstance(payload, dict) else payload
+    if not isinstance(plugins, list) or not plugins:
+        raise ValueError(f"{PLUGIN_PINS_FILE} pins no plugins")
+    for pin in plugins:
+        for key in ("name", "asset", "asset_sha256", "assembly", "assembly_sha256",
+                    "plugin_dir"):
+            if not pin.get(key):
+                raise ValueError(f"{PLUGIN_PINS_FILE} does not pin {key!r} for "
+                                 f"{pin.get('name') or '(unnamed plugin)'}")
+    return plugins
 
 
-def oidc_plugins_dir() -> str:
+def pin_for(name: str) -> dict:
+    """One pin by name."""
+    pins = load_plugin_pins()
+    for pin in pins:
+        if pin["name"] == name:
+            return pin
+    raise ValueError(f"no plugin pin named {name!r} in {PLUGIN_PINS_FILE} "
+                     f"(have: {', '.join(p['name'] for p in pins)})")
+
+
+def plugins_dir() -> str:
     return os.path.join(APPDATA, "jellyfin", "data", "plugins")
 
 
-def oidc_plugin_installed(pin: dict) -> str:
-    """'ok' | 'missing' | 'stale' - and stale matters as much as missing.
+def pinned_plugin_state(pin: dict) -> str:
+    """'ok' | 'missing' | 'stale' | 'duplicate'.
 
     Matched on the pinned hash, not on the file existing: a plugin folder left
-    behind by an older build still renders a button, so "there is a .dll" is not
-    the question the deployment needs answered.
+    behind by an older build still shows up in Jellyfin's plugin list, so "there
+    is a .dll" is not the question the deployment needs answered. A second
+    non-retired copy is its own answer — Jellyfin loads every folder that carries
+    the assembly, and one auth plugin loaded twice fails every authentication.
     """
     import hashlib
-    candidate = os.path.join(oidc_plugins_dir(), pin["plugin_dir"], pin["assembly"])
-    if not os.path.isfile(candidate):
+    root = plugins_dir()
+    found = []
+    for entry in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        folder = os.path.join(root, entry)
+        if not os.path.isdir(folder) or "superseded" in entry:
+            continue
+        if os.path.isfile(os.path.join(folder, pin["assembly"])):
+            found.append(os.path.join(folder, pin["assembly"]))
+    if not found:
         return "missing"
+    if len(found) > 1:
+        return "duplicate"
     digest = hashlib.sha256()
-    with open(candidate, "rb") as fh:
+    with open(found[0], "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return "ok" if digest.hexdigest() == pin["assembly_sha256"] else "stale"
 
 
-def install_oidc_plugin(pin: dict) -> bool:
-    """Fetch the pinned release, verify BOTH hashes, then extract it.
+def install_pinned_plugin(pin: dict) -> bool:
+    """Fetch one pinned release, verify BOTH hashes, then extract it.
 
     The zip's hash is checked and so is the assembly inside it: the assembly is
     what Jellyfin loads, and a zip that hashes correctly but carries a different
     build is exactly the swap nobody writes down.
     """
     import hashlib
-    url = os.environ.get("OIDC_PLUGIN_URL") or pin.get("release_url")
+    url = os.environ.get("JELLYFIN_PLUGIN_URL") or pin.get("release_url")
     if not url:
         url = (f"https://github.com/{pin['repo']}/releases/download/{pin['tag']}/"
                f"{pin['asset']}")
-    _log(f"Fetching the OIDC plugin {pin.get('tag', '')} from {url}")
+    _log(f"Fetching the {pin['name']} plugin {pin.get('tag', '')} from {url}")
     try:
         with urllib.request.urlopen(url, timeout=120) as resp:
             blob = resp.read()
     except Exception as exc:  # noqa: BLE001
-        _log(f"WARNING: could not download the OIDC plugin: {exc}")
+        _log(f"WARNING: could not download the {pin['name']} plugin: {exc}")
         return False
     if pin.get("asset_bytes") and len(blob) != int(pin["asset_bytes"]):
         _log(f"WARNING: {pin['asset']} is {len(blob)} bytes, the pin says "
@@ -1095,7 +1105,7 @@ def install_oidc_plugin(pin: dict) -> bool:
              f"{pin['asset_sha256']} - not installing it.")
         return False
 
-    plugin_dir = os.path.join(oidc_plugins_dir(), pin["plugin_dir"])
+    plugin_dir = os.path.join(plugins_dir(), pin["plugin_dir"])
     os.makedirs(plugin_dir, exist_ok=True)
     tmp = os.path.join(plugin_dir, pin["asset"])
     try:
@@ -1121,7 +1131,7 @@ def install_oidc_plugin(pin: dict) -> bool:
             ensure_owner(root)
         return True
     except Exception as exc:  # noqa: BLE001
-        _log(f"WARNING: OIDC plugin extract failed: {exc}")
+        _log(f"WARNING: {pin['name']} plugin extract failed: {exc}")
         try:
             os.remove(tmp)
         except OSError:
@@ -1131,7 +1141,7 @@ def install_oidc_plugin(pin: dict) -> bool:
 
 def oidc_plugin_config_path() -> str:
     """Where the OIDC plugin reads its provider config from."""
-    return os.path.join(oidc_plugins_dir(), "configurations", OIDC_PLUGIN_CONFIG)
+    return os.path.join(plugins_dir(), "configurations", OIDC_PLUGIN_CONFIG)
 
 
 def write_oidc_plugin_config() -> tuple[str, str]:
@@ -1211,9 +1221,9 @@ def configure_jellyfin_oidc():
         return False
 
     try:
-        pin = load_oidc_pin()
+        pin = pin_for("oidc")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        _issues.append(f"jellyfin-oidc: cannot read the plugin pin {OIDC_PLUGIN_PIN} ({exc})")
+        _issues.append(f"jellyfin-oidc: cannot read the plugin pins {PLUGIN_PINS_FILE} ({exc})")
         return False
 
     path = oidc_plugin_config_path()
@@ -1226,18 +1236,28 @@ def configure_jellyfin_oidc():
     _log(f"OIDC plugin config written -> {path}")
     needs_restart = previous != xml
 
-    state = oidc_plugin_installed(pin)
+    state = pinned_plugin_state(pin)
     if state == "ok":
         _log(f"OIDC plugin {pin.get('version') or pin.get('tag')} already installed.")
+    elif state == "duplicate":
+        # Installing cannot fix this, and it is not cosmetic: Jellyfin loads
+        # every folder that carries the assembly, and one auth plugin loaded
+        # twice fails every authentication with HTTP 500.
+        _issues.append(
+            f"jellyfin-oidc: more than one installed plugin folder carries "
+            f"{pin['assembly']} - Jellyfin loads all of them and logins fail with "
+            "HTTP 500. Retire the older folder (rename it `….superseded-<date>`), "
+            "then restart Jellyfin.")
+        return False
     else:
         _log(f"OIDC plugin is {state} - installing {pin.get('tag')} "
              f"({pin['asset']}).")
-        if not install_oidc_plugin(pin):
+        if not install_pinned_plugin(pin):
             _issues.append(
                 f"jellyfin-oidc: could not install the pinned OIDC plugin "
                 f"({pin['repo']} {pin.get('tag')}) - the login page will have no SSO "
-                "button. Fetch/verify it by hand with "
-                "scripts/jellyfin-oidc-plugin.py --install.")
+                "button. Fetch/verify it with "
+                "scripts/jellyfin-plugin-pin.py --install --plugin oidc.")
             return False
         needs_restart = True
         _log(f"OIDC plugin installed ({pin['assembly']} into {pin['plugin_dir']}).")
@@ -1304,20 +1324,31 @@ def configure_jellyfin_ldap():
     _log(f"LDAP-Auth plugin config written -> {path}")
 
     needs_restart = previous != xml
-    if not jellyfin_plugin_installed(token):
-        _log("Installing the LDAP-Auth plugin (catalog, then GitHub release)...")
+    state = pinned_plugin_state(pin_for("ldap"))
+    if state == "ok" and jellyfin_plugin_installed(token):
+        _log("LDAP-Auth plugin already installed, and it is the pinned build.")
+    elif state == "duplicate":
+        _issues.append(
+            "jellyfin-ldap: more than one installed plugin folder carries LDAP-Auth.dll - "
+            "Jellyfin loads all of them, the plugin's config type is cast across two "
+            "load contexts, and every authentication returns HTTP 500. Retire the older "
+            "folder (rename it `….superseded-<date>`), then restart Jellyfin.")
+        return False
+    else:
+        _log(f"LDAP-Auth plugin is {state} - installing the pinned build "
+             f"(catalog first, then init/jellyfin-plugins.json)...")
         ok = install_ldap_plugin_via_catalog(token)
         if not ok:
-            ok = install_ldap_plugin_via_release(token)
+            _log("Catalog install unavailable - falling back to the pinned release.")
+            ok = install_ldap_plugin_via_pin()
         if not ok:
-            _issues.append("jellyfin-ldap: could not install the LDAP-Auth plugin automatically - "
-                           "install it in Jellyfin Dashboard > Plugins > Catalog (name: LDAP-Auth). "
-                           "The config file is already in place.")
+            _issues.append("jellyfin-ldap: could not install the pinned LDAP-Auth plugin - "
+                           "install it in Jellyfin Dashboard > Plugins > Catalog (name: "
+                           "LDAP-Auth), or run scripts/jellyfin-plugin-pin.py --install "
+                           "--plugin ldap on the host. The config file is already in place.")
             return False
         needs_restart = True
         _log("LDAP-Auth plugin installed.")
-    else:
-        _log("LDAP-Auth plugin already installed.")
 
     if needs_restart:
         _log("Restarting Jellyfin so the plugin loads the new config...")
@@ -2162,6 +2193,23 @@ def configure_jellyseerr():
 # Main
 # ---------------------------------------------------------------------------
 
+def _pin_summary() -> list:
+    """The pinned plugin builds, for the invariants manifest.
+
+    Never fatal: an unreadable pin file is already reported by the steps that
+    install from it, and a manifest that could not be written would hide every
+    other invariant from the drift check.
+    """
+    try:
+        return [{"name": p["name"], "repo": p["repo"], "tag": p.get("tag", ""),
+                 "version": p.get("version", ""), "assembly": p["assembly"],
+                 "plugin_dir": p["plugin_dir"],
+                 "assembly_sha256": p["assembly_sha256"]}
+                for p in load_plugin_pins()]
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+
+
 def build_invariants() -> dict:
     """The invariants monarch-init is supposed to maintain, as data.
 
@@ -2197,12 +2245,12 @@ def build_invariants() -> dict:
             "port": PORTS["jellyfin"],
             "libraries": [lib["name"] for lib in JELLYFIN_LIBRARIES],
             # The SSO button on Jellyfin's own login page: which provider it
-            # offers and which build of the plugin provides it. drift-check
+            # offers, and which build of each plugin provides it. drift-check
             # judges the wiring live (jellyfin-oidc-sso.py,
-            # jellyfin-oidc-plugin.py); these are what it was configured from.
+            # jellyfin-plugin-pin.py); these are what it was configured from.
             "oidc_provider": OIDC_PROVIDER_ID,
             "oidc_client_id": MONARCH_SSO_CLIENT_ID,
-            "oidc_plugin_dir": OIDC_PLUGIN_DIRNAME,
+            "plugin_pins": _pin_summary(),
         },
         "jellyseerr": {"port": PORTS["jellyseerr"]},
         # Bazarr keeps no local login: the Cerulean Authentik gate on

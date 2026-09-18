@@ -120,11 +120,9 @@ jobs:
           grep -q 'jellyfin-oidc-sso.py --check' "$f" \
             || { echo "::error::$f no longer runs jellyfin-oidc-sso.py - the login page's SSO button goes unchecked"; exit 1; }
           # The button has two halves that fail differently: the config and the
-          # callback (above), and the plugin *binary* that draws it (below).
-          grep -q 'jellyfin-oidc-plugin.py --check' "$f" \
-            || { echo "::error::$f no longer runs jellyfin-oidc-plugin.py - a swapped or missing OIDC plugin build goes unchecked"; exit 1; }
-          grep -q 'LDAP-Auth.dll' "$f" \
-            || { echo "::error::$f no longer checks for duplicate copies of the LDAP plugin, which make every authentication return 500"; exit 1; }
+          # callback (above), and the plugin *binaries* that provide it (below).
+          grep -q 'jellyfin-plugin-pin.py --check' "$f" \
+            || { echo "::error::$f no longer runs jellyfin-plugin-pin.py - a swapped, missing or duplicated plugin build goes unchecked"; exit 1; }
           echo "posture: drift-check wired"
 
       # LDAP is what makes every Jellyfin account Authentik's rather than
@@ -148,41 +146,48 @@ jobs:
           print("posture: plugin config is templated from the deployment")
           PY
 
-      # The pinned OIDC plugin has to stay pinned in BOTH readers: monarch-init
-      # installs it (so a rebuilt host comes back with the SSO button) and the
-      # drift check verifies it. If init.py stops reading the pin and goes back
-      # to fetching "the latest release", the host and the check disagree about
-      # what "the plugin" is, and only one of them is right.
-      - name: monarch-init installs the pinned OIDC plugin
+      # The pinned plugins have to stay pinned in BOTH readers: monarch-init
+      # installs them (so a rebuilt host comes back with the SSO button and the
+      # LDAP credential store) and the drift check verifies them. If init.py
+      # stops reading the pin and goes back to fetching "the latest release",
+      # the host and the check disagree about what "the plugin" is, and only one
+      # of them is right.
+      - name: monarch-init installs the pinned Jellyfin plugins
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json
           import pathlib
 
-          pin = json.loads(pathlib.Path("init/jellyfin-oidc-plugin.json").read_text(encoding="utf-8"))
-          for key in ("repo", "tag", "asset", "asset_sha256", "assembly", "assembly_sha256", "plugin_dir"):
-              assert pin.get(key), f"the plugin pin no longer records {key!r}"
+          pins = json.loads(pathlib.Path("init/jellyfin-plugins.json").read_text(encoding="utf-8"))["plugins"]
+          names = [p.get("name") for p in pins]
+          assert names == ["oidc", "ldap"], f"the pin file no longer covers both plugins: {names}"
+          for pin in pins:
+              for key in ("repo", "tag", "asset", "asset_sha256", "assembly",
+                          "assembly_sha256", "plugin_dir"):
+                  assert pin.get(key), f"the {pin['name']} pin no longer records {key!r}"
 
           source = pathlib.Path("init/init.py").read_text(encoding="utf-8")
-          assert "jellyfin-oidc-plugin.json" in source, \
-              "init.py no longer reads init/jellyfin-oidc-plugin.json"
+          assert "jellyfin-plugins.json" in source, \
+              "init.py no longer reads init/jellyfin-plugins.json"
           assert 'pin["asset_sha256"]' in source and 'pin["assembly_sha256"]' in source, \
               "init.py no longer verifies both the zip and the assembly inside it"
           assert "configure_jellyfin_oidc()" in source, \
               "init.py no longer wires Jellyfin's OIDC plugin"
+          assert "install_ldap_plugin_via_pin" in source, \
+              "the LDAP install lost its pinned fallback and is fetching an unpinned release again"
           # The config has to come from the deployment's own values, not literals:
           # the secret and the client id are per-zone, and a hardcoded secret is
           # a secret in the repo.
           for var in ("MONARCH_SSO_CLIENT_ID", "MONARCH_SSO_CLIENT_SECRET",
                       "MONARCH_SSO_SERVER_BASE_URL", "MONARCH_SSO_APP"):
               assert var in source, f"init.py no longer reads {var}"
-          print(f"posture: OIDC plugin pinned to {pin['repo']} {pin['tag']}")
+          print("posture: plugins pinned to " + ", ".join(f"{p['repo']} {p['tag']}" for p in pins))
           PY
 
           # The pin is what the check and init agree on, so both must point at it.
-          grep -q 'jellyfin-oidc-plugin.json' scripts/jellyfin-oidc-plugin.py \
-            || { echo "::error::scripts/jellyfin-oidc-plugin.py no longer reads the pin"; exit 1; }
+          grep -q 'jellyfin-plugins.json' scripts/jellyfin-plugin-pin.py \
+            || { echo "::error::scripts/jellyfin-plugin-pin.py no longer reads the pin"; exit 1; }
 
       # One account is allowed to sign in outside Authentik, and two scripts
       # have to agree on which. Divergence is not loud: the checker calls the
@@ -219,7 +224,7 @@ jobs:
             || { echo "::error::README no longer documents the Jellyfin posture"; exit 1; }
           grep -q 'jellyfin-login-methods.py' docs/operations.md \
             || { echo "::error::docs/operations.md no longer documents the Jellyfin posture"; exit 1; }
-          for checker in verify-ldap.py jellyfin-oidc-sso.py jellyfin-oidc-plugin.py; do
+          for checker in verify-ldap.py jellyfin-oidc-sso.py jellyfin-plugin-pin.py; do
             grep -q "$checker" docs/operations.md \
               || { echo "::error::docs/operations.md no longer documents $checker"; exit 1; }
           done

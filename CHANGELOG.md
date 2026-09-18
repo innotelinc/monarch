@@ -56,18 +56,22 @@ are written by hand and describe the behaviour change, not the commits.
   end - the plugin's config (an enabled provider on the Cerulean issuer with this
   zone's client id) and the callback registered on the `monarch-media` provider -
   since both halves fail silently from the login page. Run by `drift-check`.
-- **Jellyfin's OIDC plugin is pinned and installed by `monarch-init`.**
-  `init/jellyfin-oidc-plugin.json` records the release
-  (`Ezeqielle/jellyfin-plugin-oidc` v1.0.10) and the sha256 of both the zip and
-  the assembly inside it, so "the plugin" means one build to a fresh install, a
-  repair and the drift check alike. Jellyfin's catalog does not carry it and its
-  own `meta.json` ships no `sourceUrl`, which is why it was hand-installed before:
-  a rebuilt host came back with a login form and no SSO, and a swapped build was
-  invisible. `scripts/jellyfin-oidc-plugin.py --check|--status|--install`
-  judges/repairs the installed build, and `init/init.py` now also writes the
-  plugin's config (provider, `MONARCH_SSO_*` client id/secret, and the
-  `paid_users` / `jellyfin_admins` role mappings) instead of leaving a rebuilt
-  host with a button that has no issuer.
+- **Jellyfin's plugins are pinned, and `monarch-init` installs them.**
+  `init/jellyfin-plugins.json` records, per plugin, the release and the sha256 of
+  both the zip and the assembly inside it, so "the plugin" means one build to a
+  fresh install, a repair and the drift check alike. It covers the OIDC plugin
+  (`Ezeqielle/jellyfin-plugin-oidc` v1.0.10 — the Cerulean Authentik button;
+  Jellyfin's catalog does not carry it and its `meta.json` ships no `sourceUrl`,
+  which is why it was hand-installed before, so a rebuilt host came back with a
+  login form and no SSO) and the LDAP plugin (`jellyfin/jellyfin-plugin-ldapauth`
+  v24 — the credential store behind that page, whose install path used to fetch
+  "GitHub's latest release"). `scripts/jellyfin-plugin-pin.py
+  --check|--status|--install` judges and repairs both, and **counts the folders
+  carrying each assembly**: a second non-retired copy of an auth plugin is not
+  cosmetic, it is the v23-beside-v24 case above. `init/init.py` also writes the
+  OIDC plugin's config (provider, `MONARCH_SSO_*` client id/secret, and the
+  `paid_users` / `jellyfin_admins` role mappings) and no longer falls back to an
+  unpinned LDAP release.
 - **Local Jellyfin accounts the deployment keeps are declared, not guessed.**
   Publishing Jellyfin's own sign-in page left native clients with a second
   password in Jellyfin's store, and that account is indistinguishable from a

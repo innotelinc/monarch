@@ -524,10 +524,10 @@ that is a decision with a reason worth knowing before reading a log:
   at the redirect with `invalid_request: redirect_uri does not match`).
   `python3 scripts/jellyfin-oidc-sso.py --check` reads both and reports the
   installed plugin's version; it is run by `scripts/drift-check.sh`. The plugin
-  binary is **pinned** in `init/jellyfin-oidc-plugin.json` (release plus the
-  sha256 of the zip *and* of the assembly inside it): `monarch-init` installs it,
-  so a rebuilt host comes back with the button, and
-  `python3 scripts/jellyfin-oidc-plugin.py --check` judges the installed build
+  binary is **pinned** in `init/jellyfin-plugins.json` (release plus the sha256 of
+  the zip *and* of the assembly inside it): `monarch-init` installs it, so a
+  rebuilt host comes back with the button, and
+  `python3 scripts/jellyfin-plugin-pin.py --check` judges the installed build
   against the pin. The callback URIs
   (`https://media[.magnate].innotel.us/sso/OIDC/Callback/authentik`) are part of
   `MONARCH_SSO_REDIRECT_URIS`, because a provider refresh takes that list verbatim.
@@ -989,22 +989,39 @@ sudo docker compose up -d
    webhook endpoint (`subscribe.innotel.us`, five events) exists and writes
    its signing secret into `.env` for you; `./setup.sh` does this
    automatically on first configure. The endpoint must be publicly reachable.
-3. **Jellyfin's OIDC plugin** (`OIDC RBAC`, assembly `Jellyfin.Plugin.OIDC.dll`)
-   is the **Cerulean Authentik** button on Jellyfin's login page. It is no longer
-   installed by hand: `init/jellyfin-oidc-plugin.json` pins the release
-   (`Ezeqielle/jellyfin-plugin-oidc` v1.0.10) with the sha256 of the zip and of
-   the assembly inside it, `monarch-init` installs from that pin, and
-   `python3 scripts/jellyfin-oidc-plugin.py --check` (run by `drift-check`) judges
-   the installed build against it — `--status` prints both sides, `--install`
-   fetches, verifies both hashes and extracts into
-   `/docker/appdata/jellyfin/data/plugins/OIDC-RBAC/`, then tells you to restart
-   Jellyfin. Jellyfin's own catalog does not carry the plugin and its `meta.json`
-   ships no `sourceUrl`, which is exactly why the pin exists: before it, the only
-   record of what was installed was a zip in `/tmp`, a rebuild came back with a
-   login form and no SSO, and a swapped build looked like nothing at all.
-   `scripts/jellyfin-oidc-sso.py --check` covers the other two halves — the
-   plugin's config and the callback registered on the `monarch-media` provider.
-   The provider's callback URIs are in `MONARCH_SSO_REDIRECT_URIS`; the
+3. **Jellyfin's plugins are pinned, not installed by hand.**
+   `init/jellyfin-plugins.json` records, per plugin, the release plus the sha256
+   of both the zip *and* the assembly inside it, and `monarch-init` installs from
+   that file. Two plugins are in it, because both are load-bearing and neither
+   says which build it is:
+
+   - **`oidc`** — `OIDC RBAC`, assembly `Jellyfin.Plugin.OIDC.dll`,
+     `Ezeqielle/jellyfin-plugin-oidc` v1.0.10. It is the **Cerulean Authentik**
+     button on Jellyfin's own login page; Jellyfin's catalog does not carry it and
+     its `meta.json` ships no `sourceUrl`, which is why it used to be installed by
+     hand. Before the pin, the only record of what was installed was a zip in
+     `/tmp`, and a rebuild came back with a login form and no SSO.
+   - **`ldap`** — `LDAP Authentication`, assembly `LDAP-Auth.dll`,
+     `jellyfin/jellyfin-plugin-ldapauth` v24. It is the credential store behind
+     that page. Its `meta.json` reports an empty version list, and its install
+     path used to ask GitHub for "the latest release" — which is how v23 ended up
+     installed beside v24. Jellyfin loads every folder carrying an assembly, so
+     the two copies cast the plugin's config type across two load contexts and
+     **every authentication returned HTTP 500** for a right password and a wrong
+     one alike. The pin is one build in one folder; a second non-retired copy is
+     reported by name (`--check`), and folders retired by renaming
+     (`LDAP-Auth.superseded-<date>`) are not counted, because Jellyfin reports
+     those as `Superseded` rather than loading them.
+
+   `python3 scripts/jellyfin-plugin-pin.py --check` (run by `drift-check`) judges
+   both installed builds against the pins; `--status` prints both sides,
+   `--plugin <name>` narrows it to one, and `--install` fetches, verifies both
+   hashes and extracts into `/docker/appdata/jellyfin/data/plugins/<plugin_dir>/`,
+   then tells you to restart Jellyfin (nothing here restarts your media server).
+
+   `scripts/jellyfin-oidc-sso.py --check` covers the other two halves of the
+   button — the plugin's config and the callback registered on the `monarch-media`
+   provider. The provider's callback URIs are in `MONARCH_SSO_REDIRECT_URIS`; the
    ClientId/Authority/ClientSecret are the same `MONARCH_SSO_*` values the
    gateways use, written into
    `/docker/appdata/jellyfin/data/plugins/configurations/Jellyfin.Plugin.OIDC.xml`
