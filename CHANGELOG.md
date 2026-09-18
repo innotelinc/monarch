@@ -8,6 +8,58 @@ Monarch had no changelog before v1.22, so everything older is summarised from it
 release tag - `git log <tag>` still has the full detail. From v1.22 on, entries
 are written by hand and describe the behaviour change, not the commits.
 
+## [Unreleased]
+
+### Fixed
+
+- **A Cerulean identity can sign in again - in Jellyfin, and therefore in Seerr
+  and on the TV clients.** Three unrelated faults had stacked up, and all three
+  read as "Jellyfin is broken" from a login form that answers HTTP 500 for a
+  correct password exactly as it does for a wrong one:
+
+  1. **Two copies of the LDAP plugin** were installed (`LDAP-Auth` v23 and
+     `LDAP Authentication_24.0.0.0` v24). Jellyfin loads both, the plugin's own
+     configuration type is cast across two load contexts, and every
+     authentication threw `InvalidCastException`. The older folder is retired
+     (`.superseded-2026-09-18`) and `drift-check` now counts them.
+  2. **The outpost's token was refused** - `403 Forbidden (Token invalid/expired)`
+     - so `authentik-ldap` never started its LDAP listener and Jellyfin's bind
+     failed with `Connection refused`. Regenerated, and pinned in both places.
+  3. **The store held placeholder text.** `cerulean/data/monarch` had
+     `ak-ldap-outpost-2026    # outpost API token (monarch stack)` - quotes,
+     comment and all - for both `AUTHENTIK_LDAP_TOKEN` and
+     `AUTHENTIK_LDAP_BIND_TOKEN`, migrated there from a `.env` whose lines
+     carried inline comments, so `.env`, Vault, the bind user's password and
+     Jellyfin's `LDAP-Auth.xml` all agreed on a value no token had ever been
+     minted from. Both secrets are regenerated and written to all four places,
+     and Jellyfin's plugin config is rewritten from the same template
+     `monarch-init` uses.
+
+  `scripts/drift-check.sh` now runs `scripts/verify-ldap.py` (written for exactly
+  this failure and never wired to anything) as part of its sign-in posture.
+
+### Changed
+
+- **`media.innotel.us`, `media.magnate.innotel.us`, `req.innotel.us` and
+  `req.monarch.innotel.us` publish the app's own sign-in page instead of gating
+  it.** Gating the page asked for a browser OIDC flow from clients that do not
+  have one: a TV client opening the Jellyfin login page in a webview landed on
+  Authentik instead of the form, and Quick Connect had no page to enter its code
+  on. The API half was already passed through for that reason; the page now is
+  too. **Cerulean Authentik is still the only credential store**, by the apps'
+  own wiring - Jellyfin's login page offers its SSO button and native clients
+  bind against the LDAP outpost, Seerr keeps no password of its own and signs in
+  with the Jellyfin account. `scripts/verify-sso.py` asserts both directions:
+  the gated names still redirect to the IdP, these four answer 200 with the app's
+  own page and never redirect to it.
+- **`scripts/jellyfin-oidc-sso.py`** checks the login page's SSO button end to
+  end - the plugin's config (an enabled provider on the Cerulean issuer with this
+  zone's client id) and the callback registered on the `monarch-media` provider -
+  since both halves fail silently from the login page. Run by `drift-check`.
+- **`MONARCH_SSO_REDIRECT_URIS` carries the two Jellyfin callback URIs**
+  (`…/sso/OIDC/Callback/authentik`), because a provider refresh takes the list
+  verbatim and a list without them drops the SSO button's callback.
+
 ## [v1.22] - 2026-09-13
 
 ### Added

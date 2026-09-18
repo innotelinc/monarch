@@ -112,6 +112,15 @@ jobs:
             || { echo "::error::$f no longer runs the Jellyfin login-methods check"; exit 1; }
           grep -q 'jellyfin-login-methods.py --apply' "$f" \
             || { echo "::error::$f does not say how to remediate a local account"; exit 1; }
+          # The two halves that fail as an HTTP 500 on the login form: the LDAP
+          # path (outpost token, then bind credential) and the SSO button
+          # (plugin config, then the callback on the provider).
+          grep -q 'verify-ldap.py' "$f" \
+            || { echo "::error::$f no longer runs verify-ldap.py - the outpost's token and the bind password go unchecked"; exit 1; }
+          grep -q 'jellyfin-oidc-sso.py --check' "$f" \
+            || { echo "::error::$f no longer runs jellyfin-oidc-sso.py - the login page's SSO button goes unchecked"; exit 1; }
+          grep -q 'LDAP-Auth.dll' "$f" \
+            || { echo "::error::$f no longer checks for duplicate copies of the LDAP plugin, which make every authentication return 500"; exit 1; }
           echo "posture: drift-check wired"
 
       # LDAP is what makes every Jellyfin account Authentik's rather than
@@ -170,6 +179,14 @@ jobs:
             || { echo "::error::README no longer documents the Jellyfin posture"; exit 1; }
           grep -q 'jellyfin-login-methods.py' docs/operations.md \
             || { echo "::error::docs/operations.md no longer documents the Jellyfin posture"; exit 1; }
+          for checker in verify-ldap.py jellyfin-oidc-sso.py; do
+            grep -q "$checker" docs/operations.md \
+              || { echo "::error::docs/operations.md no longer documents $checker"; exit 1; }
+          done
+          # The page is published rather than gated, and that decision belongs
+          # where the next operator looks before re-adding a gate.
+          grep -q 'OAUTH2_PROXY_SKIP_AUTH_ROUTES' docker-compose.yml \
+            || { echo "::error::docker-compose.yml no longer states which names publish their own sign-in page"; exit 1; }
           echo "posture: documented"
 
   landing:

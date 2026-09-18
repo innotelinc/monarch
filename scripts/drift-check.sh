@@ -518,6 +518,42 @@ else
   printf '%s\n' "$jellyfin_oidc_out" | indent >&2
 fi
 
+# The LDAP outpost is Jellyfin's credential store now that the page is published,
+# and it fails in two ways that both surface as an HTTP 500 on the login form:
+# the outpost's own API token drifting from the key Authentik holds (the
+# container logs `403 Forbidden (Token invalid/expired)` and never starts its
+# LDAP listener), and the bind password drifting from the bind user's password
+# (the listener is up and every bind returns LDAP result code 49).
+#
+# Both happened on this deployment on 2026-09-18 and cost every Cerulean identity
+# its login - Jellyfin answered 500, and Seerr's Jellyfin sign-in passed that 500
+# straight through. `verify-ldap.py` was written for exactly this and was never
+# run by anything, so it is run here: it binds as the bind user and performs the
+# very search the plugin performs.
+ldap_path_out=$(python3 scripts/verify-ldap.py 2>&1)
+ldap_path_code=$?
+if [ "$ldap_path_code" -eq 0 ]; then
+  say "ok: Jellyfin's LDAP login path works end to end (outpost token + bind credential)"
+else
+  fail "jellyfin: the LDAP login path is broken (verify-ldap.py exit $ldap_path_code) - every Cerulean identity gets HTTP 500 from the login form; see docs/operations.md 'A Cerulean identity cannot sign in'"
+  printf '%s\n' "$ldap_path_out" | indent >&2
+fi
+
+# Two folders carrying the same auth plugin is not cosmetic. Jellyfin loads
+# both, the plugin's configuration type is then cast across two load contexts,
+# and every authentication throws InvalidCastException - so the login form
+# answers 500 for the right password and the wrong one alike, which reads as
+# "the password is wrong" to whoever is typing it. Measured on this deployment
+# on 2026-09-18, where `LDAP-Auth` (v23) and `LDAP Authentication_24.0.0.0` (v24)
+# both held the assembly.
+dup_auth_folders=$(find /docker/appdata/jellyfin/data/plugins -maxdepth 2 \
+  -name 'LDAP-Auth.dll' -not -path '*superseded*' 2>/dev/null | wc -l)
+if [ "$dup_auth_folders" -le 1 ]; then
+  say "ok: one copy of the Jellyfin LDAP plugin is installed"
+else
+  fail "jellyfin: $dup_auth_folders copies of LDAP-Auth.dll are installed - Jellyfin loads all of them and every authentication throws InvalidCastException (HTTP 500). Retire the older folder; see docs/operations.md"
+fi
+
 # ───────────────────────────────────────────────────────────────────────────
 # Homarr's integration-secret encryption key
 # ───────────────────────────────────────────────────────────────────────────

@@ -393,22 +393,45 @@ login), with its own watch history, resume state, ratings and per-profile
 Continue Watching rows. Profiles are managed in Authentik
 (Directory -> Users); admins are granted via the `jellyfin_admins` group.
 
-##### When a Jellyfin sign-in fails (HTTP 500 after Authentik)
+##### When a Cerulean identity cannot sign in (HTTP 500 from the login form)
 
-There are two independent credentials in this chain and **both must match
-Authentik**, or sign-in breaks in a way that looks like a Jellyfin bug:
+There are three independent pieces in this chain and **all of them must match
+Authentik**, or sign-in breaks in a way that looks like a Jellyfin bug — the form
+answers `500` for a correct password exactly as it does for a wrong one:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `authentik-ldap` unhealthy; logs repeat `403 Forbidden (Token invalid/expired)` | The outpost's API token in the container no longer matches the key Authentik holds for the `jellyfin-ldap` outpost | Set the outpost token key to the value in `.env`, then recreate the container |
 | Outpost healthy but bind fails with LDAP `49` (`invalidCredentials`) | `AUTHENTIK_LDAP_BIND_TOKEN` and the bind user's password in Authentik have drifted | `set_password` the bind user to the `.env` value, re-write Jellyfin's `LDAP-Auth.xml`, restart Jellyfin |
+| Log shows `LDAP-Auth, Version=23…` **and** `…Version=24…` with `InvalidCastException: …PluginConfiguration cannot be cast to …PluginConfiguration` | Two plugin folders hold `LDAP-Auth.dll`. Jellyfin loads both, and the plugin's own config type is cast across two load contexts, so *every* authentication throws — 500 for the right password and the wrong one alike | Retire the older folder (`.superseded-<date>`) so one copy remains, then restart Jellyfin |
 
-**The usual root cause is an inline comment.** `AUTHENTIK_LDAP_TOKEN=…` and
-`AUTHENTIK_LDAP_BIND_TOKEN=…` must each sit on a line of their own. Docker
-Compose strips a trailing `# comment` from an unquoted value, so the outpost
-container boots with a truncated token while the value `monarch-init` pinned in
-Authentik keeps the rest of the line — the two can never match. Comments belong
-on the line **above** the value.
+**An HTTP 500 also arrives through Seerr**, whose Jellyfin sign-in passes
+Jellyfin's status straight through as its own: `[Jellyfin API]: Something went
+wrong while authenticating with the Jellyfin server: Request failed with status
+code 500`. Fixing Jellyfin fixes Seerr; `401` there means the path is healthy and
+the password was simply wrong.
+
+**The usual root cause is an inline comment — and it can be inside the stored
+value.** `AUTHENTIK_LDAP_TOKEN=…` and `AUTHENTIK_LDAP_BIND_TOKEN=…` must each sit
+on a line of their own. Docker Compose strips a trailing `# comment` from an
+unquoted value, so the outpost container boots with a truncated token while the
+value `monarch-init` pinned in Authentik keeps the rest of the line — the two can
+never match. Comments belong on the line **above** the value.
+
+On 2026-09-18 that failure had gone one layer deeper: the *store* held the
+placeholder text itself (`ak-ldap-outpost-2026    # outpost API token (monarch
+stack)`, quotes and all) for both keys, migrated there from a `.env` whose lines
+carried comments, so `.env`, Vault, the bind user and the plugin config all
+agreed on a value that no Authentik token had ever been minted from. Comment
+stripping cannot catch that — the comment is *inside* the value. The check that
+would have is `scripts/check-vault-refs.py` in the `ips` repo (it flags a stored
+value that looks like a comment or a placeholder), and the repair is to
+regenerate both secrets and write them to all four places that must agree:
+Authentik, Vault, `.env`, and Jellyfin's `LDAP-Auth.xml`.
+
+A rebuild does not fix a drifted token, because Compose reads `.env` fresh but
+the outpost token in Authentik is whatever was last pinned. After changing
+either value:
 
 A rebuild does not fix a drifted token, because Compose reads `.env` fresh but
 the outpost token in Authentik is whatever was last pinned. After changing
@@ -476,19 +499,35 @@ compose network by container name. qBittorrent's peer port (`6881`) is the one
 deliberate exception — it has to stay reachable.
 
 The four most recent additions were the apps that had a public name and no gate
-at all until 2026-09-16. One of them carries a deliberate exception worth knowing
-before reading a log:
+at all until 2026-09-16. Two of them are **published rather than gated**, and
+that is a decision with a reason worth knowing before reading a log:
 
-- **Jellyfin's API is passed through to native clients.** TV and mobile clients
-  speak `/Users/…`, `/Items`, `/socket` and `/emby/…` rather than opening a sign-in
-  page, and Jellyfin authenticates that surface itself against the LDAP directory.
-  So `jellyfin-sso` carries one `OAUTH2_PROXY_SKIP_AUTH_ROUTES` line
-  (`!=^/(web(/.*)?)?$`) that skips auth for every path that is *not* the web UI:
-  the page keeps demanding a Cerulean session, the API authenticates the client's
-  own token. Measured against that image before it was written in — `/Users/…`,
-  `/Items`, `/socket` and `/emby/System/Info/Public` answer 200 while `/`, `/web/`
-  and `/web/index.html` answer 403 without a session. Re-opening `8097` on the LAN
-  is not the fix if a client breaks; a skip-auth rule for that client is.
+- **Jellyfin and Seerr serve their own sign-in pages** (`media.innotel.us`,
+  `media.magnate.innotel.us`, `req.innotel.us`, `req.monarch.innotel.us`). Until
+  2026-09-18 the *pages* were gated, with the Jellyfin API passed through for
+  native clients — which turned out to be the wrong half: a TV client that opens
+  `…/web/#/login` in a webview was sent to Authentik, a flow it cannot complete,
+  and Quick Connect had no page to enter its code on. Their proxies now carry
+  `OAUTH2_PROXY_SKIP_AUTH_ROUTES: "^/.*$"` and gate nothing, and the identity is
+  enforced where the app already enforces it: Jellyfin's login page offers its
+  **Cerulean Authentik** SSO button and native clients bind against the LDAP
+  outpost, while Seerr has no password of its own and signs in with the Jellyfin
+  account. The app ports stay loopback-only, so the proxy is still the only door
+  on this host. `scripts/verify-sso.py` asserts both directions — the gated names
+  still `302` to the IdP, these four answer `200` with the app's own page and
+  never redirect to it. Re-opening `8097` on the LAN is not the fix if a client
+  breaks; that skip line is.
+
+  **The SSO button is two halves that fail silently** — a plugin config pointing
+  at an issuer nobody signs in against (the button renders and dies inside
+  Authentik), and a provider that never got the callback URI registered (it dies
+  at the redirect with `invalid_request: redirect_uri does not match`).
+  `python3 scripts/jellyfin-oidc-sso.py --check` reads both and reports the
+  installed plugin's version; it is run by `scripts/drift-check.sh`. The plugin
+  binary itself is **installed by hand** — see the note under "What's still
+  manual" — and the callback URIs
+  (`https://media[.magnate].innotel.us/sso/OIDC/Callback/authentik`) are part of
+  `MONARCH_SSO_REDIRECT_URIS`, because a provider refresh takes that list verbatim.
 
 `scripts/verify-sso.py` is the committed regression test for all of this: it
 creates a throwaway Authentik identity, drives a real OIDC flow through every
@@ -936,6 +975,20 @@ sudo docker compose up -d
    webhook endpoint (`subscribe.innotel.us`, five events) exists and writes
    its signing secret into `.env` for you; `./setup.sh` does this
    automatically on first configure. The endpoint must be publicly reachable.
+3. **Jellyfin's OIDC plugin** (`OIDC RBAC`, assembly `Jellyfin.Plugin.OIDC.dll`)
+   is not shipped by `monarch-init`: it provides the **Cerulean Authentik**
+   button on Jellyfin's login page, and it is a hand-installed plugin directory
+   under `/docker/appdata/jellyfin/data/plugins/`. The deployment runs
+   **1.0.10.0** (folder `OIDC-RBAC`). Its own `meta.json` ships no `sourceUrl`,
+   so there is nothing to pin or fetch automatically — a rebuild loses it and
+   the login page comes back without its SSO button. `scripts/jellyfin-oidc-sso.py
+   --check` reports the installed version and both halves of the wiring (the
+   plugin's config and the callback registered on the `monarch-media` provider),
+   so a rebuild that drops it fails `drift-check` instead of quietly offering a
+   form with no SSO. The provider's callback URIs are in
+   `MONARCH_SSO_REDIRECT_URIS`; the ClientId/Authority/ClientSecret are the same
+   `MONARCH_SSO_*` values the gateways use, and the config file carries them
+   under `/docker/appdata/jellyfin/data/plugins/configurations/Jellyfin.Plugin.OIDC.xml`.
 
 
 ## Remaining config
@@ -967,6 +1020,14 @@ re-run `sudo docker start monarch-init` to recreate the categories.
 #### DNS check
 `sudo docker exec -it radarr cat /etc/resolv.conf` — the stack pins
 Cloudflare DNS (1.1.1.1 / 1.0.0.1).
+
+#### The Jellyfin sign-in form answers 500 for every password
+See [When a Cerulean identity cannot sign in](#when-a-cerulean-identity-cannot-sign-in-http-500-from-the-login-form)
+— three pieces have to agree with Authentik (the outpost's API token, the bind
+credential, and one copy of the LDAP plugin), and `python3 scripts/verify-ldap.py`
+tells them apart (`exit 1` unreachable, `2` bind refused, `3` search found
+nobody). `scripts/drift-check.sh` runs it, so the failure is reported before a
+subscriber finds it.
 
 #### Hardlinks check
 Find the same file in `/data/torrents` and `/data/media` and compare inodes:
