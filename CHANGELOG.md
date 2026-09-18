@@ -31,6 +31,18 @@ are written by hand and describe the behaviour change, not the commits.
   are tagged now (Prowlarr's own test passes through the proxy), and the stack
   has 72 indexers instead of 2 - Sonarr 22, Radarr 12, Lidarr 13, Whisparr 6
   after a sync, the counts differing by category as they should.
+- **The Homarr dashboard was a pile of appended tiles with dead links in it.**
+  Twelve tiles 000'd (no DNS record at all): the retired services
+  (`profiles: ["legacy"]`) still carried `*.monarch.local` links, Requestrr's
+  console pointed at a private LAN address, and Onyx, Oasis, Rizzaura and
+  Transmission were tiles for names that were never created in NPM. `scripts/
+  seed-homarr-board.py` is now a design rather than an appender: named sections
+  (`Now`, `Playback`, `Media activity`, `Libraries`, `Indexers & downloads`,
+  `Business`, `Platform`, `Infrastructure`), every tile placed at a designed x/y,
+  anything the design does not name removed - including the app row, so a dead
+  entry cannot linger in the picker - and every board in the database updated,
+  not just the first. The live board went from 44 scattered tiles to 40 in eight
+  sections with no duplicates and no orphans.
 - **Downloads landed in the library, and every \*arr warned about it.** Sonarr,
   Radarr, Lidarr and Whisparr each reported "Download client qBittorrent places
   downloads in the root folder /data/media/<type>", and `lidarr`'s category in

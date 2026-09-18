@@ -1185,6 +1185,32 @@ not left with a whitelist that matches nothing. If `drift-check` reports
 (`configure_qbittorrent` sets it) — an emptied whitelist is otherwise silent, and
 the app simply starts asking again.
 
+#### The dashboard (Homarr) shows a dead link, a duplicate, or the wrong layout
+Homarr v1 keeps boards in SQLite (`/docker/appdata/homarr/appdata/db/db.sqlite`),
+and `scripts/seed-homarr-board.py` **is** the design: the `DESIGN` list in it
+names the sections and the order of the tiles inside them, and re-running the
+script is how a change reaches the board.
+
+```bash
+python3 scripts/seed-homarr-board.py            # apply the design to every board
+python3 scripts/seed-homarr-board.py --help     # (the module docstring is the reference)
+```
+
+It is safe to run against a live Homarr (sqlite is WAL and the writes are one
+transaction), and it converges rather than appends: sections the design does not
+name are removed, tiles are re-placed at the designed x/y, and an app row the
+design no longer carries is deleted **with its tile**. That last part is the
+"dead link" repair — a tile pointing at a name with no DNS record 000s however
+healthy its container is, so `DEAD` in the script lists the services that can
+only fail (the retired `profiles: ["legacy"]` ones, and platforms whose public
+names were never created in NPM).
+
+Add a host to the board only after `getent hosts <name>` answers **on the
+deployment host** — that is the difference between a tile and a dead link, and it
+is how the `*.monarch.local` ones got in. Every board in the database is updated,
+not just the first: a second board is what an operator gets after a teammate
+saves their own, and a half-updated dashboard is worse than an unwritten one.
+
 #### DNS check
 `sudo docker exec -it radarr cat /etc/resolv.conf` — the stack pins
 Cloudflare DNS (1.1.1.1 / 1.0.0.1).
