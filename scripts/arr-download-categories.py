@@ -88,10 +88,10 @@ def call(url: str, method: str = "GET", body: dict | None = None, opener=None,
             return response.status, raw[:400].decode("utf-8", "replace")
 
     try:
-        if opener is not None:
-            return send(opener.open)
-        with urllib.request.build_opener() as plain:
-            return send(plain.open)
+        # An OpenerDirector is not a context manager; opening one per call is the
+        # price of having no session to reuse.
+        return send(opener.open if opener is not None
+                    else urllib.request.build_opener().open)
     except urllib.error.HTTPError as error:
         raw = error.read()
         try:
@@ -133,6 +133,23 @@ def path_drift(live: dict, want: dict[str, str | None]) -> list[tuple[str, str |
 def strays(live: dict, want: dict[str, str]) -> list[str]:
     """Names qBittorrent holds that the manifest does not name."""
     return sorted(set(live) - set(want))
+
+
+def held(strays_: list[str], torrents: list[dict]) -> dict[str, int]:
+    """How many torrents each stray category still files.
+
+    A stray that still holds torrents must NOT be removed: qBittorrent strips the
+    category from every torrent filed under it, so removing first leaves those
+    downloads unlabelled and invisible to the app that queued them (seeding fine,
+    gone from its queue). They have to be moved to the name their app now sends
+    first - which is what migrate_torrents does.
+    """
+    counts = {name: 0 for name in strays_}
+    for torrent in torrents or []:
+        category = torrent.get("category") or ""
+        if category in counts:
+            counts[category] += 1
+    return {name: n for name, n in counts.items() if n}
 
 
 def api_key(appdata: Path, svc: str) -> str:
@@ -187,12 +204,53 @@ def arr_targets(manifest: dict) -> list[tuple[str, str, str, str]]:
     return out
 
 
-def check_arrs(manifest: dict, appdata: Path, apply_fix: bool, dry_run: bool) -> tuple[list[str], bool]:
-    """Does each app's qBittorrent client carry the manifest's category?
+def migrate_torrents(base: str, opener, renames: list[tuple[str, str, str]],
+                     dry_run: bool) -> list[str]:
+    """Re-file torrents under the category their app now sends.
 
-    Returns the findings and whether every app could be read at all.
+    A category change is not only a setting: the downloads already filed under
+    the old name are found by the app *by that name*. Pruning the old category
+    without moving them leaves them unlabelled and invisible to the app that
+    queued them - seeding fine, and absent from its queue. So the rename is
+    carried through to the torrents themselves.
+
+    `renames` is (app, previous category, new category) for every app that was
+    corrected.
     """
     findings: list[str] = []
+    for svc, previous, current in renames:
+        if not previous or previous == current:
+            continue
+        status, torrents = call(f"{base}/api/v2/torrents/info?category={urllib.parse.quote(previous)}",
+                                opener=opener)
+        if status != 200 or not isinstance(torrents, list) or not torrents:
+            continue
+        hashes = [t.get("hash") for t in torrents if t.get("hash")]
+        if not hashes:
+            continue
+        if dry_run:
+            print(f"{svc:<9} {len(hashes)} torrent(s) filed under {previous!r} would move to {current!r}")
+            continue
+        status, _ = call(f"{base}/api/v2/torrents/setCategory", method="POST",
+                         body={"hashes": "|".join(hashes), "category": current},
+                         opener=opener, raw_form=True)
+        if status in (200, 201, 204):
+            print(f"{svc:<9} {len(hashes)} torrent(s) re-filed {previous!r} -> {current!r}")
+        else:
+            findings.append(f"{svc}: {len(hashes)} torrent(s) could not be re-filed out of "
+                            f"{previous!r} (HTTP {status})")
+    return findings
+
+
+def check_arrs(manifest: dict, appdata: Path, apply_fix: bool, dry_run: bool) -> tuple[list[str], bool, list[tuple[str, str, str]]]:
+    """Does each app's qBittorrent client carry the manifest's category?
+
+    Returns the findings, whether every app could be read at all, and every
+    category change that was made (or would be), so the torrents already filed
+    under the old name can be moved with it.
+    """
+    findings: list[str] = []
+    renames: list[tuple[str, str, str]] = []
     reachable = True
     for svc, port, api, want in arr_targets(manifest):
         base = f"http://localhost:{port}/api/{api}"
@@ -228,6 +286,7 @@ def check_arrs(manifest: dict, appdata: Path, apply_fix: bool, dry_run: bool) ->
             findings.append(f"{svc}: sends category {field.get('value')!r}, expected {want!r}")
             continue
         previous = field.get("value")
+        renames.append((svc, previous, want))
         field["value"] = want
         # Servarr has no per-field endpoint: the whole resource travels back.
         status, _ = call(f"{base}/downloadclient/{client['id']}", method="PUT", body=client,
@@ -236,20 +295,16 @@ def check_arrs(manifest: dict, appdata: Path, apply_fix: bool, dry_run: bool) ->
             print(f"{svc:<9} category {previous!r} -> {want!r}")
         else:
             findings.append(f"{svc}: could not set the category (HTTP {status})")
-    return findings, reachable
+    return findings, reachable, renames
 
 
-def check_qbt(manifest: dict, base: str, user: str, password: str,
+def check_qbt(manifest: dict, base: str, opener,
               apply_fix: bool, dry_run: bool) -> tuple[list[str], bool]:
     """Are qBittorrent's categories exactly the manifest's map?"""
     want, paths_known = manifest_categories(manifest)
     if not want:
         return ["manifest carries no qBittorrent categories"], False
     default_path = (manifest.get("qbt") or {}).get("save_path", "/data/torrents")
-    opener, error = qbt_session(base, user, password)
-    if opener is None:
-        return [f"qbittorrent: {error}"], False
-
     status, live = call(f"{base}/api/v2/torrents/categories", opener=opener)
     if status != 200 or not isinstance(live, dict):
         return [f"qbittorrent: categories unreachable (HTTP {status})"], False
@@ -277,15 +332,25 @@ def check_qbt(manifest: dict, base: str, user: str, password: str,
         else:
             findings.append(f"qbittorrent: category {name!r} could not be set (HTTP {status})")
     if extra:
+        status, torrents = call(f"{base}/api/v2/torrents/info", opener=opener)
+        still_filing = held(extra, torrents if status == 200 and isinstance(torrents, list) else [])
+        removable = [name for name in extra if name not in still_filing]
         if not apply_fix or dry_run:
             findings.append(f"qbittorrent: categories not in the manifest: {', '.join(extra)}")
         else:
-            status, _ = call(f"{base}/api/v2/torrents/removeCategories", method="POST",
-                             body={"categories": "\n".join(extra)}, opener=opener, raw_form=True)
-            if status in (200, 201, 204):
-                print(f"qBittorrent removed: {', '.join(extra)}")
-            else:
-                findings.append(f"qbittorrent: could not remove {', '.join(extra)} (HTTP {status})")
+            if removable:
+                status, _ = call(f"{base}/api/v2/torrents/removeCategories", method="POST",
+                                 body={"categories": "\n".join(removable)}, opener=opener,
+                                 raw_form=True)
+                if status in (200, 201, 204):
+                    print(f"qBittorrent removed: {', '.join(removable)}")
+                else:
+                    findings.append(f"qbittorrent: could not remove {', '.join(removable)} "
+                                    f"(HTTP {status})")
+        for name, count in sorted(still_filing.items()):
+            findings.append(f"qbittorrent: category {name!r} still files {count} torrent(s); "
+                            f"removing it would strip them from the app that queued them "
+                            f"(move them to the manifest's category first)")
     if not wrong and not extra:
         if paths_known:
             print(f"qbittorrent holds the manifest's {len(want)} categories at their paths")
@@ -339,8 +404,27 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     applying = not (args.check or args.dry_run)
-    qbt_findings, qbt_ok = check_qbt(manifest, args.qbt, user, password, applying, args.dry_run)
-    arr_findings, arr_ok = check_arrs(manifest, Path(args.appdata), applying, args.dry_run)
+    # Order matters: the apps are corrected first (so their old category names are
+    # known), the torrents filed under those names move with them, and only then
+    # are the old names pruned - pruning a category still holding a download that
+    # an app is tracking is how that download disappears from the app's queue.
+    arr_findings, arr_ok, renames = check_arrs(manifest, Path(args.appdata),
+                                               applying, args.dry_run)
+    opener = None
+    qbt_findings: list[str] = []
+    qbt_ok = False
+    if renames or not args.check:
+        opener, error = qbt_session(args.qbt, user, password)
+        if opener is None:
+            qbt_findings = [f"qbittorrent: {error}"]
+        else:
+            if not args.check:
+                qbt_findings += migrate_torrents(args.qbt, opener, renames, args.dry_run)
+            qbt_findings_qbt, qbt_ok = check_qbt(manifest, args.qbt, opener, applying, args.dry_run)
+            qbt_findings += qbt_findings_qbt
+    else:
+        qbt_ok = True
+        print("qbittorrent: not asked (no app needed a category change)")
 
     findings = qbt_findings + arr_findings
     for finding in findings:

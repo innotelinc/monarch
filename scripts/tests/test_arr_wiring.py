@@ -561,6 +561,14 @@ class WhereADownloadLands(unittest.TestCase):
         self.assertEqual(categories.strays(live, self.WANT),
                          ["downloads", "radarr", "whisparr"])
 
+    def test_a_stray_still_filing_torrents_is_counted_not_removed(self) -> None:
+        # qBittorrent strips the category from every torrent under it, so
+        # removing `lidarr` first leaves those three seeding and invisible to
+        # Lidarr, which finds its downloads by name.
+        torrents = [{"category": "lidarr"}, {"category": "lidarr"}, {"category": "lidarr"},
+                    {"category": "music"}, {"category": ""}, {}]
+        self.assertEqual(categories.held(["lidarr", "radarr"], torrents), {"lidarr": 3})
+
     def test_a_manifest_that_predates_the_map_reports_unknown_paths(self) -> None:
         # Not "every category saves to the default": guessing that would rewrite
         # four correct /data/torrents/<type> paths and call it a fix.
@@ -600,7 +608,8 @@ class WhereADownloadLands(unittest.TestCase):
         with mock.patch.object(categories, "api_key", return_value="k"), \
                 mock.patch.object(categories, "call", side_effect=fake_call), \
                 redirect_stdout(io.StringIO()):
-            findings, reachable = categories.check_arrs(manifest, Path("/appdata"), True, False)
+            findings, reachable, renames = categories.check_arrs(manifest, Path("/appdata"),
+                                                                 True, False)
 
         self.assertEqual(findings, [])
         self.assertTrue(reachable)
@@ -608,6 +617,9 @@ class WhereADownloadLands(unittest.TestCase):
         self.assertEqual(method, "PUT")
         self.assertTrue(url.endswith("/downloadclient/1"))
         self.assertEqual(categories.category_field(body)["value"], "music")
+        # The rename is handed back so the torrents already filed under it move
+        # too - otherwise pruning `lidarr` leaves them invisible to Lidarr.
+        self.assertEqual(renames, [("lidarr", "lidarr", "music")])
 
     def test_a_check_reports_the_wrong_category_and_changes_nothing(self) -> None:
         manifest = {"arr_apps": [{"svc": "radarr", "port": 7878, "api": "v3",
@@ -621,9 +633,10 @@ class WhereADownloadLands(unittest.TestCase):
                                   side_effect=lambda url, method="GET", **k:
                                   (seen.append(method) or (200, [client]))), \
                 redirect_stdout(out), redirect_stderr(out):
-            findings, _ = categories.check_arrs(manifest, Path("/appdata"), False, False)
+            findings, _, renames = categories.check_arrs(manifest, Path("/appdata"), False, False)
         self.assertEqual(len(findings), 1)
         self.assertIn("'radarr'", findings[0])
+        self.assertEqual(renames, [], "a check must not plan a change")
         self.assertEqual(seen, ["GET"], "a check must not PUT")
 
     def test_a_missing_qbittorrent_client_is_named(self) -> None:
@@ -632,8 +645,38 @@ class WhereADownloadLands(unittest.TestCase):
         with mock.patch.object(categories, "api_key", return_value="k"), \
                 mock.patch.object(categories, "call", return_value=(200, [])), \
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            findings, _ = categories.check_arrs(manifest, Path("/appdata"), True, False)
+            findings, _, _ = categories.check_arrs(manifest, Path("/appdata"), True, False)
         self.assertEqual(findings, ["sonarr: no qBittorrent download client"])
+
+    def test_torrents_filed_under_the_old_name_move_with_it(self) -> None:
+        # Pruning `lidarr` while three torrents are filed under it leaves them
+        # seeding and invisible to Lidarr, which finds its downloads by name.
+        torrents = [{"hash": "a" * 40}, {"hash": "b" * 40}]
+        seen = []
+
+        def fake_call(url, method="GET", body=None, **kwargs):
+            seen.append((method, url, body))
+            return (200, torrents) if method == "GET" else (200, None)
+
+        with mock.patch.object(categories, "call", side_effect=fake_call), \
+                redirect_stdout(io.StringIO()):
+            findings = categories.migrate_torrents("http://qbt", None,
+                                                   [("lidarr", "lidarr", "music")], False)
+
+        self.assertEqual(findings, [])
+        method, url, body = seen[-1]
+        self.assertEqual(method, "POST")
+        self.assertIn("setCategory", url)
+        self.assertEqual(body["category"], "music")
+        self.assertEqual(body["hashes"], "|".join(["a" * 40, "b" * 40]))
+
+    def test_a_dry_run_does_not_move_torrents(self) -> None:
+        seen = []
+        with mock.patch.object(categories, "call",
+                               side_effect=lambda *a, **k: (seen.append(a[0]) or (200, [{"hash": "c" * 40}]))), \
+                redirect_stdout(io.StringIO()):
+            categories.migrate_torrents("http://qbt", None, [("lidarr", "lidarr", "music")], True)
+        self.assertEqual(seen, ["http://qbt/api/v2/torrents/info?category=lidarr"])
 
 
 if __name__ == "__main__":

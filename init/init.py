@@ -2122,17 +2122,40 @@ def configure_qbittorrent():
             _log(f"qBittorrent category {path}")
         else:
             _issues.append(f"qBittorrent: category '{cat}' could not be set (HTTP {st})")
+    # A stray that still files torrents is reported, never removed: qBittorrent
+    # strips the category from every torrent under it, so removing one first
+    # leaves those downloads unlabelled and invisible to the app that queued
+    # them - still seeding, gone from its queue. Moving them is a decision (the
+    # app that queued them is what says where they belong), and it is the host
+    # side's job: scripts/arr-download-categories.py knows which app sent what.
     strays = sorted(set(live) - set(QBT_CATEGORIES))
     if strays:
-        st, _, _ = _http(QBT_BASE, "/api/v2/torrents/removeCategories", method="POST",
-                         body={"categories": "\n".join(strays)},
-                         opener=opener, raw_form=True)
-        if st in (200, 201, 204):
-            _log(f"qBittorrent categories removed (not in the manifest): "
-                 f"{', '.join(strays)}")
-        else:
-            _issues.append("qBittorrent: stray categories could not be removed "
-                           f"({', '.join(strays)}) - HTTP {st}")
+        st, _, torrents = _http(QBT_BASE, "/api/v2/torrents/info", opener=opener)
+        filing: dict[str, int] = {}
+        if st == 200 and isinstance(torrents, list):
+            for torrent in torrents:
+                cat = torrent.get("category") or ""
+                if cat in strays:
+                    filing[cat] = filing.get(cat, 0) + 1
+        removable = [cat for cat in strays if cat not in filing]
+        kept = [cat for cat in strays if cat in filing]
+        if removable:
+            st, _, _ = _http(QBT_BASE, "/api/v2/torrents/removeCategories", method="POST",
+                             body={"categories": "\n".join(removable)},
+                             opener=opener, raw_form=True)
+            if st in (200, 201, 204):
+                _log(f"qBittorrent categories removed (not in the manifest): "
+                     f"{', '.join(removable)}")
+            else:
+                _issues.append("qBittorrent: stray categories could not be removed "
+                               f"({', '.join(removable)}) - HTTP {st}")
+        if kept:
+            _log(f"qBittorrent categories kept, still filing torrents: {', '.join(kept)}")
+            _issues.append(
+                f"qBittorrent: {', '.join(kept)} are not in the manifest but still file "
+                f"torrents; run scripts/arr-download-categories.py to move those downloads "
+                f"to the categories the apps send (removing the category first would strip "
+                f"them from the apps' queues)")
 
     # Default save path + no temp dir so category paths are used as-is.
     # setPreferences takes its settings as a `json` form field.
