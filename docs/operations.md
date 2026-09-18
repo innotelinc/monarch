@@ -616,6 +616,34 @@ What each one deliberately leaves alone:
   deployment state that changes — the repo would be describing last month's
   deployment, and `drift-check` runs the same script either way.
 
+#### Seerr's Owner is a row id, not a permission
+
+Seerr has exactly one Owner, and the server decides it by row: in
+`server/routes/user/index.ts` (image `ghcr.io/seerr-team/seerr`, v3.4.1)
+`canMakePermissionsChange()` refuses to let anybody but `user.id === 1` grant
+admin, and `PUT /:id` refuses to let anybody but row 1 modify row 1. So the
+**badge, and the right to hand out admin, belong to whichever account completed
+setup first** — usually the break-glass Jellyfin admin, which nobody signs in as,
+and which `main.localLogin: false` can make unreachable outright. No endpoint
+moves it; `permissions` is a bitfield and `Owner` is derived from the row.
+
+`scripts/seerr-owner.py` **swaps the two accounts** rather than renumbering
+either: every `user` column except `id`, every foreign key onto `user.id`
+(discovered from the schema, so a table a future release adds follows too) and
+the live sessions all change sides. Nothing is deleted, so the displaced account
+keeps its id, its data and its admin bit.
+
+```
+python3 scripts/seerr-owner.py --check      # who owns Seerr (the default)
+python3 scripts/seerr-owner.py --apply      # hand it to the manifest's account
+```
+
+The account is named once, in the invariants manifest (`jellyseerr.owner`, from
+`MONARCH_SEERR_OWNER`, default `dhunter`), which is what `monarch-init` writes,
+what the script reads and what `drift-check` judges. Swap it back by running
+`--apply --account <other>`. Sign in again afterwards: sessions are re-pointed to
+follow their identity, which is a deliberate change of who they are.
+
 Setup (the gateway deploys with the app on this host; this repo's script
 reconciles the proxy hosts and supports `--check`/`--dry-run`):
 
@@ -838,7 +866,7 @@ against the services:
 | qBittorrent | WebUI login with the shared credentials, `movies`/`tv`/`music`/`xxx` categories |
 | Jellyfin | admin API access — the shared credentials when they still match, otherwise the durable admin API key (`/docker/appdata/init/jellyfin-api-key.txt`; when the local admin password has diverged the check says so and names the repair, `scripts/jellyfin-admin-password.py --set`) — plus media libraries (Movies / TV Shows / Music / Other) |
 | Jellyfin API keys held by the apps | Jellyseerr's copy in `settings.json` and Homarr's encrypted copy in its database still authenticate — the state a half-finished rotation leaves behind, which nothing else catches since the container and its own UI stay up (`jellyfin-admin-password.py --check-apps`) |
-| Jellyseerr | initialized, Jellyfin sign-in enabled |
+| Jellyseerr | initialized, Jellyfin sign-in enabled, owned by the account the manifest names (`seerr-owner.py --check`) |
 | Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
 | Cerulean Vault | `.env` holds materialized values with no unresolved `vault://` reference — the drift-check greps for leftovers (read-only; `scripts/vault-migrate.py --dry-run` shows which plaintext values are not in the store yet) |

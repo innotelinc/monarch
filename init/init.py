@@ -69,6 +69,15 @@ PASS = os.environ.get("MONARCH_PASSWORD", "monarch8")
 APPDATA = "/docker/appdata"
 INIT_DIR = "/docker/appdata/init"
 
+# The account that owns Seerr. Seerr's Owner is `user.id === 1` and nothing else
+# (`server/routes/user/index.ts`: `canMakePermissionsChange` refuses to let
+# anybody but row 1 grant admin, and the PUT /:id guard refuses to let anybody
+# but row 1 modify row 1), so an install whose first account was the break-glass
+# Jellyfin admin is owned by an account the operator never signs in as. The name
+# goes into the invariants manifest, where scripts/seerr-owner.py reads it and
+# scripts/drift-check.sh judges it, so all three mean the same account.
+SEERR_OWNER = os.environ.get("MONARCH_SEERR_OWNER", "dhunter")
+
 JELLYFIN_BASE = "http://jellyfin:8096"
 JELLYSEERR_BASE = "http://jellyseerr:5055"
 QBT_BASE = "http://qbittorrent:8080"
@@ -2498,7 +2507,12 @@ def build_invariants() -> dict:
             "oidc_client_id": MONARCH_SSO_CLIENT_ID,
             "plugin_pins": _pin_summary(),
         },
-        "jellyseerr": {"port": PORTS["jellyseerr"]},
+        "jellyseerr": {
+            "port": PORTS["jellyseerr"],
+            # Who owns it (Seerr's Owner is row id 1). Asserted live by
+            # drift-check through scripts/seerr-owner.py --check.
+            "owner": SEERR_OWNER,
+        },
         # Bazarr keeps no local login: the Cerulean Authentik gate on
         # bazarr.<domain> is the only one (drift-check asserts exactly that).
         "bazarr": {"port": PORTS["bazarr"], "auth_type": "none"},

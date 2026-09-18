@@ -10,6 +10,20 @@ are written by hand and describe the behaviour change, not the commits.
 
 ## [Unreleased]
 
+### Added
+
+- **Seerr's Owner can belong to the account people actually sign in as.**
+  Seerr decides its Owner by row id (`user.id === 1` in
+  `server/routes/user/index.ts`: only row 1 may grant admin, and only row 1 may
+  modify row 1), so an install whose first account was the break-glass Jellyfin
+  admin had an Owner nobody uses — and `main.localLogin: false` makes that
+  account unreachable when the gateway is the only way in. `scripts/seerr-owner.py`
+  hands it over by **swapping** the two accounts (identity, permissions, every
+  foreign key onto `user.id`, and the live sessions), so the displaced admin keeps
+  its row, its data and its admin bit. The account is named once in the invariants
+  manifest (`jellyseerr.owner`, `MONARCH_SEERR_OWNER`) and `drift-check` now fails
+  when Seerr is owned by somebody else.
+
 ### Fixed
 
 - **Prowlarr's app tests pass, and its indexers now reach all four \*arrs.**

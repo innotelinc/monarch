@@ -134,6 +134,7 @@ in its UI):
 | App | What it would otherwise keep | Command |
 |---|---|---|
 | Jellyseerr | `localLogin` — an email-and-password store Seerr owns | `scripts/seerr-login-methods.py --check` / `--apply` |
+| Jellyseerr | whose account is the **Owner** (`user.id === 1` — the badge, and the right to grant admin) | `scripts/seerr-owner.py --check` / `--apply` |
 | Jellyfin | accounts in Jellyfin's own database rather than the LDAP outpost | `scripts/jellyfin-login-methods.py --check` / `--apply` |
 
 With both clean, the *only* credential that opens Seerr is the Cerulean-backed Jellyfin

@@ -553,6 +553,22 @@ else
   printf '%s\n' "$seerr_login_out" | indent >&2
 fi
 
+# Seerr's Owner is a row id, not a permission (`server/routes/user/index.ts`), so
+# an install whose first account was the break-glass admin is owned by an account
+# nobody signs in as - and the badge, plus the right to grant admin, never moves.
+# seerr-owner.py reads the account from the invariants manifest and swaps the two
+# rows; here we only judge it.
+seerr_owner_out=$(python3 scripts/seerr-owner.py --check 2>&1)
+seerr_owner_code=$?
+if [ "$seerr_owner_code" -eq 0 ]; then
+  say "ok: Seerr is owned by the account this estate names - $(printf '%s' "$seerr_owner_out" | grep -m1 'Owner ' | sed 's/^ *//')"
+elif [ "$seerr_owner_code" -eq 2 ]; then
+  say "note: Seerr's owner could not be judged (skipped) - $(printf '%s' "$seerr_owner_out" | tail -1)"
+else
+  fail "jellyseerr: Seerr is not owned by the account the manifest names - run scripts/seerr-owner.py --apply (nothing is deleted: the two accounts are swapped)"
+  printf '%s\n' "$seerr_owner_out" | indent >&2
+fi
+
 jellyfin_login_out=$(python3 scripts/jellyfin-login-methods.py --check 2>&1)
 jellyfin_login_code=$?
 # The local accounts the deployment *keeps* are declared, not exempted in
