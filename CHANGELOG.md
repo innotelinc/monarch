@@ -10,6 +10,20 @@ are written by hand and describe the behaviour change, not the commits.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dead LDAP outpost is a drift finding, not a note.** `drift-check` treated
+  "nothing answered" as a note so a slow bind would not be mistaken for a drifted
+  credential — measured cost on 2026-09-18: the outpost ran 45 minutes with its
+  API token rejected (`403 Forbidden (Token invalid/expired)`, `/ldap
+  healthcheck` failing 541 times, port 3389 never opened), every Cerulean identity
+  got HTTP 500 from Jellyfin's login form, and the run still reported *all
+  live-stack invariants OK*. An outpost that is up, past its start period
+  (`DRIFT_LDAP_GRACE_SEC`, 90s) and still not serving now fails the run and names
+  the repair — `docker compose up -d --force-recreate authentik-ldap`, because
+  init pins the token but a process already running against the old one keeps
+  failing. `authentik-ldap` is also probed for restarts and stale images now.
+
 ### Added
 
 - **Seerr's Owner can belong to the account people actually sign in as.**

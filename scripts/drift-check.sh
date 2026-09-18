@@ -642,15 +642,44 @@ fi
 # Exit 1 is "nothing answered", which is a different finding from "the outpost
 # answered and refused": the outpost's own bind replies take seconds against the
 # Cerulean Authentik, and this check used to call a late reply a drifted
-# credential. An unanswered probe is a note (the outpost is slow or restarting);
-# a *result code* is the drift this exists for.
-ldap_path_out=$(python3 scripts/verify-ldap.py 2>&1)
+# credential. A *result code* is the drift this exists for.
+#
+# An unanswered probe is a note only while the outpost is plausibly still coming
+# up. It stayed a note unconditionally until 2026-09-18, and the cost was
+# measured: the outpost ran for 45 minutes with its API token rejected (the
+# container log said `403 Forbidden (Token invalid/expired)`, its own
+# `/ldap healthcheck` failed 541 times, and it never opened 3389), every Cerulean
+# identity got HTTP 500 from Jellyfin's login form, and this run reported
+# "all live-stack invariants OK". The container's state is what separates the two
+# cases: running, past its start period, and still not serving is a failure; a
+# container that is starting, or was restarted seconds ago, is a note. The fix is
+# a recreate (init pins the token, but a process already running against the old
+# one keeps failing on its own), which is what verify-ldap.py prints.
+# How long the outpost may be up without answering before that is a finding
+# instead of a note: its own healthcheck gives up in ~5s per try and the start
+# period is 3s, so a minute and a half is well past "still booting".
+ldap_grace=${DRIFT_LDAP_GRACE_SEC:-90}
+ldap_probe=${MONARCH_LDAP_PROBE:-python3 scripts/verify-ldap.py}
+ldap_path_out=$($ldap_probe 2>&1)
 ldap_path_code=$?
 if [ "$ldap_path_code" -eq 0 ]; then
   say "ok: Jellyfin's LDAP login path works end to end (outpost token + bind credential)"
 elif [ "$ldap_path_code" -eq 1 ]; then
-  say "note: the Authentik LDAP outpost did not answer (skipped) - Jellyfin logins fail while it does not; $(printf '%s' "$ldap_path_out" | grep -m1 FAIL)"
-  printf '%s\n' "$ldap_path_out" | indent >&2
+  ldap_state=$(docker inspect authentik-ldap --format '{{.State.Status}}' 2>/dev/null || echo "")
+  ldap_health=$(docker inspect authentik-ldap --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || echo "")
+  ldap_started=$(docker inspect authentik-ldap --format '{{.State.StartedAt}}' 2>/dev/null || echo "")
+  ldap_age=""
+  if [ -n "$ldap_started" ]; then
+    ldap_age=$(( $(date +%s) - $(date -d "$ldap_started" +%s 2>/dev/null || echo 0) ))
+  fi
+  if [ -z "$ldap_state" ]; then
+    say "note: no authentik-ldap container on this host (skipped) - Jellyfin logins through Cerulean need it; $(printf '%s' "$ldap_path_out" | grep -m1 FAIL)"
+  elif [ "$ldap_state" = "running" ] && { [ "$ldap_health" = "starting" ] || { [ -n "$ldap_age" ] && [ "$ldap_age" -lt "$ldap_grace" ]; }; }; then
+    say "note: the Authentik LDAP outpost is still coming up (state=$ldap_state health=$ldap_health age=${ldap_age}s) - Jellyfin logins fail until it listens"
+  else
+    fail "jellyfin: the Authentik LDAP outpost is up but not serving (state=$ldap_state health=$ldap_health age=${ldap_age}s), so every Cerulean identity gets HTTP 500 from the login form - run 'docker compose up -d --force-recreate authentik-ldap' (init pins the token; a process already running against the old one keeps failing)"
+    printf '%s\n' "$ldap_path_out" | indent >&2
+  fi
 else
   fail "jellyfin: the LDAP login path is broken (verify-ldap.py exit $ldap_path_code) - every Cerulean identity gets HTTP 500 from the login form; see docs/operations.md 'A Cerulean identity cannot sign in'"
   printf '%s\n' "$ldap_path_out" | indent >&2
@@ -965,7 +994,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       fi
     fi
     say "ok: infra container $cname (restarts=$rc)"
-  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo qbittorrent; echo jellyfin; echo jellyseerr; echo bazarr; echo homarr; echo nginx-proxy-manager; } | sort -u)
+  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo qbittorrent; echo jellyfin; echo jellyseerr; echo bazarr; echo homarr; echo nginx-proxy-manager; echo authentik-ldap; } | sort -u)
 fi
 
 rm -f /tmp/drift-body.$$

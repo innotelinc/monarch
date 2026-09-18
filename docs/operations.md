@@ -1274,8 +1274,28 @@ token has drifted", and the fix it printed sent an operator to rotate a working
 secret. The wait is now well past the observed latency (15s, `--timeout`), a
 silent attempt is retried once (`--attempts`), and the two cases come back
 differently: *no reply* is `exit 1` (unreachable — the outpost is slow or
-restarting), while a *result code* is `exit 2`. `drift-check` reports the first as
-a note and fails on the second.
+restarting), while a *result code* is `exit 2`.
+
+`drift-check` fails on a result code, and on **no reply from an outpost that has
+been up past its own start period** (`DRIFT_LDAP_GRACE_SEC`, 90s). That second
+half is new: *no reply* was a note unconditionally until 2026-09-18, and the cost
+was measured — the outpost ran 45 minutes with its API token rejected (container
+log `403 Forbidden (Token invalid/expired)`, `/ldap healthcheck` failing 541
+times, port 3389 never opened), every Cerulean identity got HTTP 500 from
+Jellyfin's login form, and the drift run still said *all live-stack invariants
+OK*. A container that is starting, or was restarted seconds ago, is still a note;
+one that is up, past the grace window, and not serving is a finding, and the
+message names the repair:
+
+```bash
+docker compose up -d --force-recreate authentik-ldap
+```
+
+Recreating is what fixes it: `monarch-init` pins the outpost's token to
+`AUTHENTIK_LDAP_TOKEN`, but a process that started against the previous one keeps
+failing on its own (the retry backoff grows to minutes and it never re-reads the
+environment). `MONARCH_LDAP_PROBE` overrides the probe command, which is how the
+note and fail paths are tested without breaking a working outpost.
 
 #### Hardlinks check
 Find the same file in `/data/torrents` and `/data/media` and compare inodes:
