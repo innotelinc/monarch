@@ -1239,6 +1239,18 @@ is how the `*.monarch.local` ones got in. Every board in the database is updated
 not just the first: a second board is what an operator gets after a teammate
 saves their own, and a half-updated dashboard is worse than an unwritten one.
 
+The board is a **directory, not a status page**: a tile is a name that resolves
+and is routed, and the service behind it being down is a finding about that
+service. As of 2026-09-18 two tiles answer **502** for that reason — `AthenIQ
+Learn` and `AthenIQ Studio` point at `192.168.1.46:18080`, the Tutor (Open edX)
+caddy AthenIQ ran there, and no host runs that stack today (no tutor containers
+anywhere, the tutor data volumes are gone from `.46`; the repo declares
+tutor-lms/cms/meilisearch/mysql/mongo/redis in `ips/groups/extras/1-primary.yml`
+but not the caddy). They are kept deliberately: the links are right, and the day
+the LMS is restored the tiles are already there. Verified with
+`curl -o /dev/null -w '%{http_code}' -k <url>` from the deployment host, which is
+how every tile was checked before the redesign.
+
 #### DNS check
 `sudo docker exec -it radarr cat /etc/resolv.conf` — the stack pins
 Cloudflare DNS (1.1.1.1 / 1.0.0.1).
