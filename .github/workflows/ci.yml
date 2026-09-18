@@ -123,6 +123,23 @@ jobs:
           # callback (above), and the plugin *binaries* that provide it (below).
           grep -q 'jellyfin-plugin-pin.py --check' "$f" \
             || { echo "::error::$f no longer runs jellyfin-plugin-pin.py - a swapped, missing or duplicated plugin build goes unchecked"; exit 1; }
+          # The *arr wiring fails as "Prowlarr is not registering" while every
+          # app shows as registered: an *arr answers 400 to a Host it was not
+          # told about, so the app tests and the indexer sync are refused. Both
+          # halves have to stay checked. The indexer half is --offline in the
+          # timer on purpose: testing thirty trackers every six hours is real
+          # traffic, and the deep test is the operator's command.
+          grep -q 'arr-allowed-hosts.py --check' "$f" \
+            || { echo "::error::$f no longer runs arr-allowed-hosts.py - a *arr left off the allowlist refuses Prowlarr with 400"; exit 1; }
+          grep -q 'prowlarr-indexers.py --check --offline' "$f" \
+            || { echo "::error::$f no longer runs prowlarr-indexers.py --check --offline - 'Prowlarr holds no indexers' goes unreported"; exit 1; }
+          # And the two readers of the shared list must both still read it.
+          for reader in init/init.py scripts/arr-allowed-hosts.py; do
+            grep -q 'arr-allowlist.txt' "$reader" \
+              || { echo "::error::$reader no longer reads init/arr-allowlist.txt"; exit 1; }
+          done
+          grep -q '^prowlarr$' init/arr-allowlist.txt \
+            || { echo "::error::init/arr-allowlist.txt no longer names prowlarr - the *arrs call it back by that name"; exit 1; }
           echo "posture: drift-check wired"
 
       # LDAP is what makes every Jellyfin account Authentik's rather than

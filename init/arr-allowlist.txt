@@ -1,0 +1,48 @@
+# Every hostname the stack reaches an *arr app through.
+#
+# WHY THIS FILE EXISTS AND WHY IT IS DATA. An *arr answers HTTP 400 to any Host
+# it was not told about — that is the DNS-rebinding guard, and its default names
+# only localhost. So Prowlarr asking Sonarr at `http://sonarr:8989` for an
+# indexer sync, or Sonarr asking Prowlarr back at `http://prowlarr:9696` for a
+# search, is refused *before authentication runs*: the app connection tests fail
+# with 400 and the *arr never receives an indexer. From the UI that reads as
+# "Prowlarr is not registered and has no indexers", which is not what is wrong.
+#
+# Comment lines start with #. Names are separated by commas or newlines.
+# `*` is a wildcard for one or more leading labels, as in the apps themselves.
+#
+# Read by BOTH sides of the deployment, so the list cannot drift between them:
+#   init/init.py            writes it into each app (it runs in a container and
+#                           has no docker socket, so it cannot restart them)
+#   scripts/arr-allowed-hosts.py
+#                           applies it from the host and restarts the apps it
+#                           changed — a running *arr reads this setting at
+#                           startup
+localhost
+127.0.0.1
+# the estate hosts, so an operator on any of them is not the odd one out
+192.168.1.30
+192.168.1.46
+192.168.1.50
+192.168.1.56
+# every edge name (prowlarr.monarch.innotel.us, media.magnate.innotel.us, ...)
+*.monarch.innotel.us
+# the containers that call these apps from inside the network
+prowlarr
+sonarr
+radarr
+lidarr
+whisparr
+bazarr
+jellyfin
+jellyseerr
+homarr
+qbittorrent
+sabnzbd
+flaresolverr
+requestrr
+monarch-init
+monarch-health
+monarch-recs
+clipbucket
+iptv

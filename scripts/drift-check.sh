@@ -576,6 +576,46 @@ else
   printf '%s\n' "$ldap_path_out" | indent >&2
 fi
 
+# The *arr wiring: Prowlarr <-> Sonarr/Radarr/Lidarr/Whisparr.
+#
+# An *arr answers 400 to any Host name it was not told about, and its default
+# names only localhost - so Prowlarr's app test and its indexer sync, which run
+# over the compose network, were refused before authentication every time. The
+# apps still showed all four registered and an empty indexer list in each of
+# them, which reads like "Prowlarr is not registering" and is not what was wrong.
+# `arr-allowed-hosts.py --check` compares the live apps against the shared list
+# (init/arr-allowlist.txt) and exits 2 on drift, 1 when the apps are not on this
+# host at all - which is a note here, not a failure.
+#
+# The second half is the indexers themselves: one that is present but blocked
+# makes a search look empty rather than unconfigured. The timer asks the cheap
+# question (--offline: Prowlarr holds an enabled indexer) because the deep one -
+# testing every definition, some through FlareSolverr - is thirty requests to
+# public trackers, which is not something to run every six hours. `--check`
+# without --offline is the operator's, and is documented for that. Exit 2 is the
+# finding, 1 is "no Prowlarr here".
+arr_hosts_out=$(python3 scripts/arr-allowed-hosts.py --check 2>&1)
+arr_hosts_code=$?
+if [ "$arr_hosts_code" -eq 0 ]; then
+  say "ok: every *arr answers the names the stack calls it by (Prowlarr's app tests can pass)"
+elif [ "$arr_hosts_code" -eq 1 ]; then
+  say "note: the *arr apps are not reachable from here (skipped) - $(printf '%s' "$arr_hosts_out" | grep -m1 FAIL)"
+else
+  fail "*arr: an app does not answer a name its peers call it by (arr-allowed-hosts.py exit $arr_hosts_code) - Prowlarr's app test and indexer sync fail with HTTP 400, so no indexer reaches that app; run scripts/arr-allowed-hosts.py (it restarts what it changes)"
+  printf '%s\n' "$arr_hosts_out" | indent >&2
+fi
+
+prowlarr_idx_out=$(python3 scripts/prowlarr-indexers.py --check --offline 2>&1)
+prowlarr_idx_code=$?
+if [ "$prowlarr_idx_code" -eq 0 ]; then
+  say "ok: $(printf '%s' "$prowlarr_idx_out" | head -1)"
+elif [ "$prowlarr_idx_code" -eq 1 ]; then
+  say "note: Prowlarr is not reachable from here (skipped)"
+else
+  fail "prowlarr: no enabled indexer (prowlarr-indexers.py exit $prowlarr_idx_code) - searches look empty rather than unconfigured; run scripts/prowlarr-indexers.py to add the ones that work, and --check to test the ones already there"
+  printf '%s\n' "$prowlarr_idx_out" | indent >&2
+fi
+
 # ───────────────────────────────────────────────────────────────────────────
 # Homarr's integration-secret encryption key
 # ───────────────────────────────────────────────────────────────────────────

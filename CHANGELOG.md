@@ -12,6 +12,25 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **Prowlarr's app tests pass, and its indexers now reach all four \*arrs.**
+  Every app connection test answered `ProwlarrUrl: Prowlarr URL is invalid,
+  <app> cannot connect to Prowlarr`, and Sonarr, Radarr, Lidarr and Whisparr
+  each showed an empty indexer list - while the Apps page showed all four
+  registered. The cause is a Host-header guard, not a URL: an \*arr answers HTTP
+  400 to any name it was not told about, and the allowlist named only the edge
+  domain, so Prowlarr calling `http://sonarr:8989` (and Sonarr calling back at
+  `http://prowlarr:9696`) was refused *before authentication ran*. The list is
+  now `init/arr-allowlist.txt`, read by BOTH `monarch-init` (which writes it into
+  all five apps) and `scripts/arr-allowed-hosts.py`, which applies it from the
+  host and **restarts what it changed** - the setting is only read at startup,
+  which is why "applied" on its own had left the apps still refusing. Verified
+  live: all four app tests return 200.
+- **The two indexers Prowlarr had were both Cloudflare-blocked and neither
+  carried the `cloudflare` tag**, so FlareSolverr was configured and unused and
+  every search came back empty from an indexer the UI showed as enabled. Both
+  are tagged now (Prowlarr's own test passes through the proxy), and the stack
+  has 72 indexers instead of 2 - Sonarr 22, Radarr 12, Lidarr 13, Whisparr 6
+  after a sync, the counts differing by category as they should.
 - **A Cerulean identity can sign in again - in Jellyfin, and therefore in Seerr
   and on the TV clients.** Three unrelated faults had stacked up, and all three
   read as "Jellyfin is broken" from a login form that answers HTTP 500 for a
@@ -47,6 +66,22 @@ are written by hand and describe the behaviour change, not the commits.
   cases report differently: **no reply is `exit 1` (unreachable)**, a result code
   is `exit 2` (the credential). `drift-check` treats the first as a note and
   still fails on the second.
+
+### Added
+
+- **`scripts/prowlarr-indexers.py`** - adds every Prowlarr definition marked
+  `public` that passes Prowlarr's own test (retrying a Cloudflare failure
+  through FlareSolverr and tagging the indexer when that is what made it work),
+  repairs the ones already in the list the same way, and adds nothing it has not
+  just tested. `--check` tests the indexers already there; `--check --offline`
+  is the cheap question the drift timer asks, because testing thirty trackers
+  every six hours is a way to earn a ban. Definitions marked `private` are never
+  attempted - they want an account that does not exist here.
+- **`scripts/arr-allowed-hosts.py`** - applies `init/arr-allowlist.txt` to all
+  five apps and restarts the ones it changed (`--no-restart` to batch that,
+  `--check` for the drift timer, exit 2 on drift and 1 when the apps are not on
+  this host). `monarch-init` reads the same file, so the container side and the
+  host side cannot disagree about what a name is.
 
 ### Changed
 

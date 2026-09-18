@@ -194,7 +194,8 @@ docker-compose.yml          # the whole stack
 init/                       # monarch-init + monarch-seed (first-boot wiring, single source of truth)
 scripts/                    # setup.sh, install-monarch.sh, npm-proxy-hosts.py, check-proxy-ports.py,
                             # drift-check.sh, fresh-install-check.sh, stripe-webhooks.sh,
-                            # seed-homarr-board.py, ISO/offline builders
+                            # seed-homarr-board.py, arr-allowed-hosts.py,
+                            # prowlarr-indexers.py, ISO/offline builders
 homarr/                     # Homarr board seed, legacy v0 format (board.default.json);
                             # v1 boards are seeded into sqlite by scripts/seed-homarr-board.py
 .github/workflows/          # release, fresh-install check, full-stack drift CI

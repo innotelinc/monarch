@@ -43,13 +43,17 @@ the manual setup:
   channel list to `/opt/epg/channels.xml` (see the Live TV section below)
 * **Sonarr / Radarr / Lidarr / Whisparr** - sets Forms authentication with
   your credentials, adds the correct root folder, adds the **qBittorrent**
-  download client (category `tv` / `movies` / `music` / `xxx`) and enables
-  hardlinks + extra-file import
+  download client (category `tv` / `movies` / `music` / `xxx`), enables
+  hardlinks + extra-file import, and writes the shared `AllowedHosts` list
+  (`init/arr-allowlist.txt`) so Prowlarr can reach it over the compose network
 * **Prowlarr** - sets Forms authentication, adds **qBittorrent** as the
   download client, registers Radarr, Sonarr, Lidarr and Whisparr as
   **Apps** (full sync) - so indexers added in Prowlarr flow to all *arr apps -
-  and adds a **FlareSolverr proxy** (tag an indexer `cloudflare` to route it
-  through the proxy)
+  writes the same `AllowedHosts` list for itself (the *arrs call it back at
+  `http://prowlarr:9696`), and adds a **FlareSolverr proxy** (tag an indexer
+  `cloudflare` to route it through the proxy). **Adding the indexers themselves
+  is a separate, explicit step** - `scripts/prowlarr-indexers.py`, below - and
+  it is the only part of this wiring that talks to public trackers.
 * **qBittorrent** - verifies the WebUI login and creates the `movies`, `tv`,
   `music` and `xxx` categories with their save paths under `/data/torrents`
 * **Bazarr** - sets basic authentication with your credentials and connects
@@ -1055,6 +1059,53 @@ Grab the temporary password from `sudo docker logs qbittorrent` (search for
 "A temporary password is provided for this session"), log in at
 http://localhost:8080, set your password in **Tools > Options > Web UI**, then
 re-run `sudo docker start monarch-init` to recreate the categories.
+
+#### An *arr has no indexers, and Prowlarr says "Prowlarr URL is invalid, Sonarr cannot connect to Prowlarr"
+That message is about the **Host header**, not the URL. Every *arr answers HTTP
+400 to a Host name it was not told about (its DNS-rebinding guard, whose default
+names only localhost), so Prowlarr calling `http://sonarr:8989` — or Sonarr
+calling Prowlarr back at `http://prowlarr:9696` for a search — is refused before
+authentication runs. The *arr then never receives an indexer, which is why the
+app list can look perfectly registered while every indexer list is empty.
+
+The allowlist is `init/arr-allowlist.txt`, read by both `monarch-init` (which
+writes it into all five apps) and `scripts/arr-allowed-hosts.py` (which applies
+it from the host). One detail decides whether the fix works:
+
+```bash
+python3 scripts/arr-allowed-hosts.py --check   # exit 2 = drift, 1 = apps not on this host
+python3 scripts/arr-allowed-hosts.py           # apply, and RESTART what changed
+```
+
+**A running *arr has already read the old list**, so an "applied" API call on its
+own leaves it refusing the new name. That is what `--no-restart` is for (apply
+now, restart in a window). `scripts/drift-check.sh` runs the `--check`, and
+Prowlarr's **Settings → Apps → Test** must answer 200 for all four.
+
+`--check` sends each app one request carrying the name its peers use and treats
+the 400 as the finding, rather than comparing `allowedHosts` — the setting is not
+a reliable proxy for it in either direction (Lidarr 2.x answers a service-name
+Host fine and never persists the field, so a comparison reports permanent drift
+for an app that works).
+
+#### Prowlarr has indexers but every search comes back empty
+An indexer that is present and blocked looks exactly like an indexer that is not
+there, except that it makes searches look *configured*. Most public trackers sit
+behind Cloudflare, and Prowlarr only routes an indexer through FlareSolverr when
+the indexer carries the `cloudflare` tag.
+
+```bash
+python3 scripts/prowlarr-indexers.py --check             # test every indexer already added
+python3 scripts/prowlarr-indexers.py                     # add the public ones that answer
+python3 scripts/prowlarr-indexers.py --privacy public,semiPrivate   # try the closed-signup ones too
+```
+
+It adds nothing it has not just tested, retries a Cloudflare failure through the
+proxy (tagging the indexer when that works), and repairs the ones already in the
+list the same way. Definitions marked `private` are never attempted: they want an
+account. `--check --offline` (what the drift timer runs) only asks whether an
+enabled indexer exists, because testing thirty trackers every six hours is a way
+to earn a ban — the deep test is the operator's command above.
 
 #### DNS check
 `sudo docker exec -it radarr cat /etc/resolv.conf` — the stack pins

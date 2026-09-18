@@ -102,6 +102,15 @@ QBT_CATEGORIES = {
     "xxx": "/data/torrents/xxx",
 }
 
+# Every hostname the *arr apps answer to (init/arr-allowlist.txt, mounted at
+# /init). An *arr refuses any Host it was not told about with a bare 400 - so
+# without this, Prowlarr's own app test and indexer sync (which run over the
+# compose network as `http://sonarr:8989` and back as `http://prowlarr:9696`)
+# were every one of them refused, and no indexer ever reached a *arr. The file
+# is shared with scripts/arr-allowed-hosts.py, which is the side that can
+# restart an app - this setting is only read at startup.
+ARR_ALLOWLIST_FILE = os.environ.get("MONARCH_ARR_ALLOWLIST", "/init/arr-allowlist.txt")
+
 # Host-published ports (must match docker-compose.yml) - used for the
 # invariants manifest the drift check probes on localhost.
 PORTS = {
@@ -1544,6 +1553,56 @@ def monarch_app_base(svc, port):
     return f"http://{svc}:{port}"
 
 
+def parse_arr_allowlist(text):
+    """The names in init/arr-allowlist.txt, comment lines and blanks removed."""
+    names = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0]
+        for name in line.replace(",", " ").split():
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def arr_allowlist():
+    """The shared allowlist, or [] when it is not mounted where we expect."""
+    try:
+        with open(ARR_ALLOWLIST_FILE, "r", encoding="utf-8") as handle:
+            return parse_arr_allowlist(handle.read())
+    except OSError:
+        return []
+
+
+def ensure_allowed_hosts(base, api, key):
+    """Make an *arr answer its in-network callers, not only the edge name.
+
+    Keeps every name already in the list (an operator's addition is not ours to
+    drop) and reports that a restart is what applies the change: a running app
+    has already read the old list, which is how four registered apps sat next to
+    an empty indexer list in all four of them.
+    """
+    want = arr_allowlist()
+    if not want:
+        return False, f"no allowlist at {ARR_ALLOWLIST_FILE}"
+    status, _, j = _http(base, f"/api/{api}/config/host", headers={"X-Api-Key": key})
+    if status != 200 or not isinstance(j, dict):
+        return False, "config/host unreachable"
+    have = [h.strip() for h in (j.get("allowedHosts") or "").split(",") if h.strip()]
+    missing = [h for h in want if h not in have]
+    if not missing:
+        return True, "allowed hosts complete"
+    j["allowedHosts"] = ",".join(have + missing)
+    # Servarr rejects the PUT unless these agree; there is no per-field endpoint.
+    if j.get("password"):
+        j["passwordConfirmation"] = j["password"]
+    status, _, _ = _http(base, f"/api/{api}/config/host", method="PUT", body=j,
+                         headers={"X-Api-Key": key})
+    if status in (200, 202):
+        return True, (f"allowed hosts extended (+{len(missing)}) - restart the app "
+                      "to apply it")
+    return False, f"allowed hosts not applied (HTTP {status})"
+
+
 def set_monarch_app_auth(base, api, key):
     """Let Cerulean Authentik be the ONLY login for a *arr app.
 
@@ -1686,6 +1745,11 @@ def configure_monarch_apps():
         if not ok:
             _issues.append(f"{svc}: {msg}")
 
+        ok, msg = ensure_allowed_hosts(base, api, key)
+        _log(f"{svc}: allowed hosts -> {msg}")
+        if not ok:
+            _issues.append(f"{svc}: {msg}")
+
         media_root = f"/data/media/{app['media']}"
         want_name = "Music" if svc == "lidarr" else None
         extra = lidarr_root_folder_defaults(base, key) if svc == "lidarr" else None
@@ -1756,6 +1820,14 @@ def configure_prowlarr():
         _log(f"Prowlarr: external auth set (HTTP {status})")
     else:
         _log("Prowlarr: external auth already configured")
+
+    # The other half of the wiring: the *arrs reach Prowlarr at
+    # `http://prowlarr:9696`, and a Host that is not listed is a 400 no matter
+    # who is asking or what credential they hold.
+    ok, msg = ensure_allowed_hosts(PROWLARR_BASE, "v1", key)
+    _log(f"Prowlarr: allowed hosts -> {msg}")
+    if not ok:
+        _issues.append(f"prowlarr: {msg}")
 
     # qBittorrent download client (skip if one already exists).
     status, _, clients = _http(PROWLARR_BASE, "/api/v1/downloadclient",
@@ -2231,6 +2303,9 @@ def build_invariants() -> dict:
     return {
         "version": 1,
         "arr_apps": arr_apps,
+        # The names every one of those apps must answer, as written by init and
+        # checkable from the host (scripts/arr-allowed-hosts.py --check).
+        "arr_allowed_hosts": arr_allowlist(),
         "prowlarr": {
             "port": PORTS["prowlarr"],
             "apps": [PROWLARR_APP_IMPLS[app["svc"]] for app in MONARCH_APPS],
