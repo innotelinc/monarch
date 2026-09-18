@@ -29,16 +29,20 @@ x-common-keys: &common-keys
 # (AuthenticationMethod=External), so Authentik is the only door.
 #
 # There is no nginx auth_request and no Authentik outpost anywhere in the path.
-# Endpoints are listed explicitly because Authentik advertises its *base* URL as
-# the issuer while the app-scoped endpoints live under /application/o/<slug>/,
-# which go-oidc's discovery issuer check would reject.
+# Endpoints are listed explicitly (no discovery), and the issuer is the
+# APP-SCOPED one — see the note beside OAUTH2_PROXY_OIDC_ISSUER_URL below.
 #
 # The NPM proxy host for each app forwards here instead of to the app: ports
 # are on the HOST (NPM runs in its own container and reaches these by IP).
 x-sso-env: &sso-env
   OAUTH2_PROXY_PROVIDER: oidc
   OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
-  OAUTH2_PROXY_OIDC_ISSUER_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/
+  # The App-scoped issuer, trailing slash included — this is the value Authentik
+  # puts in the id_token's `iss`. oauth2-proxy verifies `iss` against this even
+  # with --skip-oidc-discovery, so pointing it at the bare base makes every
+  # callback die with `oidc: id token issued by a different provider` and the
+  # browser gets HTTP 500 on /oauth2/callback (reproduced on v7.8.2).
+  OAUTH2_PROXY_OIDC_ISSUER_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/${MONARCH_SSO_APP:-monarch-media}/
   OAUTH2_PROXY_LOGIN_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/authorize/
   OAUTH2_PROXY_REDEEM_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/token/
   OAUTH2_PROXY_PROFILE_URL: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}/application/o/userinfo/
@@ -53,11 +57,18 @@ x-sso-env: &sso-env
   OAUTH2_PROXY_EMAIL_DOMAINS: "*"
   # Two flags without which nobody can sign in at all, both measured live on the
   # edge gateway (see npm/docs/stack.md):
-  #   * Authentik's `email` scope mapping sets email_verified: false, and
-  #     oauth2-proxy refuses such a token -> the callback dies with
+  #   * Authentik's DEFAULT `email` scope mapping sets email_verified: false,
+  #     and oauth2-proxy refuses such a token -> the callback dies with
   #     "email in id_token (...) isn't verified" (HTTP 500).
   #   * without the groups claim, --allowed-groups restricts nothing, so any
   #     authenticated identity is admitted.
+  #
+  # The platform standard fixes BOTH at the source: every OAuth2 provider now
+  # pins `Innotel OAuth Mapping: OpenID 'email'` (email_verified: true) and the
+  # `groups` mapping — see ips/docs/sign-in-posture.md and
+  # scripts/authentik-conform-providers.py. The flag below is therefore now a
+  # fallback rather than the fix; it stays until every gateway has been
+  # recreated against the conformed providers, then it can go.
   OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true"
   OAUTH2_PROXY_OIDC_GROUPS_CLAIM: groups
   OAUTH2_PROXY_ALLOWED_GROUPS: ${SSO_REQUIRED_GROUP:-cerulean-platform}

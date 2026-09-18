@@ -141,10 +141,14 @@ def call(base_url: str, key: str, method: str, path: str, body: dict | None = No
             raw = response.read().decode("utf-8", "replace")
             return json.loads(raw) if raw.strip() else None
     except urllib.error.HTTPError as error:
-        detail = (error.read() or b"").decode("utf-8", "replace")[:200]
-        if error.code in (401, 403):
+        detail = (error.read() or b"").decode("utf-8", "replace").strip()[:200]
+        # 401 is the key not being accepted; 403 is Jellyfin refusing the change
+        # and saying why. They are different problems, and blaming the key for a
+        # 403 sent an operator to re-mint a working key — measured, on the
+        # `Administrators cannot be disabled.` refusal below.
+        if error.code == 401:
             raise JellyfinError(
-                f"Jellyfin rejected the admin API key (HTTP {error.code}) — re-mint it with "
+                f"Jellyfin rejected the admin API key (HTTP 401) — re-mint it with "
                 "`python3 scripts/jellyfin-admin-password.py --set`"
             ) from None
         raise JellyfinError(f"{method} {path} answered HTTP {error.code} {detail}".strip()) from None

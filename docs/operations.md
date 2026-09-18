@@ -393,13 +393,61 @@ login), with its own watch history, resume state, ratings and per-profile
 Continue Watching rows. Profiles are managed in Authentik
 (Directory -> Users); admins are granted via the `jellyfin_admins` group.
 
-Test the outpost from the host:
+##### When a Jellyfin sign-in fails (HTTP 500 after Authentik)
 
+There are two independent credentials in this chain and **both must match
+Authentik**, or sign-in breaks in a way that looks like a Jellyfin bug:
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `authentik-ldap` unhealthy; logs repeat `403 Forbidden (Token invalid/expired)` | The outpost's API token in the container no longer matches the key Authentik holds for the `jellyfin-ldap` outpost | Set the outpost token key to the value in `.env`, then recreate the container |
+| Outpost healthy but bind fails with LDAP `49` (`invalidCredentials`) | `AUTHENTIK_LDAP_BIND_TOKEN` and the bind user's password in Authentik have drifted | `set_password` the bind user to the `.env` value, re-write Jellyfin's `LDAP-Auth.xml`, restart Jellyfin |
+
+**The usual root cause is an inline comment.** `AUTHENTIK_LDAP_TOKEN=…` and
+`AUTHENTIK_LDAP_BIND_TOKEN=…` must each sit on a line of their own. Docker
+Compose strips a trailing `# comment` from an unquoted value, so the outpost
+container boots with a truncated token while the value `monarch-init` pinned in
+Authentik keeps the rest of the line — the two can never match. Comments belong
+on the line **above** the value.
+
+A rebuild does not fix a drifted token, because Compose reads `.env` fresh but
+the outpost token in Authentik is whatever was last pinned. After changing
+either value:
+
+```bash
+cd 3-media/monarch
+# The outpost picks up AUTHENTIK_LDAP_TOKEN from .env:
+docker compose up -d --force-recreate --no-deps authentik-ldap
+# Jellyfin re-reads LDAP-Auth.xml (the plugin only reloads its config on restart):
+docker restart jellyfin
 ```
-ldapsearch -x -H ldap://localhost:389 -b dc=innotel,dc=us -D "cn=authentik-ldap,ou=users,dc=innotel,dc=us" -w ak-ldap-bind-2026 '(memberOf=cn=paid_users,ou=groups,dc=innotel,dc=us)' cn
+
+Then prove the path the plugin uses — bind, then the `paid_users` search — with
+the standard-library checker (it resolves the outpost's address from Docker, so
+it runs from the host or from inside any container on the network):
+
+```bash
+python3 scripts/verify-ldap.py
+#   PASS the Jellyfin LDAP login path works end to end.
+#   FAIL bind: result code 49 (invalidCredentials).
 ```
+
+`monarch-init` is the supported way to re-pin both: with clean `.env` values it
+sets the outpost token key and the bind user's password from them and rewrites
+Jellyfin's config.
 
 #### Cerulean SSO for the media apps
+
+The platform standard — Authentik as the only login, the two conforming
+patterns, the required scope mappings, the one issuer mode and the shared session
+store — is
+[`ips/docs/sign-in-posture.md`](../../../ips/docs/sign-in-posture.md).
+Every gateway in this stack is **pattern B**: one `oauth2-proxy` per app sharing
+the stack's single `monarch-media` Authentik provider and one `_innotel_sso`
+cookie, with the app bound to loopback so the gateway is the only door.
+The stack's `SSO_SESSION_REDIS_HOST` must be the store's **routable** address
+(`192.168.1.46`); this host does not run the store, so `172.17.0.1` here is this
+host's own empty docker0 and every sign-in 500s on `/oauth2/callback`.
 
 The media management apps (**Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
 Prowlarr, qBittorrent, Sabnzbd**), the `req.` Jellyseerr alias, **Jellyfin**

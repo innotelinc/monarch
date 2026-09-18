@@ -387,6 +387,18 @@ def require(condition, message):
         raise CheckFailed(message)
 
 
+def unreachable(err, host):
+    """A name that does not resolve, or a connection that never lands.
+
+    Reported, never raised: a resolver that cannot see one of these names is a
+    finding about *this* run, and an unhandled `socket.gaierror` out of urllib
+    would bury the other fourteen results behind a traceback.
+    """
+    if isinstance(err, socket.gaierror) or "Name or service not known" in str(err):
+        return f"cannot resolve {host} from this host ({err})"
+    return f"cannot reach {host} ({err})"
+
+
 def check(condition, message):
     if condition:
         print(f"  {OK}  {message}")
@@ -530,6 +542,10 @@ def main():
                 print(f"  {BAD}  {err}")
                 failures += 1
                 continue
+            except (urllib.error.URLError, OSError) as err:
+                print(f"  {BAD}  {unreachable(err, host)}")
+                failures += 1
+                continue
             check(client.cookie(SESSION_COOKIE) is not None,
                   f"{SESSION_COOKIE} session cookie issued")
             status, _, body = client.get(app + "/")
@@ -558,6 +574,9 @@ def main():
                 check(status == 403, f"{label}: non-member -> HTTP {status} (expected 403)")
         except CheckFailed as err:
             print(f"  {BAD}  {label}: {err}")
+            failures += 1
+        except (urllib.error.URLError, OSError) as err:
+            print(f"  {BAD}  {label}: {unreachable(err, host)}")
             failures += 1
 
         # ── 4. the app ports are not a second door ─────────────────────────
