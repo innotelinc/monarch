@@ -1068,6 +1068,20 @@ tells them apart (`exit 1` unreachable, `2` bind refused, `3` search found
 nobody). `scripts/drift-check.sh` runs it, so the failure is reported before a
 subscriber finds it.
 
+The plugin *build* is `scripts/jellyfin-plugin-pin.py`'s job now, including the
+two-copies case: it counts the folders carrying each assembly, so v23 installed
+beside v24 is reported by name rather than by symptom.
+
+**A bind that gets no reply is not a wrong credential.** The outpost logs
+`took-ms: 3316` for a bind against the Cerulean Authentik, and `verify-ldap.py`
+used to wait 3 seconds — so a reply that was merely late was reported as "the bind
+token has drifted", and the fix it printed sent an operator to rotate a working
+secret. The wait is now well past the observed latency (15s, `--timeout`), a
+silent attempt is retried once (`--attempts`), and the two cases come back
+differently: *no reply* is `exit 1` (unreachable — the outpost is slow or
+restarting), while a *result code* is `exit 2`. `drift-check` reports the first as
+a note and fails on the second.
+
 #### Hardlinks check
 Find the same file in `/data/torrents` and `/data/media` and compare inodes:
 `ls -i /data/media/movies/<your video>` vs

@@ -22,8 +22,18 @@ already shares the outpost's compose network.
     python3 scripts/verify-ldap.py                 # resolve host via docker
     python3 scripts/verify-ldap.py --host 127.0.0.1 --port 3389
 
-Exit codes: 0 the login path works; 1 the outpost is unreachable; 2 the bind
-failed; 3 the search failed or returned nobody.
+A bind that gets **no reply at all** is not a wrong credential. The outpost logs
+`took-ms: 3316` for a bind against the Cerulean Authentik, and this script used to
+wait 3 seconds — so a reply that was merely late was reported as "the bind token
+has drifted", sending an operator to rotate a working credential while the real
+state was "nothing answered in time". The wait is now far past the observed
+latency, a silent attempt is retried once, and the two cases report differently:
+a missing reply is *unreachable* (exit 1) and a result code is a *credential*
+(exit 2).
+
+Exit codes: 0 the login path works; 1 the outpost is unreachable (including "no
+reply within the wait"); 2 the bind was refused; 3 the search failed or returned
+nobody.
 """
 
 from __future__ import annotations
@@ -35,8 +45,16 @@ import re
 import socket
 import subprocess
 import sys
+import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The outpost's own latency is the reason this is not 3 seconds. It logs
+# `took-ms: 3316` for a bind against the Cerulean Authentik — a real reply that
+# arrives *after* a 3-second wait, which read as "the bind token has drifted" and
+# sent an operator to rotate a working credential. Wait well past the observed
+# latency; this is a check, not a hot path.
+DEFAULT_TIMEOUT_SECONDS = 15.0
 
 
 # ── .env (comments stripped, because that is the bug this guards) ─────────────
@@ -139,11 +157,18 @@ def _result_code(body: bytes) -> int | None:
     return body[2] if len(body) >= 3 and body[0] == 0x0A else None
 
 
-def _collect(conn: socket.socket, idle: float) -> bytes:
-    """Read until the server closes or goes idle — the LDAP response is complete.
+def _collect(conn: socket.socket, idle: float, until_tag: int | None = None) -> bytes:
+    """Read until the awaited message has arrived, the peer closes, or it goes idle.
 
-    Deliberately not 'stop at the first 0x65/0x61 byte': payload data contains
-    those bytes too, and stopping early truncates a search mid-response.
+    `until_tag` is the protocolOp that *ends* the exchange (0x61 for a bind
+    response, 0x65 for searchResDone), and it is matched by parsing complete
+    messages rather than by searching for a byte: payload data contains those
+    bytes too (an 'a' in a DN is 0x61), and matching on the byte would stop a
+    search mid-response.
+
+    Waiting for the message rather than for the idle timer is what keeps the
+    raised timeout cheap: a peer that answers in 3s and then holds the connection
+    open is read in 3s, not in 3s plus the whole wait.
     """
     conn.settimeout(idle)
     data = b""
@@ -155,6 +180,8 @@ def _collect(conn: socket.socket, idle: float) -> bytes:
         if not chunk:
             break
         data += chunk
+        if until_tag is not None and any(tag == until_tag for tag, _ in _iter_messages(data)):
+            break
     return data
 
 
@@ -175,13 +202,18 @@ def _container_host() -> str | None:
     return None
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     env = load_env(os.path.join(REPO_ROOT, ".env"))
     parser = argparse.ArgumentParser(description="Verify the Authentik LDAP outpost Jellyfin logs in through.")
     parser.add_argument("--host", default=None, help="outpost host (default: the container's address, else localhost)")
     parser.add_argument("--port", type=int, default=None, help="outpost port (default: AUTHENTIK_LDAP_PORT, 3389)")
-    parser.add_argument("--timeout", type=float, default=3.0, help="idle time to wait for each reply, seconds")
-    args = parser.parse_args()
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS,
+                        help=f"idle time to wait for each reply, seconds "
+                             f"(default {DEFAULT_TIMEOUT_SECONDS:g})")
+    parser.add_argument("--attempts", type=int, default=2,
+                        help="times to try when nothing answers at all (default 2): a "
+                             "slow IdP is not a wrong credential")
+    args = parser.parse_args(argv)
 
     server = setting(env, "AUTHENTIK_LDAP_SERVER", "authentik-ldap")
     port = args.port or int(setting(env, "AUTHENTIK_LDAP_PORT", "3389"))
@@ -218,29 +250,65 @@ def main() -> int:
 
     # One connection for both operations: the outpost treats a search on an
     # unbound connection as anonymous ("Anonymous BindDN not allowed", code 50).
-    try:
-        conn = socket.create_connection((host, port), timeout=5)
-        conn.sendall(_bind_message(bind_dn, bind_token))
-        bind_reply = _collect(conn, args.timeout)
-    except OSError as error:
-        print(f"FAIL unreachable: {error}", file=sys.stderr)
-        print("     fix: docker compose up -d --force-recreate authentik-ldap", file=sys.stderr)
-        return 1
+    #
+    # Retried only when *nothing* came back. A silent attempt is the outpost being
+    # slow or mid-restart, and one retry is what separates that from a check that
+    # goes red on a 3-second reply; an actual result code (49) is answered on the
+    # first attempt, because retrying a refused credential cannot change it.
+    bind_code = None
+    bind_elapsed = 0.0
+    attempts = max(1, args.attempts)
+    for attempt in range(1, attempts + 1):
+        try:
+            conn = socket.create_connection((host, port), timeout=5)
+            started = time.monotonic()
+            conn.sendall(_bind_message(bind_dn, bind_token))
+            bind_reply = _collect(conn, args.timeout, until_tag=0x61)
+            bind_elapsed = time.monotonic() - started
+        except OSError as error:
+            print(f"FAIL unreachable: {error}", file=sys.stderr)
+            print("     fix: docker compose up -d --force-recreate authentik-ldap", file=sys.stderr)
+            return 1
 
-    bind_codes = [_result_code(body) for tag, body in _iter_messages(bind_reply) if tag == 0x61]
-    bind_code = bind_codes[0] if bind_codes else None
+        bind_codes = [_result_code(body) for tag, body in _iter_messages(bind_reply)
+                      if tag == 0x61]
+        bind_code = bind_codes[0] if bind_codes else None
+        if bind_code is not None:
+            break
+        conn.close()
+        if attempt < attempts:
+            print(f"  note no bind reply within {args.timeout:g}s — retrying "
+                  f"({attempt}/{attempts - 1})")
+
+    if bind_code is None:
+        conn.close()
+        print(f"FAIL unreachable: no bind reply within {args.timeout:g}s "
+              f"({attempts} attempt(s)) — the outpost is up but not answering.",
+              file=sys.stderr)
+        print("     fix: nothing to rotate. A slow or restarting outpost answers late, not",
+              file=sys.stderr)
+        print("          wrongly; check `docker logs authentik-ldap` for the reply time,",
+              file=sys.stderr)
+        print("          then raise --timeout or re-run. A bind that is *refused* reports code 49.",
+              file=sys.stderr)
+        return 1
     if bind_code != 0:
         conn.close()
-        print(f"FAIL bind: result code {bind_code} (0 = success; 49 = invalidCredentials).", file=sys.stderr)
-        print("     fix: the bind token has drifted from the bind user's password in Authentik.")
-        print(f"          set the password for '{bind_user}' to AUTHENTIK_LDAP_BIND_TOKEN, rewrite")
-        print("          Jellyfin's LDAP-Auth.xml, then: docker restart jellyfin")
+        print(f"FAIL bind: result code {bind_code} (0 = success; 49 = invalidCredentials) "
+              f"after {bind_elapsed:.1f}s.", file=sys.stderr)
+        print("     fix: the bind token has drifted from the bind user's password in Authentik.",
+              file=sys.stderr)
+        print(f"          set the password for '{bind_user}' to AUTHENTIK_LDAP_BIND_TOKEN, rewrite",
+              file=sys.stderr)
+        print("          Jellyfin's LDAP-Auth.xml, then: docker restart jellyfin", file=sys.stderr)
         return 2
-    print("  ok bind: result code 0")
+    print(f"  ok bind: result code 0 ({bind_elapsed:.1f}s)")
 
     try:
+        started = time.monotonic()
         conn.sendall(_search_message(base_dn, "memberOf", f"cn={bind_group},ou=groups,{base_dn}"))
-        search_reply = _collect(conn, args.timeout)
+        search_reply = _collect(conn, args.timeout, until_tag=0x65)
+        search_elapsed = time.monotonic() - started
     except OSError as error:
         print(f"FAIL search: {error}", file=sys.stderr)
         return 3
@@ -257,11 +325,13 @@ def main() -> int:
             print("     fix: the bind user needs the LDAP 'search full directory' grant for this", file=sys.stderr)
             print("          provider (monarch-init applies it; it warns when it cannot).", file=sys.stderr)
         return 3
-    print(f"  ok search: {entries} entr{'y' if entries == 1 else 'ies'} in {bind_group}")
+    print(f"  ok search: {entries} entr{'y' if entries == 1 else 'ies'} in {bind_group} "
+          f"({search_elapsed:.1f}s)")
     if entries == 0:
         print(f"FAIL search: nobody is in '{bind_group}' — LDAP works but no login would resolve.", file=sys.stderr)
-        print("     fix: Magnate's Stripe webhook grants membership on checkout; check the")
-        print("          subscriber is active there, or add the user in Authentik.")
+        print("     fix: Magnate's Stripe webhook grants membership on checkout; check the",
+              file=sys.stderr)
+        print("          subscriber is active there, or add the user in Authentik.", file=sys.stderr)
         return 3
 
     print("PASS the Jellyfin LDAP login path works end to end.")

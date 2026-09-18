@@ -559,10 +559,18 @@ fi
 # straight through. `verify-ldap.py` was written for exactly this and was never
 # run by anything, so it is run here: it binds as the bind user and performs the
 # very search the plugin performs.
+# Exit 1 is "nothing answered", which is a different finding from "the outpost
+# answered and refused": the outpost's own bind replies take seconds against the
+# Cerulean Authentik, and this check used to call a late reply a drifted
+# credential. An unanswered probe is a note (the outpost is slow or restarting);
+# a *result code* is the drift this exists for.
 ldap_path_out=$(python3 scripts/verify-ldap.py 2>&1)
 ldap_path_code=$?
 if [ "$ldap_path_code" -eq 0 ]; then
   say "ok: Jellyfin's LDAP login path works end to end (outpost token + bind credential)"
+elif [ "$ldap_path_code" -eq 1 ]; then
+  say "note: the Authentik LDAP outpost did not answer (skipped) - Jellyfin logins fail while it does not; $(printf '%s' "$ldap_path_out" | grep -m1 FAIL)"
+  printf '%s\n' "$ldap_path_out" | indent >&2
 else
   fail "jellyfin: the LDAP login path is broken (verify-ldap.py exit $ldap_path_code) - every Cerulean identity gets HTTP 500 from the login form; see docs/operations.md 'A Cerulean identity cannot sign in'"
   printf '%s\n' "$ldap_path_out" | indent >&2

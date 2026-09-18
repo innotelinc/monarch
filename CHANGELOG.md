@@ -37,6 +37,16 @@ are written by hand and describe the behaviour change, not the commits.
 
   `scripts/drift-check.sh` now runs `scripts/verify-ldap.py` (written for exactly
   this failure and never wired to anything) as part of its sign-in posture.
+- **`verify-ldap.py` no longer blames the credential for a late reply.** The
+  outpost logs `took-ms: 3316` for a bind against the Cerulean Authentik while
+  the script waited 3 seconds, so a working bind token was reported as
+  "has drifted from the bind user's password" and the printed fix sent an
+  operator to rotate a secret that was fine. The wait is 15s now, a completely
+  silent attempt is retried once, the wait ends when the awaited message arrives
+  (not on an idle timer, so a fast outpost is read in milliseconds), and the two
+  cases report differently: **no reply is `exit 1` (unreachable)**, a result code
+  is `exit 2` (the credential). `drift-check` treats the first as a note and
+  still fails on the second.
 
 ### Changed
 
