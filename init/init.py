@@ -8,7 +8,11 @@ python:3.12-slim, stdlib only - no pip packages needed). It configures:
   * Jellyfin      - first-run wizard (creates the admin user with the shared
                     credentials), adds media libraries, logs in and exports
                     the admin token (usable as an API key) to
-                    /docker/appdata/init/jellyfin-api-key.txt
+                    /docker/appdata/init/jellyfin-api-key.txt, wires the
+                    LDAP-Auth plugin at the Authentik outpost, and installs
+                    the pinned OIDC plugin (init/jellyfin-oidc-plugin.json)
+                    plus its config, so its login page offers Cerulean
+                    Authentik
   * Sonarr/Radarr/
     Lidarr/Whisparr - external auth (the Cerulean Authentik gate in front of
                     each app is the only login), root folder, qBittorrent
