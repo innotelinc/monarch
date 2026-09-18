@@ -491,12 +491,18 @@ fi
 
 jellyfin_login_out=$(python3 scripts/jellyfin-login-methods.py --check 2>&1)
 jellyfin_login_code=$?
+# The local accounts the deployment *keeps* are declared, not exempted in
+# code: `JELLYFIN_LOCAL_ACCOUNTS` in .env lists the logins that cannot use the
+# OIDC button (the TV and mobile clients), beside the break-glass
+# `JELLYFIN_ADMIN_USER`. Declaring them there rather than in the checker is what
+# keeps this honest — the account name is deployment state that changes, and the
+# count is printed so the set cannot grow quietly.
 if [ "$jellyfin_login_code" -eq 0 ]; then
-  say "ok: Jellyfin's only local account is the break-glass admin"
+  say "ok: Jellyfin's only local accounts are the ones this deployment declares"
 elif [ "$jellyfin_login_code" -eq 2 ]; then
   say "note: Jellyfin's local accounts could not be judged (skipped) - $(printf '%s' "$jellyfin_login_out" | tail -1)"
 else
-  fail "jellyfin: a local account can sign in outside Authentik - run scripts/jellyfin-login-methods.py --apply"
+  fail "jellyfin: a local account can sign in outside Authentik - declare it in JELLYFIN_LOCAL_ACCOUNTS (.env) if that is deliberate, otherwise run scripts/jellyfin-login-methods.py --apply"
   printf '%s\n' "$jellyfin_login_out" | indent >&2
 fi
 
@@ -514,8 +520,26 @@ if [ "$jellyfin_oidc_code" -eq 0 ]; then
 elif [ "$jellyfin_oidc_code" -eq 2 ]; then
   say "note: Jellyfin's OIDC SSO could not be judged (skipped) - $(printf '%s' "$jellyfin_oidc_out" | tail -1)"
 else
-  fail "jellyfin: the login page's SSO button is not wired - see scripts/jellyfin-oidc-sso.py --check, then docs/operations.md (the OIDC plugin is installed by hand)"
+  fail "jellyfin: the login page's SSO button is not wired - see scripts/jellyfin-oidc-sso.py --check, then docs/operations.md"
   printf '%s\n' "$jellyfin_oidc_out" | indent >&2
+fi
+
+# ...and the plugin that draws the button is pinned rather than remembered.
+# Jellyfin's catalog does not carry it and its own meta.json ships no
+# `sourceUrl`, so before init/jellyfin-oidc-plugin.json the only record of what
+# was installed was a zip in /tmp: a rebuilt host came back with a login form
+# and no SSO, and a swapped build looked like nothing at all. The check is a
+# hash comparison against the pin, because "a .dll is present" is not the
+# question - an older build still renders a button that fails later.
+oidc_plugin_out=$(python3 scripts/jellyfin-oidc-plugin.py --check 2>&1)
+oidc_plugin_code=$?
+if [ "$oidc_plugin_code" -eq 0 ]; then
+  say "ok: Jellyfin's SSO button comes from the pinned OIDC plugin"
+elif [ "$oidc_plugin_code" -eq 2 ]; then
+  say "note: the Jellyfin OIDC plugin pin could not be judged (skipped) - $(printf '%s' "$oidc_plugin_out" | tail -1)"
+else
+  fail "jellyfin: the OIDC plugin is not the pinned build - run scripts/jellyfin-oidc-plugin.py --install, then restart Jellyfin; see docs/operations.md"
+  printf '%s\n' "$oidc_plugin_out" | indent >&2
 fi
 
 # The LDAP outpost is Jellyfin's credential store now that the page is published,

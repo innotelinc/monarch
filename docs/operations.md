@@ -524,8 +524,11 @@ that is a decision with a reason worth knowing before reading a log:
   at the redirect with `invalid_request: redirect_uri does not match`).
   `python3 scripts/jellyfin-oidc-sso.py --check` reads both and reports the
   installed plugin's version; it is run by `scripts/drift-check.sh`. The plugin
-  binary itself is **installed by hand** — see the note under "What's still
-  manual" — and the callback URIs
+  binary is **pinned** in `init/jellyfin-oidc-plugin.json` (release plus the
+  sha256 of the zip *and* of the assembly inside it): `monarch-init` installs it,
+  so a rebuilt host comes back with the button, and
+  `python3 scripts/jellyfin-oidc-plugin.py --check` judges the installed build
+  against the pin. The callback URIs
   (`https://media[.magnate].innotel.us/sso/OIDC/Callback/authentik`) are part of
   `MONARCH_SSO_REDIRECT_URIS`, because a provider refresh takes that list verbatim.
 
@@ -577,7 +580,7 @@ still sign in:
 | App | What it keeps | Check | Repair |
 |-----|---------------|-------|--------|
 | Jellyseerr | `main.localLogin` — "Enable Local Sign-In": email and password, in Seerr's own store | `python3 scripts/seerr-login-methods.py --check` | `--apply` |
-| Jellyfin | accounts in Jellyfin's own database rather than the LDAP outpost | `python3 scripts/jellyfin-login-methods.py --check` | `--apply` |
+| Jellyfin | accounts in Jellyfin's own database rather than the LDAP outpost | `python3 scripts/jellyfin-login-methods.py --check` | `--apply`, or declare it (`JELLYFIN_LOCAL_ACCOUNTS`) |
 
 Neither is configuration in this repo, which is why the two scripts exist rather
 than `.env` keys: Seerr re-enables local sign-in on a settings import, and
@@ -590,13 +593,24 @@ What each one deliberately leaves alone:
   that authenticates nobody *into Seerr*: the proxy proves a session for the name,
   but Seerr still needs its own, and the Jellyfin account is how a user gets one
   without a second password. The password is what is removed, not the sign-in.
-- **Jellyfin's break-glass `admin`.** It is the one local account Monarch wants
-  (`jellyfin-admin-password.py` keeps its password in step with
+- **Jellyfin's break-glass `admin`.** It is one of the local accounts Monarch
+  wants (`jellyfin-admin-password.py` keeps its password in step with
   `MONARCH_PASSWORD` and mints the durable API key the services use), so the check
-  passes when it is the only local account left and `--apply` never touches it.
-  Everything else local is *disabled* rather than deleted: the login is refused,
-  the watch history and the account id survive, and the account can be handed back
-  to the LDAP provider by enabling it again.
+  passes when the declared accounts are the only ones left and `--apply` never
+  touches it. Everything else local is *disabled* rather than deleted: the login
+  is refused, the watch history and the account id survive, and the account can be
+  handed back to the LDAP provider by enabling it again.
+- **Any account the deployment declares in `JELLYFIN_LOCAL_ACCOUNTS`** (`.env`,
+  comma-separated, beside `JELLYFIN_ADMIN_USER`). Appointing `media.*` to serve
+  its own sign-in page cost it the gate, and a TV or mobile client that can
+  complete neither the browser flow nor an LDAP bind signs in against Jellyfin's
+  own store — a real second password, and one that looks identical to a stray.
+  Declaring it is the difference between "we keep this deliberately" and "nobody
+  noticed": declared accounts are never reported and never disabled, the count is
+  printed on every run, and dropping a name makes it a stray again. The names live
+  in the operator's `.env`, not here, because which person keeps a local login is
+  deployment state that changes — the repo would be describing last month's
+  deployment, and `drift-check` runs the same script either way.
 
 Setup (the gateway deploys with the app on this host; this repo's script
 reconciles the proxy hosts and supports `--check`/`--dry-run`):
@@ -976,19 +990,27 @@ sudo docker compose up -d
    its signing secret into `.env` for you; `./setup.sh` does this
    automatically on first configure. The endpoint must be publicly reachable.
 3. **Jellyfin's OIDC plugin** (`OIDC RBAC`, assembly `Jellyfin.Plugin.OIDC.dll`)
-   is not shipped by `monarch-init`: it provides the **Cerulean Authentik**
-   button on Jellyfin's login page, and it is a hand-installed plugin directory
-   under `/docker/appdata/jellyfin/data/plugins/`. The deployment runs
-   **1.0.10.0** (folder `OIDC-RBAC`). Its own `meta.json` ships no `sourceUrl`,
-   so there is nothing to pin or fetch automatically — a rebuild loses it and
-   the login page comes back without its SSO button. `scripts/jellyfin-oidc-sso.py
-   --check` reports the installed version and both halves of the wiring (the
-   plugin's config and the callback registered on the `monarch-media` provider),
-   so a rebuild that drops it fails `drift-check` instead of quietly offering a
-   form with no SSO. The provider's callback URIs are in
-   `MONARCH_SSO_REDIRECT_URIS`; the ClientId/Authority/ClientSecret are the same
-   `MONARCH_SSO_*` values the gateways use, and the config file carries them
-   under `/docker/appdata/jellyfin/data/plugins/configurations/Jellyfin.Plugin.OIDC.xml`.
+   is the **Cerulean Authentik** button on Jellyfin's login page. It is no longer
+   installed by hand: `init/jellyfin-oidc-plugin.json` pins the release
+   (`Ezeqielle/jellyfin-plugin-oidc` v1.0.10) with the sha256 of the zip and of
+   the assembly inside it, `monarch-init` installs from that pin, and
+   `python3 scripts/jellyfin-oidc-plugin.py --check` (run by `drift-check`) judges
+   the installed build against it — `--status` prints both sides, `--install`
+   fetches, verifies both hashes and extracts into
+   `/docker/appdata/jellyfin/data/plugins/OIDC-RBAC/`, then tells you to restart
+   Jellyfin. Jellyfin's own catalog does not carry the plugin and its `meta.json`
+   ships no `sourceUrl`, which is exactly why the pin exists: before it, the only
+   record of what was installed was a zip in `/tmp`, a rebuild came back with a
+   login form and no SSO, and a swapped build looked like nothing at all.
+   `scripts/jellyfin-oidc-sso.py --check` covers the other two halves — the
+   plugin's config and the callback registered on the `monarch-media` provider.
+   The provider's callback URIs are in `MONARCH_SSO_REDIRECT_URIS`; the
+   ClientId/Authority/ClientSecret are the same `MONARCH_SSO_*` values the
+   gateways use, written into
+   `/docker/appdata/jellyfin/data/plugins/configurations/Jellyfin.Plugin.OIDC.xml`
+   by `monarch-init` (including the `paid_users` / `jellyfin_admins` role
+   mappings), and the name the plugin builds its `redirect_uri` from is
+   `MONARCH_SSO_SERVER_BASE_URL`.
 
 
 ## Remaining config

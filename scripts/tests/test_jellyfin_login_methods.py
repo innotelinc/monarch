@@ -2,17 +2,21 @@
 """Unit tests for jellyfin-login-methods.py — Jellyfin's own user store.
 
 The case these encode: Cerulean Authentik is the identity, the LDAP outpost is the
-credential store behind Jellyfin's sign-in page, and the one local account Monarch
-keeps on purpose is the break-glass `admin`. Every other account Jellyfin holds
-locally is a second password outside Authentik, so it is reported and — with
-`--apply` — disabled.
+credential store behind Jellyfin's sign-in page, and the local accounts Monarch
+keeps on purpose are the break-glass `admin` plus whatever the deployment declares
+in `JELLYFIN_LOCAL_ACCOUNTS` (the TV/native clients, which cannot run a browser
+OIDC flow). Every other account Jellyfin holds locally is a second password
+outside Authentik, so it is reported and — with `--apply` — disabled.
 
 A fake Jellyfin answers the two calls the script makes (`GET /Users`,
 `POST /Users/{id}/Policy`), so the suite runs anywhere, including CI. Three
 properties are pinned because they are the ones that would be wrong quietly:
 
   * `--check` fails while a stray local account can sign in, and passes when the
-    only one left is the break-glass account;
+    only ones left are the declared ones — including that a declared name is
+    matched case-insensitively and is never disabled by `--apply`, because a
+    deployment that declares an account and then has the tool disable it is worse
+    than one that never declared it;
   * `--apply` **replaces** a policy (`POST /Users/{id}/Policy` is not a merge), so
     the body must carry the account's whole existing policy with `IsDisabled`
     changed — a body holding only `IsDisabled` strips library access, parental
@@ -179,8 +183,53 @@ class JellyfinLoginMethods(unittest.TestCase):
         code, out, _ = self.run_script("--url", server.url)
 
         self.assertEqual(code, 0)
-        self.assertIn("only account that can sign in locally is the break-glass one", out)
+        self.assertIn("only accounts that can sign in locally are the 1 this deployment "
+                      "declares", out)
         self.assertEqual(server.policies, [])
+
+    def test_a_declared_local_account_is_not_a_stray(self):
+        # The TV/native-client case: Jellyfin's own store is the only thing the
+        # client can sign in against, so the deployment declares the account.
+        server = self.fake([
+            account("admin"),
+            account("tvbox"),
+            account("ana", provider=LDAP_PROVIDER),
+        ])
+
+        code, out, _ = self.run_script("--url", server.url, "--also-local", "tvbox")
+
+        self.assertEqual(code, 0)
+        self.assertIn("declared in the deployment: 2 (admin, tvbox)", out)
+        self.assertEqual(server.policies, [])
+
+    def test_a_declared_local_account_is_matched_case_insensitively(self):
+        # Jellyfin's account names are case-insensitive; a declaration that
+        # stopped matching on case would read as a stray and get disabled.
+        server = self.fake([account("admin"), account("TVBox")])
+
+        code, _, _ = self.run_script("--url", server.url, "--also-local", "tvbox")
+
+        self.assertEqual(code, 0)
+
+    def test_apply_never_disables_a_declared_local_account(self):
+        server = self.fake([account("admin"), account("tvbox"), account("stray")])
+
+        code, _, _ = self.run_script("--apply", "--url", server.url,
+                                     "--also-local", "tvbox")
+
+        self.assertEqual(code, 0)
+        self.assertEqual([user_id for user_id, _ in server.policies], ["id-stray"])
+
+    def test_an_undeclared_local_account_suggests_declaring_it(self):
+        # The remediation for a client that cannot use the OIDC button is a
+        # declaration, not a disable — saying only "re-run with --apply" would
+        # talk an operator into locking their TV out.
+        server = self.fake([account("admin"), account("tvbox")])
+
+        code, out, _ = self.run_script("--url", server.url)
+
+        self.assertEqual(code, 1)
+        self.assertIn("JELLYFIN_LOCAL_ACCOUNTS", out)
 
     def test_fails_while_a_stray_local_account_can_sign_in(self):
         server = self.fake([

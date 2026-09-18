@@ -40,11 +40,13 @@ plugin's; the Authority, client id, secret and `ServerBaseUrl` are this zone's
 gateways are clients of the *same* Authentik application, so a user signed in
 one way is signed in as far as the other is concerned).
 
-The plugin binary itself is **not installed from this repo** — it ships with no
-`sourceUrl` in its own `meta.json`, so there is nothing to pin. That is recorded
-in `docs/operations.md` rather than papered over here, and the check therefore
-reports what is installed (name and version) so that a rebuild that loses it,
-or a version swap nobody wrote down, is visible in `drift-check`.
+The plugin binary is pinned — `init/jellyfin-oidc-plugin.json` records the
+release and the hash of the assembly inside it, `monarch-init` installs from it
+so a rebuilt host comes back with the button, and
+`scripts/jellyfin-oidc-plugin.py` (run by `drift-check`) judges the installed
+build against it. This check reports what is installed (name and version) as
+well, because the two halves above can be perfectly wired to the *wrong* plugin
+build and still look configured.
 
 USAGE
 -----
@@ -295,9 +297,9 @@ def main(argv: list[str] | None = None) -> int:
     if directory is None:
         print("jellyfin-oidc-sso: no installed plugin carries "
               f"{PLUGIN_ASSEMBLY} — the login page has no SSO button. Install the "
-              "OIDC plugin into Jellyfin's plugin directory (see docs/operations.md "
-              "for the version this deployment runs) or restore the jellyfin-sso "
-              "page gate.", file=sys.stderr)
+              "pinned build: python3 scripts/jellyfin-oidc-plugin.py --install "
+              "(docs/operations.md has the rest), or restore the jellyfin-sso page "
+              "gate.", file=sys.stderr)
         return 1
 
     meta_path = directory / "meta.json"

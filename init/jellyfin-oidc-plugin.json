@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "The Jellyfin OIDC plugin this deployment runs, pinned. Read by",
+    "scripts/jellyfin-oidc-plugin.py (operator + drift-check) and by",
+    "init/init.py (so a fresh install comes up with the SSO button).",
+    "",
+    "Why a pin at all: the plugin's own meta.json ships no sourceUrl, so before",
+    "this the only record of what was installed was a zip in /tmp. Measured on",
+    "2026-09-18 - the installed Jellyfin.Plugin.OIDC.dll hashes to",
+    "7f023992c632de03e20bb445e262ce7916f955e4d627c70416cc6acefe0dedd9, which is",
+    "exactly the assembly inside Ezeqielle/jellyfin-plugin-oidc v1.0.10's",
+    "oidc-rbac.zip (420400 bytes, sha256",
+    "f9945726a1482c576151382cae05fcbd185c0c157bd783b584151a2348eab32d). Both",
+    "hashes are asserted, so a swap to a different build is a finding rather",
+    "than a silent upgrade."
+  ],
+  "repo": "Ezeqielle/jellyfin-plugin-oidc",
+  "tag": "v1.0.10",
+  "version": "1.0.10.0",
+  "asset": "oidc-rbac.zip",
+  "asset_sha256": "f9945726a1482c576151382cae05fcbd185c0c157bd783b584151a2348eab32d",
+  "asset_bytes": 420400,
+  "assembly": "Jellyfin.Plugin.OIDC.dll",
+  "assembly_sha256": "7f023992c632de03e20bb445e262ce7916f955e4d627c70416cc6acefe0dedd9",
+  "plugin_dir": "OIDC-RBAC",
+  "release_url": "https://github.com/Ezeqielle/jellyfin-plugin-oidc/releases/download/v1.0.10/oidc-rbac.zip",
+  "license": "GPL-3.0 (per the upstream repository)",
+  "provides": "the Cerulean Authentik button on Jellyfin's login page, with group-to-library RBAC"
+}

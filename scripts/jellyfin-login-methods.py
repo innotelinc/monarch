@@ -21,8 +21,24 @@ a client that self-registers. `jellyfin-admin-password.py` already names the one
 local account Monarch *wants* to keep — the break-glass `admin` it keeps in step
 with `MONARCH_PASSWORD`, which is how the mobile app and `drift-check` get in.
 
-This script is the other side of that: every local account except the break-glass
-one is reported, and `--apply` disables it.
+This script is the other side of that: every local account that is not declared
+is reported, and `--apply` disables it.
+
+DECLARED LOCAL ACCOUNTS (`JELLYFIN_LOCAL_ACCOUNTS`)
+---------------------------------------------------
+The page is published rather than gated (2026-09-18) because the TV and mobile
+clients cannot run a browser OIDC flow, and a client that has no LDAP support
+signs in against Jellyfin's own store. That is a *deliberate* local account, and
+it is indistinguishable from a stray one by inspection: both are a username, a
+password Jellyfin owns, and an enabled policy.
+
+So the deployment declares them — `JELLYFIN_LOCAL_ACCOUNTS`, comma-separated, in
+`.env` beside `JELLYFIN_ADMIN_USER`. Declared accounts are never reported and
+never disabled; drop one from the variable to make it a stray again. The names
+live in the operator's `.env` rather than in this repo on purpose: which person
+keeps a local login is deployment state, not posture, and a repo that listed it
+would go stale the moment that changed. The **count** is printed, so the set
+cannot grow silently.
 
 WHY DISABLE RATHER THAN DELETE
 ------------------------------
@@ -70,16 +86,18 @@ USAGE
 Runs on the media host, where Jellyfin's port is published on loopback
 (`127.0.0.1:8097`) and the admin API key `monarch-init` exported is at
 `/docker/appdata/init/jellyfin-api-key.txt`; `JELLYFIN_API_KEY` overrides it. The
-break-glass account is `JELLYFIN_ADMIN_USER` (default `admin`).
+break-glass account is `JELLYFIN_ADMIN_USER` (default `admin`); further local
+accounts the deployment keeps are `JELLYFIN_LOCAL_ACCOUNTS` (default empty,
+comma-separated).
 
 Header gotcha, inherited from `jellyfin-admin-password.py` and measured there:
 this build reads the MediaBrowser header from `Authorization` only —
 `X-Emby-Authorization` is rejected with 400, and `X-Emby-Token` / `?api_key=` with
 401 even when the credentials are right.
 
-Exit codes: 0 = only the break-glass account can sign in locally, 1 = a local
-account was found (or the update failed), 2 = cannot run (no key, unreachable, or
-a build that does not report which provider owns an account).
+Exit codes: 0 = only declared accounts can sign in locally, 1 = an undeclared
+local account was found (or the update failed), 2 = cannot run (no key,
+unreachable, or a build that does not report which provider owns an account).
 """
 
 from __future__ import annotations
@@ -279,18 +297,33 @@ def fill_from_db(accounts: list[Account], path: Path) -> int:
     return filled
 
 
-def strays(accounts: list[Account], break_glass: str) -> list[Account]:
-    """Local accounts that can still sign in and are not the break-glass one.
+def declared_local(break_glass: str, extra: str) -> set[str]:
+    """The local accounts this deployment keeps on purpose, lower-cased.
+
+    `break_glass` is always one of them; `extra` is JELLYFIN_LOCAL_ACCOUNTS, the
+    TV/native-client logins that cannot use the OIDC button. Matched
+    case-insensitively because Jellyfin's account names are.
+    """
+    names = {name.strip().lower() for name in (extra or "").split(",") if name.strip()}
+    if break_glass.strip():
+        names.add(break_glass.strip().lower())
+    return names
+
+
+def strays(accounts: list[Account], keep: set[str]) -> list[Account]:
+    """Local accounts that can still sign in and were not declared.
 
     A local account that is already disabled is not a way in, so it is reported
     and left alone: it may be a directory user's history waiting to be handed
     back to the LDAP provider.
     """
-    return [a for a in accounts if a.local and not a.disabled and a.name != break_glass]
+    return [a for a in accounts if a.local and not a.disabled and a.name.lower() not in keep]
 
 
-def report(accounts: list[Account], break_glass: str) -> None:
-    print(f"  break-glass account: {break_glass}")
+def report(accounts: list[Account], keep: set[str]) -> None:
+    declared = sorted(keep)
+    print(f"  local accounts declared in the deployment: {len(declared)} "
+          f"({', '.join(declared)})")
     for account in accounts:
         print(account.describe())
 
@@ -325,6 +358,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--break-glass",
                         default=os.environ.get("JELLYFIN_ADMIN_USER", "admin"),
                         help="the one local account Monarch keeps (default admin)")
+    parser.add_argument("--also-local",
+                        default=os.environ.get("JELLYFIN_LOCAL_ACCOUNTS", ""),
+                        help="comma-separated further local accounts this deployment "
+                             "keeps on purpose (TV/native clients); default empty")
     args = parser.parse_args(argv)
 
     base_url = args.url.rstrip("/")
@@ -350,10 +387,11 @@ def main(argv: list[str] | None = None) -> int:
     # Jellyfin 12 that is every account, because the field is gone from the DTO.
     filled = fill_from_db(accounts, args.db)
 
+    keep = declared_local(args.break_glass, args.also_local)
     print(f"jellyfin-login-methods [{'apply' if args.apply else 'check'}] {base_url}")
     if filled:
         print(f"  provider for {filled} account(s) read from {args.db}")
-    report(accounts, args.break_glass)
+    report(accounts, keep)
 
     unknown = [account for account in accounts if account.local is None]
     if unknown:
@@ -366,9 +404,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    offenders = strays(accounts, args.break_glass)
+    offenders = strays(accounts, keep)
     if not offenders:
-        print("\nok: the only account that can sign in locally is the break-glass one.")
+        print(f"\nok: the only accounts that can sign in locally are the {len(keep)} "
+              "this deployment declares.")
         return 0
 
     print()
@@ -377,8 +416,10 @@ def main(argv: list[str] | None = None) -> int:
               + (" (an administrator)" if account.admin else ""))
 
     if not args.apply:
-        print("\nthose accounts are a credential store outside Authentik — re-run with "
-              "--apply to disable them.")
+        print("\nthose accounts are a credential store outside Authentik — if one is a "
+              "client that cannot use the OIDC button, declare it in "
+              "JELLYFIN_LOCAL_ACCOUNTS (.env); otherwise re-run with --apply to "
+              "disable them.")
         return 1
 
     failures = 0
@@ -398,15 +439,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"jellyfin-login-methods: could not re-read the accounts ({error})", file=sys.stderr)
         return 1
 
-    remaining = strays(after, args.break_glass)
+    remaining = strays(after, keep)
     for account in remaining:
         print(f"  still enabled: {account.name!r}", file=sys.stderr)
 
     if failures or remaining:
         return 1
 
-    print(f"\nok: disabled {len(offenders)} local account(s); the break-glass account "
-          f"{args.break_glass!r} is untouched.")
+    print(f"\nok: disabled {len(offenders)} local account(s); the {len(keep)} declared "
+          "local account(s) are untouched.")
     return 0
 
 

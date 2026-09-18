@@ -685,6 +685,19 @@ services:
       AUTHENTIK_LDAP_ADMIN_GROUP: ${AUTHENTIK_LDAP_ADMIN_GROUP:-jellyfin_admins}
       AUTHENTIK_LDAP_BASE_DN: ${AUTHENTIK_LDAP_BASE_DN:-dc=innotel,dc=us}
       AUTHENTIK_LDAP_TOKEN: ${AUTHENTIK_LDAP_TOKEN:-}
+      # Jellyfin's own login page carries a *Cerulean Authentik* button, which
+      # needs two things monarch-init writes: the pinned OIDC plugin (see
+      # init/jellyfin-oidc-plugin.json) and its config. The client id/secret are
+      # the same ones the media gateways use — one Authentik application, so a
+      # browser signed in by the button is signed in as far as the gateways are
+      # concerned, and a native client signing in over LDAP lands on the same
+      # account. MONARCH_SSO_SERVER_BASE_URL is the name the plugin builds its
+      # redirect_uri from; every public name has that callback registered.
+      MONARCH_SSO_AUTHENTIK_BASE: ${MONARCH_SSO_AUTHENTIK_BASE:-https://auth.cerulean.innotel.us}
+      MONARCH_SSO_APP: ${MONARCH_SSO_APP:-monarch-media}
+      MONARCH_SSO_CLIENT_ID: ${MONARCH_SSO_CLIENT_ID:-monarch-media}
+      MONARCH_SSO_CLIENT_SECRET: ${MONARCH_SSO_CLIENT_SECRET:-}
+      MONARCH_SSO_SERVER_BASE_URL: ${MONARCH_SSO_SERVER_BASE_URL:-https://media.magnate.innotel.us}
     command: ["python", "/init/init.py"]
     volumes:
       - ./init:/init:ro

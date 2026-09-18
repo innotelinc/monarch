@@ -147,6 +147,61 @@ LDAP_SEARCH_ROLE = "jellyfin-ldap-search"
 LDAP_BIND_FLOW_SLUG = "default-authentication-flow"
 LDAP_INVALIDATION_FLOW_SLUG = "default-provider-invalidation-flow"
 
+# Jellyfin OIDC plugin (the *Cerulean Authentik* button on Jellyfin's own login
+# page). Jellyfin's catalog does not carry it, so until now it was installed by
+# hand and a rebuilt host came back with a login form and no SSO. It is pinned
+# instead: `init/jellyfin-oidc-plugin.json` records the release and BOTH hashes
+# (the zip, and the assembly inside it), and it is the same file
+# `scripts/jellyfin-oidc-plugin.py` and `drift-check.sh` read - so a fresh
+# install, a repair and the drift check all mean the same build when they say
+# "the plugin".
+OIDC_PLUGIN_PIN = os.environ.get("OIDC_PLUGIN_PIN", "/init/jellyfin-oidc-plugin.json")
+OIDC_PLUGIN_ASSEMBLY = "Jellyfin.Plugin.OIDC.dll"
+OIDC_PLUGIN_CONFIG = "Jellyfin.Plugin.OIDC.xml"
+OIDC_PLUGIN_DIRNAME = "OIDC-RBAC"
+# The provider id is the plugin's (it builds `…/sso/OIDC/Callback/{id}` from it
+# and the deployment registered exactly that path), the rest is this zone's -
+# the same Authentik application the oauth2-proxy gateways already use.
+OIDC_PROVIDER_ID = "authentik"
+OIDC_DISPLAY_NAME = "Cerulean Authentik"
+OIDC_BUTTON_COLOR = "#6366f1"
+MONARCH_SSO_AUTHENTIK_BASE = (
+    os.environ.get("MONARCH_SSO_AUTHENTIK_BASE")
+    or os.environ.get("AUTHENTIK_PUBLIC_URL")
+    or "https://auth.cerulean.innotel.us"
+).strip().rstrip("/")
+MONARCH_SSO_APP = os.environ.get("MONARCH_SSO_APP", "monarch-media")
+MONARCH_SSO_CLIENT_ID = os.environ.get("MONARCH_SSO_CLIENT_ID", MONARCH_SSO_APP)
+MONARCH_SSO_CLIENT_SECRET = os.environ.get("MONARCH_SSO_CLIENT_SECRET", "")
+# The plugin derives its redirect_uri (`{base}/sso/OIDC/Callback/authentik`)
+# from this, and the provider has a callback registered for EVERY public name
+# Jellyfin answers on - so the two have to agree on one of them, not on "the"
+# name. The default is what this deployment runs.
+MONARCH_SSO_SERVER_BASE_URL = (
+    os.environ.get("MONARCH_SSO_SERVER_BASE_URL") or "https://media.magnate.innotel.us"
+).strip().rstrip("/")
+# Group -> Jellyfin permissions. `paid_users` is the access gate the whole
+# platform uses (the LDAP outpost's search filter is the same group), and
+# `jellyfin_admins` is the only group that gets administrative rights.
+OIDC_ROLE_MAPPINGS = [
+    {
+        "role": LDAP_BIND_GROUP,
+        "is_admin": "false",
+        "live_tv_management": "false",
+        "media_playback": "true",
+        "content_deletion": "false",
+        "priority": "10",
+    },
+    {
+        "role": LDAP_ADMIN_GROUP,
+        "is_admin": "true",
+        "live_tv_management": "true",
+        "media_playback": "true",
+        "content_deletion": "true",
+        "priority": "20",
+    },
+]
+
 # ---------------------------------------------------------------------------
 # Small HTTP helpers
 # ---------------------------------------------------------------------------
@@ -961,6 +1016,250 @@ def write_ldap_plugin_config() -> tuple[str, str]:
     except Exception:
         pass
     return path, xml
+
+
+# ---------------------------------------------------------------------------
+# Jellyfin OIDC plugin (the SSO button on Jellyfin's own login page)
+#
+# Two halves have to agree, and both are written here from the deployment's own
+# values: the plugin binary (pinned in init/jellyfin-oidc-plugin.json) and its
+# config (the provider, this zone's client id/secret, and the group -> library
+# mappings). They fail in opposite-looking ways - a config with no Authority
+# renders a button that dies inside Authentik, and a provider that never got the
+# callback dies at the redirect with `redirect_uri does not match` - so
+# `scripts/jellyfin-oidc-sso.py` judges both afterwards, in drift-check.
+# ---------------------------------------------------------------------------
+
+def load_oidc_pin() -> dict:
+    """The pinned release, as init/jellyfin-oidc-plugin.json records it."""
+    with open(OIDC_PLUGIN_PIN, "r", encoding="utf-8") as fh:
+        pin = json.load(fh)
+    for key in ("asset", "asset_sha256", "assembly", "assembly_sha256", "plugin_dir"):
+        if not pin.get(key):
+            raise ValueError(f"{OIDC_PLUGIN_PIN} does not pin {key!r}")
+    return pin
+
+
+def oidc_plugins_dir() -> str:
+    return os.path.join(APPDATA, "jellyfin", "data", "plugins")
+
+
+def oidc_plugin_installed(pin: dict) -> str:
+    """'ok' | 'missing' | 'stale' - and stale matters as much as missing.
+
+    Matched on the pinned hash, not on the file existing: a plugin folder left
+    behind by an older build still renders a button, so "there is a .dll" is not
+    the question the deployment needs answered.
+    """
+    import hashlib
+    candidate = os.path.join(oidc_plugins_dir(), pin["plugin_dir"], pin["assembly"])
+    if not os.path.isfile(candidate):
+        return "missing"
+    digest = hashlib.sha256()
+    with open(candidate, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return "ok" if digest.hexdigest() == pin["assembly_sha256"] else "stale"
+
+
+def install_oidc_plugin(pin: dict) -> bool:
+    """Fetch the pinned release, verify BOTH hashes, then extract it.
+
+    The zip's hash is checked and so is the assembly inside it: the assembly is
+    what Jellyfin loads, and a zip that hashes correctly but carries a different
+    build is exactly the swap nobody writes down.
+    """
+    import hashlib
+    url = os.environ.get("OIDC_PLUGIN_URL") or pin.get("release_url")
+    if not url:
+        url = (f"https://github.com/{pin['repo']}/releases/download/{pin['tag']}/"
+               f"{pin['asset']}")
+    _log(f"Fetching the OIDC plugin {pin.get('tag', '')} from {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            blob = resp.read()
+    except Exception as exc:  # noqa: BLE001
+        _log(f"WARNING: could not download the OIDC plugin: {exc}")
+        return False
+    if pin.get("asset_bytes") and len(blob) != int(pin["asset_bytes"]):
+        _log(f"WARNING: {pin['asset']} is {len(blob)} bytes, the pin says "
+             f"{pin['asset_bytes']} - not installing it.")
+        return False
+    digest = hashlib.sha256(blob).hexdigest()
+    if digest != pin["asset_sha256"]:
+        _log(f"WARNING: {pin['asset']} hashes to {digest}, the pin says "
+             f"{pin['asset_sha256']} - not installing it.")
+        return False
+
+    plugin_dir = os.path.join(oidc_plugins_dir(), pin["plugin_dir"])
+    os.makedirs(plugin_dir, exist_ok=True)
+    tmp = os.path.join(plugin_dir, pin["asset"])
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(blob)
+        with zipfile.ZipFile(tmp) as zf:
+            members = [n for n in zf.namelist() if n.endswith(pin["assembly"])]
+            if not members:
+                _log(f"WARNING: {pin['asset']} does not contain {pin['assembly']}.")
+                return False
+            inner = hashlib.sha256(zf.read(members[0])).hexdigest()
+            if inner != pin["assembly_sha256"]:
+                _log(f"WARNING: the {pin['assembly']} inside {pin['asset']} is not the "
+                     "pinned build - not installing it.")
+                return False
+            zf.extractall(plugin_dir)
+        os.remove(tmp)
+        # Jellyfin runs as uid/gid 1000, and a plugin it cannot read is a plugin
+        # it does not load.
+        for root, _dirs, files in os.walk(plugin_dir):
+            for name in files:
+                ensure_owner(os.path.join(root, name))
+            ensure_owner(root)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _log(f"WARNING: OIDC plugin extract failed: {exc}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def oidc_plugin_config_path() -> str:
+    """Where the OIDC plugin reads its provider config from."""
+    return os.path.join(oidc_plugins_dir(), "configurations", OIDC_PLUGIN_CONFIG)
+
+
+def write_oidc_plugin_config() -> tuple[str, str]:
+    """Write the OIDC plugin config (providers + group mappings).
+
+    Returns (path, xml). Read-before-write at the call site: this file is
+    re-read by Jellyfin only on a restart, so a rotated client secret that is
+    written but never loaded looks configured and is not.
+    """
+    authority = (f"{MONARCH_SSO_AUTHENTIK_BASE}"
+                 f"/application/o/{MONARCH_SSO_APP}/")
+    mappings = "\n".join(f"""    <RoleMapping>
+      <RoleName>{m['role']}</RoleName>
+      <IsAdmin>{m['is_admin']}</IsAdmin>
+      <EnableAllLibraries>true</EnableAllLibraries>
+      <LibraryIds />
+      <LibraryNames />
+      <EnableLiveTv>true</EnableLiveTv>
+      <EnableLiveTvManagement>{m['live_tv_management']}</EnableLiveTvManagement>
+      <EnableMediaPlayback>{m['media_playback']}</EnableMediaPlayback>
+      <EnableRemoteAccess>true</EnableRemoteAccess>
+      <EnableTranscoding>true</EnableTranscoding>
+      <EnableContentDeletion>{m['content_deletion']}</EnableContentDeletion>
+      <EnableCollectionManagement>{m['is_admin']}</EnableCollectionManagement>
+      <EnableSubtitleManagement>{m['is_admin']}</EnableSubtitleManagement>
+      <MaxParentalRating xsi:nil="true" />
+      <Priority>{m['priority']}</Priority>
+    </RoleMapping>""" for m in OIDC_ROLE_MAPPINGS)
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<PluginConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Providers>
+    <OidcProviderConfig>
+      <ProviderId>{OIDC_PROVIDER_ID}</ProviderId>
+      <DisplayName>{OIDC_DISPLAY_NAME}</DisplayName>
+      <Authority>{authority}</Authority>
+      <ClientId>{MONARCH_SSO_CLIENT_ID}</ClientId>
+      <ClientSecret>{MONARCH_SSO_CLIENT_SECRET}</ClientSecret>
+      <Scopes>openid profile email groups</Scopes>
+      <RoleClaim>groups</RoleClaim>
+      <UsernameClaim>preferred_username</UsernameClaim>
+      <DisplayNameClaim>name</DisplayNameClaim>
+      <PictureClaim>picture</PictureClaim>
+      <SyncProfileImage>true</SyncProfileImage>
+      <Enabled>true</Enabled>
+      <ButtonColor>{OIDC_BUTTON_COLOR}</ButtonColor>
+      <ButtonIcon />
+      <AdditionalParameters />
+      <ServerBaseUrl>{MONARCH_SSO_SERVER_BASE_URL}</ServerBaseUrl>
+    </OidcProviderConfig>
+  </Providers>
+  <RoleMappings>
+{mappings}
+  </RoleMappings>
+  <DefaultProvider>{OIDC_PROVIDER_ID}</DefaultProvider>
+</PluginConfiguration>
+"""
+    path = oidc_plugin_config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    try:
+        ensure_owner(path)
+    except Exception:
+        pass
+    return path, xml
+
+
+@arrived("jellyfin OIDC SSO")
+def configure_jellyfin_oidc():
+    _log("--- Jellyfin OIDC (SSO button on its own login page) ---")
+    if not MONARCH_SSO_CLIENT_SECRET:
+        _issues.append(
+            "jellyfin-oidc: MONARCH_SSO_CLIENT_SECRET is not set in .env - the login "
+            "page's Cerulean Authentik button cannot sign anyone in. It is the same "
+            "client the media gateways use (Authentik application "
+            f"'{MONARCH_SSO_APP}').")
+        return False
+
+    try:
+        pin = load_oidc_pin()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        _issues.append(f"jellyfin-oidc: cannot read the plugin pin {OIDC_PLUGIN_PIN} ({exc})")
+        return False
+
+    path = oidc_plugin_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            previous = fh.read()
+    except OSError:
+        previous = None
+    path, xml = write_oidc_plugin_config()
+    _log(f"OIDC plugin config written -> {path}")
+    needs_restart = previous != xml
+
+    state = oidc_plugin_installed(pin)
+    if state == "ok":
+        _log(f"OIDC plugin {pin.get('version') or pin.get('tag')} already installed.")
+    else:
+        _log(f"OIDC plugin is {state} - installing {pin.get('tag')} "
+             f"({pin['asset']}).")
+        if not install_oidc_plugin(pin):
+            _issues.append(
+                f"jellyfin-oidc: could not install the pinned OIDC plugin "
+                f"({pin['repo']} {pin.get('tag')}) - the login page will have no SSO "
+                "button. Fetch/verify it by hand with "
+                "scripts/jellyfin-oidc-plugin.py --install.")
+            return False
+        needs_restart = True
+        _log(f"OIDC plugin installed ({pin['assembly']} into {pin['plugin_dir']}).")
+
+    if needs_restart:
+        token = ""
+        try:
+            with open(os.path.join(INIT_DIR, "jellyfin-api-key.txt"), "r") as fh:
+                token = fh.read().strip()
+        except OSError:
+            pass
+        if not token:
+            _issues.append("jellyfin-oidc: config written but no Jellyfin token to restart "
+                           "with - restart Jellyfin so the plugin loads it")
+            return False
+        _log("Restarting Jellyfin so the plugin loads...")
+        status, _, _ = _http(JELLYFIN_BASE, "/System/Restart", method="POST",
+                             headers=jellyfin_headers(token))
+        _log(f"Jellyfin restart triggered (HTTP {status}).")
+        if not wait_for(JELLYFIN_BASE, "/System/Info/Public", "Jellyfin (after OIDC restart)",
+                        timeout=900):
+            return False
+        time.sleep(10)
+
+    _results["jellyfin-oidc"] = "configured"
+    return True
 
 
 @arrived("jellyfin ldap wiring")
@@ -1893,6 +2192,13 @@ def build_invariants() -> dict:
         "jellyfin": {
             "port": PORTS["jellyfin"],
             "libraries": [lib["name"] for lib in JELLYFIN_LIBRARIES],
+            # The SSO button on Jellyfin's own login page: which provider it
+            # offers and which build of the plugin provides it. drift-check
+            # judges the wiring live (jellyfin-oidc-sso.py,
+            # jellyfin-oidc-plugin.py); these are what it was configured from.
+            "oidc_provider": OIDC_PROVIDER_ID,
+            "oidc_client_id": MONARCH_SSO_CLIENT_ID,
+            "oidc_plugin_dir": OIDC_PLUGIN_DIRNAME,
         },
         "jellyseerr": {"port": PORTS["jellyseerr"]},
         # Bazarr keeps no local login: the Cerulean Authentik gate on
@@ -1909,6 +2215,7 @@ def main() -> int:
     configure_jellyfin()
     configure_authentik_ldap()
     configure_jellyfin_ldap()
+    configure_jellyfin_oidc()
     configure_livetv()
     configure_monarch_apps()
     configure_prowlarr()

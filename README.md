@@ -137,9 +137,13 @@ in its UI):
 | Jellyfin | accounts in Jellyfin's own database rather than the LDAP outpost | `scripts/jellyfin-login-methods.py --check` / `--apply` |
 
 With both clean, the *only* credential that opens Seerr is the Cerulean-backed Jellyfin
-account, and the only local Jellyfin account is the break-glass `admin` that
-`jellyfin-admin-password.py` keeps in step with `.env`. `drift-check` runs both as checks
-(it reports them as drift, and as a skip when they cannot be read — never as a pass).
+account, and the only local Jellyfin accounts are the ones this deployment declares:
+the break-glass `admin` that `jellyfin-admin-password.py` keeps in step with `.env`,
+plus any TV/native-client account named in `JELLYFIN_LOCAL_ACCOUNTS` — a client that can
+complete neither the browser flow nor an LDAP bind signs in against Jellyfin's own store,
+which looks exactly like a stray and is therefore declared rather than guessed at.
+`drift-check` runs both as checks (it reports them as drift, and as a skip when they
+cannot be read — never as a pass).
 
 ## 🖥️ Platforms
 

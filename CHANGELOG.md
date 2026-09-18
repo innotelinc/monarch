@@ -56,6 +56,26 @@ are written by hand and describe the behaviour change, not the commits.
   end - the plugin's config (an enabled provider on the Cerulean issuer with this
   zone's client id) and the callback registered on the `monarch-media` provider -
   since both halves fail silently from the login page. Run by `drift-check`.
+- **Jellyfin's OIDC plugin is pinned and installed by `monarch-init`.**
+  `init/jellyfin-oidc-plugin.json` records the release
+  (`Ezeqielle/jellyfin-plugin-oidc` v1.0.10) and the sha256 of both the zip and
+  the assembly inside it, so "the plugin" means one build to a fresh install, a
+  repair and the drift check alike. Jellyfin's catalog does not carry it and its
+  own `meta.json` ships no `sourceUrl`, which is why it was hand-installed before:
+  a rebuilt host came back with a login form and no SSO, and a swapped build was
+  invisible. `scripts/jellyfin-oidc-plugin.py --check|--status|--install`
+  judges/repairs the installed build, and `init/init.py` now also writes the
+  plugin's config (provider, `MONARCH_SSO_*` client id/secret, and the
+  `paid_users` / `jellyfin_admins` role mappings) instead of leaving a rebuilt
+  host with a button that has no issuer.
+- **Local Jellyfin accounts the deployment keeps are declared, not guessed.**
+  Publishing Jellyfin's own sign-in page left native clients with a second
+  password in Jellyfin's store, and that account is indistinguishable from a
+  stray. `JELLYFIN_LOCAL_ACCOUNTS` (`.env`, comma-separated) names them beside
+  `JELLYFIN_ADMIN_USER`: `jellyfin-login-methods.py` reports and disables every
+  local account that is *not* declared, refuses to disable a declared one, and
+  prints the count so the set cannot grow quietly. The names stay deployment
+  state - they are not in this repo.
 - **`MONARCH_SSO_REDIRECT_URIS` carries the two Jellyfin callback URIs**
   (`…/sso/OIDC/Callback/authentik`), because a provider refresh takes the list
   verbatim and a list without them drops the SSO button's callback.
