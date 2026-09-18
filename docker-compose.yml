@@ -698,6 +698,13 @@ services:
       MONARCH_SSO_CLIENT_ID: ${MONARCH_SSO_CLIENT_ID:-monarch-media}
       MONARCH_SSO_CLIENT_SECRET: ${MONARCH_SSO_CLIENT_SECRET:-}
       MONARCH_SSO_SERVER_BASE_URL: ${MONARCH_SSO_SERVER_BASE_URL:-https://media.magnate.innotel.us}
+      # The Jellyfin/Cerulean account that owns Seerr. Seerr's Owner is
+      # `user.id === 1` and nothing else (server/routes/user/index.ts: only row 1
+      # may grant admin, and only row 1 may modify row 1), so an install whose
+      # first account was the break-glass admin is owned by an account nobody
+      # signs in as. monarch-init records this in the invariants manifest;
+      # scripts/seerr-owner.py reads it and swaps the two accounts to match.
+      MONARCH_SEERR_OWNER: ${MONARCH_SEERR_OWNER:-dhunter}
     command: ["python", "/init/init.py"]
     volumes:
       - ./init:/init:ro
