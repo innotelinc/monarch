@@ -6,11 +6,25 @@ Prowlarr, qBittorrent, SABnzbd and Jellyseerr ship nothing but a local username
 and password form, and every one of them is switched to trust-the-proxy. So the
 whole posture rests on two things holding at once, and both are asserted here:
 
-  1. Each public name demands Cerulean Authentik. Every gateway is driven
+  1. Each gated public name demands Cerulean Authentik. Every gateway is driven
      through a real authorization-code flow with a temporary Authentik identity,
      and the sealed session (`_innotel_sso`) must then open the app. This is what
      catches a gateway whose redirect_uri was never registered, or whose client
      secret was rotated without re-deploying it.
+
+     Two names in this zone are deliberately NOT gated, and are asserted the
+     other way round: Jellyfin (`media.*`) and Seerr (`req.*`) publish their own
+     sign-in pages, because the devices that use them cannot complete a browser
+     OIDC flow — a TV client that opens the login page in a webview gets
+     Authentik rather than a form, and Quick Connect has no page to enter its
+     code on. Cerulean Authentik is still the only credential store there, by
+     the app's own wiring: Jellyfin's login page offers its Authentik SSO button
+     (`scripts/jellyfin-oidc-sso.py`) and native clients bind against the
+     Authentik LDAP outpost (`scripts/verify-ldap.py`); Seerr keeps no password
+     of its own and signs in with the Jellyfin account
+     (`scripts/seerr-login-methods.py`). What this script asserts for those two
+     is the thing that would be a regression in either direction: the app's own
+     sign-in page answers, and the name does *not* bounce to the IdP.
   2. The group check is real. The same flow with an identity that is *not* in
      SSO_REQUIRED_GROUP must be refused — either by Authentik (application bound
      to the group) or by the gateway (403). A gateway that admits every identity
@@ -60,13 +74,13 @@ MEMBER_USER = "e2e-monarch-sso"
 OUTSIDER_USER = "e2e-monarch-outsider"
 SESSION_COOKIE = "_innotel_sso"
 
-# Public names this zone owns, in the order it is worth checking them. Every one
-# is fronted by an oauth2-proxy gateway (radarr-sso … requestrr-sso) and every
-# gateway is a client of the same Authentik application.
+# Public names this zone owns that ARE gated, in the order it is worth checking
+# them. Every one is fronted by an oauth2-proxy gateway (radarr-sso …
+# requestrr-sso) and every gateway is a client of the same Authentik
+# application.
 #
-# The last four are not `*.{base}` names — they are the estate's names for the
-# three apps that were reachable without a gate until 2026-09-16 (Jellyfin on
-# media.*, Clipbucket on tube.*) plus the Discord bot's console. They are here
+# Some are not `*.{base}` names — Clipbucket on tube.*, the Discord bot's
+# console, and the two Jellyfin names before they were published. They are here
 # because the gate is only real if the name forwards to it: a name whose edge
 # forward still points at the app's own port fails on the sign-in check, and one
 # whose callback is missing from the provider fails at the redirect. Both are
@@ -81,15 +95,27 @@ SUBDOMAINS = [
     ("prowlarr", "prowlarr.{base}"),
     ("qbittorrent", "qbittorrent.{base}"),
     ("sabnzbd", "sabnzbd.{base}"),
-    # Jellyseerr answers on two names: the subscriber-facing request portal on
-    # the apex domain, and this zone's alias for it.
-    ("jellyseerr", "req.innotel.us"),
-    ("jellyseerr (alias)", "req.{base}"),
     ("requestrr", "requestrr.{base}"),
-    ("jellyfin", "media.innotel.us"),
-    ("jellyfin (magnate name)", "media.magnate.innotel.us"),
     ("clipbucket", "tube.innotel.us"),
     ("iptv", "tv.{base}"),
+]
+
+# The names that publish the app's own sign-in page instead of gating it
+# (docker-compose.yml, 2026-09-18), as (label, host, path, marker): the path a
+# client signs in at, and a string that page carries. Jellyfin answers its SPA
+# shell at /web/index.html and Seerr its login route at /login; both markers were
+# read off the running containers rather than guessed, because a 200 from a
+# gateway's error page would otherwise look the same as a 200 from the app.
+#
+# These are asserted to answer *without* an `_innotel_sso` session and without
+# redirecting to the IdP — the whole point of the change — and the identity
+# wiring behind them is asserted by the scripts named in the module docstring.
+PUBLISHED = [
+    ("jellyfin", "media.innotel.us", "/web/index.html", "Jellyfin"),
+    ("jellyfin (magnate name)", "media.magnate.innotel.us", "/web/index.html",
+     "Jellyfin"),
+    ("jellyseerr", "req.innotel.us", "/login", "Seerr"),
+    ("jellyseerr (alias)", "req.{base}", "/login", "Seerr"),
 ]
 
 # (label, port) — bound to 127.0.0.1 only. Every one of these apps is configured
@@ -207,6 +233,8 @@ class Config:
         self.password = "E2e-Sso-" + os.urandom(6).hex() + "!Aa1"
         self.verbose = args.verbose
         self.targets = [(label, host.format(base=self.base)) for label, host in SUBDOMAINS]
+        self.published = [(label, host.format(base=self.base), path, marker)
+                          for label, host, path, marker in PUBLISHED]
 
         if not self.token:
             raise CannotRun(
@@ -504,7 +532,8 @@ def main():
     print(f"  base    : {cfg.base}")
     print(f"  group   : {cfg.group or '(none)'}")
     print(f"  host ip : {cfg.lan_ip}")
-    print(f"  targets : {len(cfg.targets)} public names")
+    print(f"  targets : {len(cfg.targets)} gated names, "
+          f"{len(cfg.published)} that publish the app's own sign-in page")
     print()
 
     member_pk = outsider_pk = None
@@ -551,6 +580,43 @@ def main():
             status, _, body = client.get(app + "/")
             check(status < 400, f"GET {app}/ with the session -> HTTP {status} "
                                 f"({len(body)} bytes, expected < 400)")
+
+        # ── 2b. the names that publish their app's sign-in page ────────────
+        # Not a weaker check, a differently-shaped one: no session is stored,
+        # nothing is sealed, and the app's own page has to arrive. The failure
+        # this catches is the one the gating change was made for — a client that
+        # cannot complete a browser OIDC flow — so a redirect to the IdP here is
+        # a failure both ways round: it means either the gate came back (and the
+        # TV clients are broken again) or the name is pointing somewhere else.
+        print("[2b] the published names serve the app's own sign-in page")
+        for label, host, path, marker in cfg.published:
+            url = f"https://{host}{path}"
+            print(f"  -- {label} ({host}{path})")
+            try:
+                bare = Client(cfg)
+                status, location, body = bare.get(url)
+                if status in (301, 302, 303, 307, 308) and location:
+                    where = urllib.parse.urlparse(location).netloc or location[:60]
+                    if cfg.idp.split("//")[-1] in where:
+                        raise CheckFailed(
+                            f"{label}: {path} redirected to {where} — the page is gated "
+                            "again, and the clients that need it cannot complete a "
+                            "browser OIDC flow (docker-compose.yml: "
+                            "OAUTH2_PROXY_SKIP_AUTH_ROUTES on this name)")
+                    raise CheckFailed(f"{label}: {path} -> HTTP {status} to {where}, "
+                                      f"expected the app's own sign-in page")
+                check(status == 200, f"{label}: {path} -> HTTP {status} (expected 200)")
+                check(marker in body,
+                      f"{label}: {path} answered 200 without {marker!r} in it — "
+                      f"that is a proxy page, not the app's")
+                print(f"  {OK}  {marker} sign-in page answers without an "
+                      f"{SESSION_COOKIE} session")
+            except CheckFailed as err:
+                print(f"  {BAD}  {err}")
+                failures += 1
+            except (urllib.error.URLError, OSError) as err:
+                print(f"  {BAD}  {unreachable(err, host)}")
+                failures += 1
 
         # ── 3. the group check is real ─────────────────────────────────────
         print("[3] an identity outside the required group is refused")
@@ -604,7 +670,8 @@ def main():
         if failures:
             print(f"\n{BAD} — {failures} target(s) did not pass", file=sys.stderr)
             return 1
-        print("\nPASS — every public name is Authentik-only and the app ports are closed")
+        print("\nPASS — every gated name is Authentik-only, the two published names "
+              "serve their app's own sign-in page, and the app ports are closed")
         return 0
     except CannotRun as err:
         print(f"\nSKIP: {err}", file=sys.stderr)

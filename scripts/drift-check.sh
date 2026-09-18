@@ -500,6 +500,24 @@ else
   printf '%s\n' "$jellyfin_login_out" | indent >&2
 fi
 
+# Jellyfin's login page is published rather than gated (docker-compose.yml,
+# 2026-09-18), so the page's own SSO button is now load-bearing: browsers sign
+# in with it, and native clients with the LDAP account above. It is two halves
+# that fail silently - a plugin config pointing at an issuer nobody signs in
+# against, and a provider that never registered the callback - so it is judged
+# here rather than left to whoever tries the button next. Exit 2 is "cannot
+# judge" (no plugin installed on a fresh host), reported as a skip.
+jellyfin_oidc_out=$(python3 scripts/jellyfin-oidc-sso.py --check 2>&1)
+jellyfin_oidc_code=$?
+if [ "$jellyfin_oidc_code" -eq 0 ]; then
+  say "ok: Jellyfin's login page offers Cerulean Authentik and the provider takes its callback"
+elif [ "$jellyfin_oidc_code" -eq 2 ]; then
+  say "note: Jellyfin's OIDC SSO could not be judged (skipped) - $(printf '%s' "$jellyfin_oidc_out" | tail -1)"
+else
+  fail "jellyfin: the login page's SSO button is not wired - see scripts/jellyfin-oidc-sso.py --check, then docs/operations.md (the OIDC plugin is installed by hand)"
+  printf '%s\n' "$jellyfin_oidc_out" | indent >&2
+fi
+
 # ───────────────────────────────────────────────────────────────────────────
 # Homarr's integration-secret encryption key
 # ───────────────────────────────────────────────────────────────────────────
