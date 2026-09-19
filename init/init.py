@@ -1427,10 +1427,30 @@ LIVETV_GUIDE_URL = os.environ.get(
     "LIVETV_GUIDE_URL", "http://iptv:3000/guide.xml")
 LIVETV_CHANNELS_SRC = "/init/livetv.channels.xml"   # bundled fallback
 LIVETV_CHANNELS_DST = "/opt/epg/channels.xml"       # read by the iptv container
-# Free US guide sources with both streams in the iptv-org playlist and EPG
-# data. Add more site names (see https://github.com/iptv-org/epg/tree/master/sites)
-# to grow the guide; the channel list is re-assembled on first boot.
-LIVETV_EPG_SITES = ["xumo.tv", "i24news.tv"]
+# Free guide sources with both streams in the iptv-org playlist and EPG data.
+# Ordered most-useful first: the list is assembled in this order, so a channel
+# covered by two sites is offered to the grabber from both and the richer guide
+# wins when Jellyfin merges them.
+#
+# Chosen by measurement, not reputation: every site under
+# https://github.com/iptv-org/epg/tree/master/sites was matched against the
+# dial's 1,470 stream ids, and these are the ones that actually cover it.
+# xumo.tv alone covers 128 and the playable US fast-channels; tvtv.us adds 163
+# (the cable networks), tvpassport.com 91 and tvguide.com 63 (the same networks'
+# listings from a second source), then the smaller FAST guides. Together they
+# take the dial from 128 channels with a guide to 339 — the remaining streams are
+# community-sourced FAST feeds no EPG site publishes.
+#
+# Override with LIVETV_EPG_SITES="a.com,b.com" to use a paid source instead.
+LIVETV_EPG_SITES = [
+    site.strip()
+    for site in os.environ.get(
+        "LIVETV_EPG_SITES",
+        "xumo.tv,tvtv.us,tvpassport.com,tvguide.com,i24news.tv,"
+        "watch.whaletvplus.com,distro.tv,watchyour.tv,epg.iptvx.one,gatotv.com",
+    ).split(",")
+    if site.strip()
+]
 LIVETV_EPG_RAW = ("https://raw.githubusercontent.com/iptv-org/epg/master/"
                   "sites/{site}/{site}.channels.xml")
 
@@ -1440,6 +1460,12 @@ def _fetch_livetv_channels():
 
     Returns XML text, or None if every site fetch failed. Entries without an
     xmltv_id are dropped (no guide data) and duplicates are removed.
+
+    A duplicate is the same channel *from the same site* — `site_id` alone is
+    not unique, because two sites may each label a channel `cnn`, and keying on
+    it would drop the second site's copy and with it a second guide source.
+    Distinct sites covering one xmltv_id are both kept, which is what lets the
+    grabber merge their listings.
     """
     seen, parts = set(), []
     for site in LIVETV_EPG_SITES:
@@ -1455,10 +1481,11 @@ def _fetch_livetv_channels():
             if 'xmltv_id=""' in tag:
                 continue
             key = re.search(r'site_id="([^"]*)"', tag)
-            if key and key.group(1) in seen:
-                continue
             if key:
-                seen.add(key.group(1))
+                pair = (site, key.group(1))
+                if pair in seen:
+                    continue
+                seen.add(pair)
             parts.append(tag)
     if not parts:
         return None
