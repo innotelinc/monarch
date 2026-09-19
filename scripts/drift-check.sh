@@ -913,6 +913,62 @@ except Exception:
     fail "authentik: outposts API unreachable (HTTP $ak_code)"
   fi
   rm -f /tmp/drift-ak.$$
+
+  # ── the outpost image must track the Authentik *server* version ──────────
+  # The `authentik-ldap` container is a *client* of the Cerulean Authentik, and
+  # goauthentik keeps the outpost and the server on one version line for a
+  # reason: the outpost speaks the server's API and schema. On 2026-09-19 this
+  # deployment sat at ldap:2026.8.2 against a 2026.8.3 server and nothing here
+  # noticed - the compose comment says "bump both together", and a comment is
+  # not a check.
+  #
+  # The server answers `/admin/version/` with `version_current`, which is the
+  # authoritative version to track. Its `outpost_outdated` flag is deliberately
+  # NOT the trigger: this is the estate's *shared* Authentik, so that flag is
+  # true while any outpost anywhere lags, and one belonging to another team
+  # would fail this host's run over something it cannot fix. The outposts API
+  # exposes no per-outpost version to narrow it with (the `version` field is
+  # absent entirely, not merely null). So the scoped question - "does the
+  # outpost on this host run the server's version?" - is answered from the
+  # container's own image tag, and `outpost_outdated` is read only to enrich
+  # the message.
+  ak_ver_code=$(curl -s -o /tmp/drift-akv.$$ -w "%{http_code}" \
+    -H "Authorization: Bearer $AUTHENTIK_BOOTSTRAP_TOKEN" \
+    "$ak_base/api/v3/admin/version/")
+  if [ "$ak_ver_code" = "200" ]; then
+    ak_versions=$(python3 -c "
+import sys, json
+try:
+    d = json.load(open('/tmp/drift-akv.$$'))
+    print('%s|%s' % (d.get('version_current',''), d.get('outpost_outdated','')))
+except Exception:
+    print('|')
+" 2>/dev/null)
+    ak_server_version="${ak_versions%%|*}"
+    ak_outpost_outdated="${ak_versions##*|}"
+    ldap_ref=$(docker inspect authentik-ldap --format '{{.Config.Image}}' 2>/dev/null || echo "")
+    ldap_ref="${ldap_ref%%@*}"
+    ldap_tag="${ldap_ref##*:}"
+    [ "$ldap_tag" = "$ldap_ref" ] && ldap_tag=""   # no tag in the ref
+    if [ -z "$ldap_tag" ]; then
+      if [ "$ak_outpost_outdated" = "True" ]; then
+        fail "authentik: the server reports an outpost behind it (outpost_outdated=true, server $ak_server_version) and no authentik-ldap container is on this host - set ghcr.io/goauthentik/ldap:$ak_server_version wherever the outpost runs, then recreate it; see docs/operations.md 'The Authentik LDAP outpost version'"
+      else
+        say "note: no authentik-ldap container on this host (skipped) - outpost version not checked"
+      fi
+    elif [ -n "$ak_server_version" ] && [ "$ldap_tag" != "$ak_server_version" ]; then
+      ak_corroborates=""
+      if [ "$ak_outpost_outdated" = "True" ]; then
+        ak_corroborates=" (the server corroborates: outpost_outdated=true)"
+      fi
+      fail "authentik: the LDAP outpost runs ldap:$ldap_tag while the Authentik server is $ak_server_version$ak_corroborates - an outpost is a client of the server and must sit on its version line. Set ghcr.io/goauthentik/ldap:$ak_server_version in docker-compose.yml (and ips/groups/3-media.yml), then 'docker compose up -d --force-recreate authentik-ldap'; see docs/operations.md 'The Authentik LDAP outpost version'"
+    else
+      say "ok: authentik LDAP outpost image tracks the server ($ak_server_version)"
+    fi
+  else
+    say "note: authentik admin/version API unreachable (HTTP $ak_ver_code) - outpost version not checked"
+  fi
+  rm -f /tmp/drift-akv.$$
 fi
 
 # ───────────────────────────────────────────────────────────────────────────

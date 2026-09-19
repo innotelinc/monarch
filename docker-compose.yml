@@ -518,7 +518,11 @@ services:
       PGID: 1000
       TZ: ${TZ:-America/New_York}
       DOMAIN_NAME: ${CLIPBUCKET_DOMAIN:-tube.innotel.us}
-      MYSQL_PASSWORD: ClipDB!2026
+      # The MariaDB runtime's own password, internal to this container — no other
+      # service connects to it. It is baked into the `clipbucket_db` volume at
+      # first boot, so changing it later means dropping that volume and letting
+      # the installer run again, not just editing the value in `.env`.
+      MYSQL_PASSWORD: ${CLIPBUCKET_DB_PASSWORD}
       UID: 1000
       GID: 1000
     volumes:
@@ -535,14 +539,16 @@ services:
   # Serves the Cerulean LDAP directory (provider 'jellyfin-ldap') so the
   # Jellyfin LDAP-Auth plugin resolves logins against Authentik users;
   # disabling a user in Cerulean blocks their Jellyfin login.
-  # The image tag MUST track the Authentik server version (2026.8.2) -
-  # bump both together. AUTHENTIK_TOKEN is the outpost API token monarch-init
+  # The image tag MUST track the Authentik server version (2026.8.3) -
+  # bump both together, and `drift-check` now fails the run when it does not
+  # (the Authentik API reports `outpost_outdated`, see docs/operations.md).
+  # AUTHENTIK_TOKEN is the outpost API token monarch-init
   # pins in Authentik (AUTHENTIK_LDAP_TOKEN); the bind user the plugin binds
   # with is provisioned by monarch-init too (password = AUTHENTIK_LDAP_BIND_TOKEN).
   authentik-ldap:
     <<: *common-keys
     container_name: authentik-ldap
-    image: ghcr.io/goauthentik/ldap:2026.8.2
+    image: ghcr.io/goauthentik/ldap:2026.8.3
     environment:
       AUTHENTIK_HOST: ${AUTHENTIK_BASE_URL}
       AUTHENTIK_INSECURE: "true"          # AUTHENTIK_BASE_URL is plain http on the LAN

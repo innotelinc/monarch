@@ -397,6 +397,63 @@ login), with its own watch history, resume state, ratings and per-profile
 Continue Watching rows. Profiles are managed in Authentik
 (Directory -> Users); admins are granted via the `jellyfin_admins` group.
 
+##### The Authentik LDAP outpost version (bumping `authentik-ldap`)
+
+`authentik-ldap` is a **client** of the Cerulean Authentik, and goauthentik keeps
+an outpost and its server on one version line: the outpost speaks the server's
+API and report schema, so the two are bumped together. The compose comment says
+"bump both together" — this is the procedure that sentence is about, and
+`drift-check` now fails the run when the two have drifted apart. On 2026-09-19
+the outpost sat at `2026.8.2` against a `2026.8.3` server and nothing noticed.
+
+**Ask the server what version it is.** Its own API answers, so nothing has to be
+read out of the Cerulean repo or guessed:
+
+```bash
+cd 3-media/monarch
+set -a; source .env; set +a
+curl -s -H "Authorization: Bearer $AUTHENTIK_BOOTSTRAP_TOKEN" \
+  "${AUTHENTIK_BASE_URL%/}/api/v3/admin/version/" \
+| python3 -c 'import sys,json; d=json.load(sys.stdin); print("server:", d["version_current"], "outpost_outdated:", d["outpost_outdated"])'
+```
+
+`version_current` is the version to track. `outpost_outdated` is the server's
+verdict across **every** outpost on the shared Authentik, not just this one — so
+it corroborates a problem but is not the thing to test.
+
+**Compare it with what actually runs here, then set both files to that version**
+— the running stack *and* the `ips` platform manifest, which must not disagree:
+
+```bash
+docker inspect authentik-ldap --format '{{.Config.Image}}'
+# image: ghcr.io/goauthentik/ldap:<version_current>   (in both files below)
+#   3-media/monarch/docker-compose.yml
+#   ips/groups/3-media.yml
+```
+
+**Pull and recreate the outpost.** The tag is resolved when the container is
+created, so a `restart` would keep running the old image:
+
+```bash
+docker compose pull authentik-ldap
+docker compose up -d --force-recreate --no-deps authentik-ldap
+```
+
+**Prove it** — the outpost re-registers with the server on start, so the flag
+should flip, and the login path must still work end to end:
+
+```bash
+curl -s -H "Authorization: Bearer $AUTHENTIK_BOOTSTRAP_TOKEN" \
+  "${AUTHENTIK_BASE_URL%/}/api/v3/admin/version/" \
+| python3 -c 'import sys,json; print("outpost_outdated:", json.load(sys.stdin)["outpost_outdated"])'
+python3 scripts/verify-ldap.py     # binds, then runs the paid_users search the plugin runs
+scripts/drift-check.sh             # "ok: authentik LDAP outpost image tracks the server"
+```
+
+`drift-check` compares the container's tag against `version_current` and names
+this procedure in the failure, so a bump that forgets either side surfaces on the
+next run instead of at the next Jellyfin login.
+
 ##### When a Cerulean identity cannot sign in (HTTP 500 from the login form)
 
 There are three independent pieces in this chain and **all of them must match
@@ -432,10 +489,6 @@ would have is `scripts/check-vault-refs.py` in the `ips` repo (it flags a stored
 value that looks like a comment or a placeholder), and the repair is to
 regenerate both secrets and write them to all four places that must agree:
 Authentik, Vault, `.env`, and Jellyfin's `LDAP-Auth.xml`.
-
-A rebuild does not fix a drifted token, because Compose reads `.env` fresh but
-the outpost token in Authentik is whatever was last pinned. After changing
-either value:
 
 A rebuild does not fix a drifted token, because Compose reads `.env` fresh but
 the outpost token in Authentik is whatever was last pinned. After changing

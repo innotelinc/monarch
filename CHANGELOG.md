@@ -12,6 +12,20 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **The LDAP outpost image tracks the Authentik server version, and drifting
+  apart is now a drift finding.** `authentik-ldap` is a *client* of the Cerulean
+  Authentik and has to sit on the server's version line; the compose comment has
+  said "bump both together" since the outpost was added, but a comment is not a
+  check. On 2026-09-19 the deployment ran `ldap:2026.8.2` against a `2026.8.3`
+  server — the server reported `outpost_outdated: true` and nothing noticed. The
+  image is now `2026.8.3` in both files that carry it (`docker-compose.yml` and
+  the `ips` platform manifest), and `drift-check` compares the running
+  container's tag against the server's advertised `version_current`, failing
+  with the repair named. The server's own `outpost_outdated` flag is used only
+  as corroboration, never as the trigger: this is the estate's *shared*
+  Authentik, so that flag goes true when any outpost anywhere lags.
+  `docs/operations.md` gains the bump procedure.
+
 - **A dead LDAP outpost is a drift finding, not a note.** `drift-check` treated
   "nothing answered" as a note so a slow bind would not be mistaken for a drifted
   credential — measured cost on 2026-09-18: the outpost ran 45 minutes with its
