@@ -182,7 +182,7 @@ FEED_TOKENS = {
     "lp", "ld", "dt", "dt2", "dt3", "dt4", "rf",
     "hd", "sd", "uhd", "4k", "east", "west", "pacific", "feed", "stream",
     "streaming", "excludes", "adult", "swim", "the", "a", "of", "and", "with",
-    "channel", "network", "television", "cable", "north", "america",
+    "channel", "network", "television", "cable", "tv", "north", "america",
     "canada", "plus", "e", "teve",
 }
 # Deliberately *not* dropped: "us" and "usa", because USA Network is a channel and
@@ -230,6 +230,15 @@ GENERIC_TOKENS = {
     "news", "sports", "sport", "weather", "movies", "movie", "kids", "music",
     "documentary", "entertainment", "lifestyle", "local", "general", "live",
     "now", "free", "tv", "classic", "radio", "hot", "hispanic", "action",
+    # A country is not a channel, and USA Network's own name is nothing else: with
+    # this, "MBC 1 USA", "USA TODAY" and "Potta-Divine TV USA" stop being filed
+    # under channel 35, while a stream that *is* "USA Network" still is.
+    "us", "usa",
+    # Genre words that happen to be the whole of a dial entry's name. "Autentic
+    # History" is not the History channel and "Autentic Travel" is not the Travel
+    # Channel; both bind on the one word they share. The channels keep their own
+    # names because a stream named after them *is* that word.
+    "history", "travel", "science", "outdoor", "we", "pop",
 }
 
 

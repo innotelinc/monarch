@@ -1074,8 +1074,15 @@ Jellyfin reaches all of it with nothing else running.
 cd /usr/src/projects/complete/3-media/monarch
 python3 scripts/livetv_lineup.py --plan              # the taxonomy + what lines up
 python3 scripts/livetv_lineup.py --guide /opt/epg/guide.xml --out /opt/epg
-python3 scripts/verify-livetv-lineup.py               # the dial and the guide, as Jellyfin holds them
+python3 scripts/refresh-livetv-guide.py             # make Jellyfin re-read it, and wait
+python3 scripts/verify-livetv-lineup.py             # the dial and the guide, as Jellyfin holds them
 ```
+
+`refresh-livetv-guide.py` is the step that is easy to skip: writing `/opt/epg`
+changes nothing on its own, because Jellyfin keeps its own copy of the playlist
+and the guide until the *Refresh Guide* task runs. It starts the task and waits for
+it to finish, so `verify-livetv-lineup.py` immediately afterwards reads the new
+dial rather than the old one and reports a fault that is not there.
 
 Re-run the generator whenever the lineup changes — it is idempotent, and Jellyfin
 picks the files up on its next guide refresh (**Dashboard → Scheduled Tasks →
