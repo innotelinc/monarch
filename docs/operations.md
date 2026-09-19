@@ -1077,9 +1077,18 @@ python3 scripts/livetv_lineup.py --guide /opt/epg/guide.xml --out /opt/epg
 python3 scripts/verify-livetv-lineup.py               # the dial and the guide, as Jellyfin holds them
 ```
 
-Re-run the generator whenever the lineup changes or the guide is re-grabbed — it
-is idempotent, and Jellyfin picks the files up on its next guide refresh
-(**Dashboard → Scheduled Tasks → Refresh Guide**, or the API).
+Re-run the generator whenever the lineup changes — it is idempotent, and Jellyfin
+picks the files up on its next guide refresh (**Dashboard → Scheduled Tasks →
+Refresh Guide**, or the API). On the deployment host a timer does it for you:
+`monarch-livetv-dial.timer` runs the generator at 00:30 and 12:30, half an hour
+behind the `iptv` container's own 00:00/12:00 guide grab, so the dial is always
+built from the current guide rather than from yesterday's.
+
+```bash
+systemctl list-timers monarch-livetv-dial.timer
+systemctl start monarch-livetv-dial.service      # rebuild now
+journalctl -u monarch-livetv-dial -n 20          # what it did
+```
 
 Two things worth knowing before editing the lineup:
 
