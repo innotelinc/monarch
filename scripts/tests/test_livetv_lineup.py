@@ -25,53 +25,105 @@ assert spec and spec.loader
 lineup_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lineup_mod)
 
-LINEUP = [
-    {"name": "WSHM (CBS)", "number": 3, "category": "Local", "source": "springfield",
-     "kind": "local", "rules": [__import__("re").compile(r"\bwshm\b", 2)]},
-    {"name": "CBS News 24/7", "number": None, "category": "News", "source": "fast-only",
-     "kind": "network", "rules": [__import__("re").compile(r"\bcbs news\b", 2)]},
-    {"name": "A&E", "number": 37, "category": "Entertainment", "source": "ma-convention",
-     "kind": "network", "rules": [__import__("re").compile(r"\ba&e\b", 2)]},
-]
-
-
 def entry(name: str, tvg_id: str = "", url: str = "http://stream.test/x") -> dict:
     return {"name": name, "attrs": {"tvg-id": tvg_id}, "url": url, "group": ""}
 
 
-class TheRealLineupFile(unittest.TestCase):
-    """The file that ships, not a fixture: a typo'd alias is a silent misnumber."""
+# The real dial. "CBS News 24/7" and the assistant's own hypotheticals have no
+# entry here, which is the point: a FAST service with no cable counterpart must
+# not be given somebody else's number.
+LINEUP = None  # set in setUpModule, so importing the module cannot half-load the file
 
-    def test_it_loads_with_aliases_compiled(self) -> None:
-        lineup = lineup_mod.load_lineup()
-        self.assertGreater(len(lineup), 30)
-        for item in lineup:
-            self.assertTrue(item["rules"], f"{item['name']} has no aliases")
+
+def setUpModule() -> None:  # noqa: N802 - unittest's name
+    global LINEUP
+    LINEUP = lineup_mod.load_lineup()
+
+
+def dial(name: str):
+    """The number a real stream name gets, or None."""
+    hit = lineup_mod.lineup_of(name, LINEUP)
+    return (hit or {}).get("number")
+
+
+class TheRealLineupFile(unittest.TestCase):
+    """The file that ships, not a fixture: a bad row is a silently missing channel."""
+
+    def test_every_row_is_a_number_and_a_name(self) -> None:
+        self.assertGreater(len(LINEUP), 1000)
+        for item in LINEUP:
+            self.assertIsInstance(item["number"], (int, float), item)
+            self.assertTrue(item["name"].strip(), item)
+            self.assertTrue(item["tokens"], item)
             self.assertIn(item["category"], lineup_mod.CATEGORY_ORDER)
 
-    def test_every_numbered_entry_says_where_the_number_came_from(self) -> None:
-        for item in lineup_mod.load_lineup():
-            if item.get("number") is not None:
-                self.assertIn(item.get("source"), {"springfield", "ma-convention"},
-                              f"{item['name']} has a number and no traceable source")
+    def test_the_numbers_are_the_operators_and_are_unique(self) -> None:
+        """Every number traces to the supplied dial, and no two rows claim one."""
+        numbers = [item["number"] for item in LINEUP]
+        self.assertEqual(len(numbers), len(set(numbers)))
+        self.assertEqual({item["source"] for item in LINEUP}, {"comcast-springfield"})
 
-    def test_the_specific_service_beats_the_affiliate(self) -> None:
-        # "CBS News 24/7" is a streaming news service; the CBS affiliate's number
-        # must not land on it.
-        lineup = lineup_mod.load_lineup()
-        self.assertEqual(lineup_mod.lineup_of("CBS News 24/7", lineup)["source"], "fast-only")
-        self.assertEqual(lineup_mod.lineup_of("CBS News New York", lineup)["source"], "fast-only")
+    def test_the_springfield_locals_are_where_comcast_files_them(self) -> None:
+        # 2 WGBY, 3 WSHM, 4 WGGB, 5 WWLP — the locals the operator's list opens with.
+        for name, number in (("WGBY", 2), ("WSHM", 3), ("WGGB", 4), ("WWLP", 5)):
+            self.assertEqual(dial(name), number, name)
 
 
 class Matching(unittest.TestCase):
-    def test_a_name_binds_to_its_network(self) -> None:
-        self.assertEqual(lineup_mod.lineup_of("A&E Crime 360", LINEUP)["number"], 37)
+    """Which dial slot a stream takes, and — as importantly — when it takes none."""
 
-    def test_file_order_decides_ties(self) -> None:
-        self.assertEqual(lineup_mod.lineup_of("CBS News 24/7", LINEUP)["number"], None)
+    def test_a_network_takes_its_number(self) -> None:
+        for name, number in (
+            ("ESPN", 49),
+            ("ESPN2", 50),
+            ("TNT", 33),
+            ("Discovery Channel", 39),
+            ("Food Network", 67),
+            ("A&E", 37),
+            ("USA Network", 35),
+            ("Disney Channel", 24),
+            ("HBO", 301),
+        ):
+            self.assertEqual(dial(name), number, name)
 
-    def test_an_unknown_name_matches_nothing(self) -> None:
-        self.assertIsNone(lineup_mod.lineup_of("Some Obscure FAST Channel", LINEUP))
+    def test_a_quality_suffix_does_not_move_the_channel(self) -> None:
+        # "CNN HD" is CNN, and CNN is 42 — the classic SD position, not the 842
+        # simulcast. Handing out a 1100-block number for an HD duplicate is how a
+        # dial stops looking like the one in the viewer's head.
+        self.assertEqual(dial("CNN"), 42)
+        self.assertEqual(dial("CNN HD"), 42)
+        self.assertEqual(dial("CNN HD East"), 42)
+
+    def test_the_dials_legacy_name_binds_to_the_name_people_use(self) -> None:
+        self.assertEqual(dial("CNN"), dial("Cable News Network"))
+        self.assertEqual(dial("HGTV"), 32)
+        self.assertEqual(dial("MSNBC"), 65)
+
+    def test_a_specific_feed_beats_the_parent_channel(self) -> None:
+        # CNN en Español is on 709, and must not be handed CNN's 42.
+        self.assertEqual(dial("CNN en Español"), 709)
+        self.assertEqual(dial("Nat Geo Wild"), 232)
+
+    def test_a_generic_word_alone_cannot_carry_a_match(self) -> None:
+        # "CBS News 24/7" contains "news"; every news channel does. The dial's
+        # "Cable News Network" reduces to that one word, and must not claim it.
+        self.assertIsNone(dial("CBS News 24/7"))
+        self.assertIsNone(dial("Some Obscure FAST Channel"))
+
+    def test_the_weather_channel_still_claims_its_own_name(self) -> None:
+        # Its identifying word is generic, so it matches only its own name — which
+        # is exactly what a stream called "The Weather Channel" says.
+        self.assertEqual(dial("The Weather Channel"), 47)
+        self.assertEqual(dial("FOX Weather"), 1108)
+
+    def test_the_fast_services_on_the_dial_get_their_own_numbers(self) -> None:
+        for name, number in (
+            ("ABC News Live", 14017),
+            ("NBC News NOW", 14005),
+            ("Sky News", 14006),
+            ("Xumo Free Movies", 14055),
+        ):
+            self.assertEqual(dial(name), number, name)
 
 
 class Numbers(unittest.TestCase):
@@ -93,6 +145,12 @@ class Numbers(unittest.TestCase):
         self.assertEqual(numbers[1], "37")
         self.assertEqual(numbers[0], str(lineup_mod.BANDS["News"]))
         self.assertNotEqual(numbers[0], "37")
+
+    def test_a_category_band_never_lands_on_a_cable_number(self) -> None:
+        """The bands and the dial share one number space, so they must not collide."""
+        entries, numbers = self.plan(["Some Obscure News Channel", "ESPN"])
+        self.assertEqual(numbers[1], "49")
+        self.assertNotEqual(numbers[0], "49")
 
     def test_numbers_are_unique(self) -> None:
         _, numbers = self.plan(["A&E Crime 360", "A&E Lives", "Obscure One", "Obscure Two"])

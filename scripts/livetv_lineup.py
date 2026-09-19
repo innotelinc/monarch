@@ -49,41 +49,82 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import yaml
-
 DEFAULT_M3U = os.environ.get(
     "LIVETV_M3U_URL", "https://iptv-org.github.io/iptv/countries/us.m3u")
-LINEUP_PATH = Path(__file__).resolve().parent.parent / "data" / "comcast-springfield-lineup.yml"
+# The dial itself, exactly as the operator supplied it: one `number<TAB>name` per
+# line. This is the authoritative source for a channel number, so it is stored
+# verbatim rather than transcribed into a second format that could disagree with
+# it — every number here is Comcast's for this franchise, and nothing in this
+# file is inferred.
+LINEUP_PATH = Path(__file__).resolve().parent.parent / "data" / "comcast-springfield-channels.tsv"
 
 # Ordered: the first rule that matches wins, so the specific beats the general
 # ("CBS Sports HQ" is a sports channel, not a CBS affiliate, and belongs in
 # Sports — but it is *also* part of the CBS network grouping, which the network
 # pass handles separately).
+#
+# The brand lists are long because they are the *cable* brands now, not just the
+# FAST ones: the dial these playlists mirror has ESPN on 49 and TNT on 33, and a
+# category playlist that filed either under "General" would be no use to anybody
+# comparing it against their TV.
 CATEGORIES: list[tuple[str, re.Pattern[str]]] = [
-    ("Weather", re.compile(r"\b(weather|accuweather|storm|climate)\b", re.I)),
+    ("Weather", re.compile(
+        r"\b(weather|accuweather|storm|climate|fox weather)\b", re.I)),
     ("News", re.compile(
         r"\b(news|i24news|reuters|headlines|nowhere|scripps|oann|tyt|cheddar|"
-        r"live ?now|court ?tv|cnn|bbc|sky news|cbc|newsmax|nexstar)\b", re.I)),
+        r"live ?now|court ?tv|cnn|bbc|sky news|cbc|newsmax|nexstar|cnbc|"
+        r"bloomberg|cspan|ms now|msnbc|fox business|newsnation|new england "
+        r"cable|herald|noticias|estrella|comercio|ntd|oann|newsy|scripps)\b", re.I)),
     ("Sports", re.compile(
-        r"\b(sports?|nfl|nba|mlb|nhl|pga|mma|pfl|wrestling|kickbox|billiard|"
+        r"\b(sports?|nfl|nba|mlb|nhl|mls|pga|mma|pfl|wrestling|kickbox|billiard|"
         r"poker|racers?|tennis|real madrid|draftkings|acc digital|willow|"
-        r"strongman|pursuit|speedvision|glory|pbr|ridepass|golf)\b", re.I)),
+        r"strongman|pursuit|speedvision|glory|pbr|ridepass|golf|espn|nesn|"
+        r"sec network|big ten|fanduel|zona futbol|tudn|deportes|universo|"
+        r"extra innings|league pass|center ice|redzone|outdoor channel|"
+        r"sportsman|pickleball|unbeaten|billiards|bowling|ryz|phly|dnvr|chgo|joyn|"
+        r"speed|olympic|ufc|sportsnet|beIN|premier league|f1 )\b", re.I)),
     ("Movies", re.compile(
         r"\b(movies?|cinema|cine|filmex|filme|xumo free westerns|westerns|"
-        r"action|thriller|horror|black cinema|film)\b", re.I)),
-    ("Kids", re.compile(r"\b(kids|toon|baby shark|ninja kidz|pbs kids)\b", re.I)),
-    ("Music", re.compile(r"\b(stingray|iheart|music|hits|country|soul|rock)\b", re.I)),
+        r"action|thriller|horror|black cinema|film|hbo|cinemax|showtime|sho |"
+        r"starz|mgm\+|screenpix|flix|the movie channel|movie channel|tcm|"
+        r"turner classic|ifc|sundance|encore|outer ?sphere|moviesphere|"
+        r"universal (action|monsters|movies|westerns)|outflix|pelimex|todo cine|"
+        r"canela|dnu cine|viendo ?movies|cinema dinamita|sony cine)\b", re.I)),
+    ("Kids", re.compile(
+        r"\b(kids|toon|baby shark|ninja kidz|pbs kids|disney|nick|cartoon|"
+        r"babyfirst|boomerang|meTV toons|primo tv|kids street)\b", re.I)),
+    ("Music", re.compile(
+        r"\b(stingray|iheart|music choice|music|hits|country|soul|rock|mtv|"
+        r"vh1|cmt|bet|axs|revolt|afro|loop|bounce|the grio|shades of black|"
+        r"mtv live|nick music)\b", re.I)),
     ("Documentary", re.compile(
-        r"\b(documentary|history|histories|true history|curiosity|nature|earth|"
-        r"wildlife|wildearth|science|space|antiques)\b", re.I)),
+        r"\b(documentary|histor(?:y|ies)|true history|curiosity|nature|earth|"
+        r"wildlife|wild ?earth|science|space|antiques|discovery|national "
+        r"geographic|smithsonian|animal planet|military history|american "
+        r"heroes|investigation discovery|crime \+ investigation|"
+        r"science channel|discovery turbo|love nature|mysterious worlds)\b", re.I)),
     ("Lifestyle", re.compile(
         r"\b(food|kitchen|home|garden|design|travel|gotravel|house|tiny house|"
-        r"weddings|tastemade|gusto|shop|qvc|hsn|hobby|craft)\b", re.I)),
+        r"weddings|tastemade|gusto|shop|qvc|hsn|hobby|craft|hgtv|home & "
+        r"garden|tlc|cooking|magnolia|jewelry|recipe|how-to|handyman|"
+        r"jamie oliver|test kitchen|dog whisperer|family handyman|"
+        r"million dollar|say yes|shopp|ing|powernation|estate|balance|fat |"
+        r"hobby|diy|shop lc|binge|gems)\b", re.I)),
     ("Local", re.compile(
-        r"\b(boston|springfield|chicopee|worcester|hartford|new england)\b", re.I)),
+        r"\b(boston|springfield|chicopee|worcester|hartford|new england|"
+        r"wgby|wscc|wggb|wwlp|wshm|wedh|whtx|wdmr|local access|leased|"
+        r"westfield|local \d|comcast employee|greater boston employee)\b", re.I)),
     ("Entertainment", re.compile(
         r"\b(comedy|drama|game show|laugh|reality|ghost|haunt|mysteries|"
-        r"midsomer|detective|crime|forensic|unsolved|dateline|reel)\b", re.I)),
+        r"midsomer|detective|crime|forensic|unsolved|dateline|reel|tbs|tnt|"
+        r"usa|fx|fxx|e!|syfy|paramount|pop |tv land|we tv|oxygen|hallmark|"
+        r"a&e|tru ?tv|bravo|freeform|amc|logo|in ?sp|justice|as ?pire|"
+        r"own|oprah|trutv|vice|fy i|fyi|comedy\.tv|cnbc|bet her|cleo|ebony|"
+        r"lifetime|lmn|uptv|gaf|great american|ovation|a&e network|the "
+        r"conners|family feud|deal or no deal|america's got talent|"
+        r"price is right|game show central|buzzr|ninja warrior|baywatch|"
+        r"family entertainment|sonlife|god tv|intouch|impact|daystar|ewtn|"
+        r"tbn|trinity broadcasting|insp|circle country|pbs )\b", re.I)),
 ]
 FALLBACK = "General"
 
@@ -132,32 +173,182 @@ def network_of(name: str) -> str:
     return ""
 
 
-def load_lineup(path: Path | str = LINEUP_PATH) -> list[dict]:
-    """The lineup file, with each entry's aliases compiled.
+# Words that name the *feed*, not the network. Dropping them is what makes "CNN",
+# "CNN HD" and "CNN HD East" one channel, while "CNN en Español" stays a
+# different one — the words that survive are the ones that identify a service.
+# A call sign's own suffixes go too: "WSHM-LP", "WGBY-DT" and "WGGB-DT2" are the
+# local station, and a stream named after the station has to reach it.
+FEED_TOKENS = {
+    "lp", "ld", "dt", "dt2", "dt3", "dt4", "rf",
+    "hd", "sd", "uhd", "4k", "east", "west", "pacific", "feed", "stream",
+    "streaming", "excludes", "adult", "swim", "the", "a", "of", "and", "with",
+    "channel", "network", "television", "cable", "north", "america",
+    "canada", "plus", "e", "teve",
+}
+# Deliberately *not* dropped: "us" and "usa", because USA Network is a channel and
+# dropping the word would leave it with no name at all.
+# Kept deliberately: "national" is dropped above but "geographic" is not, so
+# "National Geographic" and "Nat Geo Wild" stay apart; "en" is not dropped, so
+# the Spanish feeds do too.
+KEEP_TOKENS = {"en", "espanol", "espa", "black", "wild", "family", "classic"}
 
-    File order is match order: a `locals` entry ("WSHM (CBS)") is consulted
-    before the `networks` block, and within a block the file is written
-    most-specific-first, which is why "CBS News 24/7" binds to the FAST service
-    rather than to the CBS affiliate's number.
+# The dial keeps some channels under names nobody says out loud — "Cable News
+# Network" is CNN, "Home & Garden Television" is HGTV, "MS NOW" is what MSNBC
+# became. A stream is named the way people say it, so each of these adds the
+# shorthand to the entry's identifying words. Keyed by the dial name, lowercased.
+#
+# Only shorthand that cannot collide is listed: "weather" is already a word of
+# "The Weather Channel", and "cnn" cannot match anything else on this dial.
+DIAL_ALIASES: dict[str, tuple[str, ...]] = {
+    "cable news network": ("cnn",),
+    "home & garden television": ("hgtv",),
+    "ms now": ("msnbc",),
+    "ms now hd": ("msnbc",),
+    "national geographic": ("nat", "geo"),
+    "national geographic usa": ("nat", "geo"),
+    "national geographic hd": ("nat", "geo"),
+    "national geographic wild": ("nat", "geo", "wild"),
+    "e! entertainment television": ("e",),
+    "tru tv": ("trutv",),
+    "truTV": ("trutv",),
+    "the weather channel": ("twc",),
+    "turner classic movies": ("tcm",),
+    "the movie channel": ("tmc",),
+    "fox news channel": ("fnc",),
+    "discovery channel": ("discovery",),
+    "home shopping network": ("hsn",),
+    "black entertainment television": ("bet",),
+}
+
+
+# A lone dial word that is a *genre* rather than a channel. "Cable News Network"
+# reduces to just `news` once its feed words go, and a stream called "CBS News
+# 24/7" would otherwise bind to CNN's number — which is how a name-matcher hands
+# out confidently wrong dial positions. A single generic word may never carry a
+# match; the entry still matches by its full name or by a shorthand alias.
+GENERIC_TOKENS = {
+    "news", "sports", "sport", "weather", "movies", "movie", "kids", "music",
+    "documentary", "entertainment", "lifestyle", "local", "general", "live",
+    "now", "free", "tv", "classic", "radio", "hot", "hispanic", "action",
+}
+
+
+def _tokens(name: str) -> frozenset[str]:
+    """The words that identify a channel, quality and feed suffixes removed."""
+    return frozenset(_words(name))
+
+
+def _words(name: str) -> list[str]:
+    cleaned = name.lower()
+    cleaned = re.sub(r"\([^)]*\)", " ", cleaned)
+    cleaned = re.sub(r"[^a-z0-9+&']+", " ", cleaned)
+    out = []
+    for token in cleaned.split():
+        if token in KEEP_TOKENS:
+            out.append(token)
+        elif token not in FEED_TOKENS and len(token) > 1:
+            out.append(token)
+    return out
+
+
+def _normalised(name: str) -> str:
+    """The name as identifying words in order — what "the same channel" means."""
+    return " ".join(_words(name))
+
+
+def load_lineup(path: Path | str = LINEUP_PATH) -> list[dict]:
+    """The dial, one entry per `number<TAB>name` line, in file order.
+
+    Every entry is a real Comcast number for this franchise, so `source` is the
+    same for all of them; it exists because the report and the tests read it, and
+    because "where did this number come from" should have an answer on the entry
+    rather than in someone's memory of a conversation.
     """
-    doc = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     entries: list[dict] = []
-    for kind in ("locals", "networks"):
-        for item in doc.get(kind) or []:
-            if not item or not item.get("name"):
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        number, tab, name = line.partition("\t")
+        name = name.strip()
+        if not tab or not name:
+            continue
+        try:
+            value: int | float = int(number.strip())
+        except ValueError:
+            try:
+                value = float(number.strip())
+            except ValueError:
                 continue
-            entry = dict(item)
-            entry["rules"] = [re.compile(alias, re.I) for alias in item.get("aliases") or []]
-            entry["kind"] = "local" if kind == "locals" else "network"
-            entries.append(entry)
+        # Read as one name *or* another, not one name *and* another: a stream called
+        # "CNN" has to satisfy the shorthand alone, and there is no stream that says
+        # both "Cable News Network" and "CNN".
+        token_sets = [_tokens(name)]
+        shorthand = tuple(
+            token for token in DIAL_ALIASES.get(name.strip().lower(), ())
+            if token not in FEED_TOKENS
+        )
+        if shorthand:
+            # One set, not one set per word: "nat geo wild" is a name for a
+            # channel, and treating its words separately would let any one of them
+            # carry a match on its own.
+            token_sets.append(frozenset(shorthand))
+        entries.append({
+            "name": name,
+            "number": value,
+            "source": "comcast-springfield",
+            "aliases": [name],
+            "normalised": _normalised(name),
+            "tokens": [t for t in token_sets if t],
+            "category": categorise(name),
+            "kind": "network",
+        })
     return entries
 
 
 def lineup_of(name: str, lineup: list[dict]) -> dict | None:
-    for item in lineup:
-        if any(rule.search(name) for rule in item["rules"]):
-            return item
-    return None
+    """The dial entry a stream belongs to, or None.
+
+    Matching is on the identifying words, not on a regex per channel: every token
+    of the dial entry has to appear in the stream's name, and the *most specific*
+    entry wins. Specificity is what keeps "CNN en Español" off CNN's 42 — it
+    matches both, and the one whose words are all used is the right one — and the
+    lowest number breaks the remaining ties, which is what makes the classic SD
+    position the canonical one rather than a 1100-block simulcast.
+
+    A tie in *both* is genuinely ambiguous (two dial entries with the same name),
+    and the lowest number is the honest answer: it is the position a viewer would
+    try first.
+    """
+    stream_tokens = _tokens(name)
+    if not stream_tokens:
+        return None
+    best: tuple | None = None
+    best_entry: dict | None = None
+    for entry in lineup:
+        number = float(entry["number"])
+        for tokens in entry.get("tokens") or ():
+            if not tokens or not tokens <= stream_tokens:
+                continue
+            # A lone generic word only counts when the stream *is* that word — so
+            # "The Weather Channel" still claims its own name, while "FOX Weather"
+            # does not get handed it for containing the word "weather".
+            if (
+                len(tokens) == 1
+                and next(iter(tokens)) in GENERIC_TOKENS
+                and stream_tokens != tokens
+            ):
+                continue
+            extra = len(stream_tokens - tokens)
+            # Fewest unused stream words first, then the longest qualifying name,
+            # then the lowest number. The shorthand for a channel and the channel's
+            # full name score identically (both leave nothing unused), and the
+            # lower number — the classic SD position — is the one a viewer would
+            # try, so that is the dial slot the stream takes.
+            key = (extra, -len(tokens), number)
+            if best is None or key < best:
+                best, best_entry = key, entry
+    return best_entry
 
 
 def parse_m3u(text: str) -> list[dict]:

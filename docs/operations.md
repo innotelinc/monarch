@@ -1061,7 +1061,7 @@ the same streams:
 
 | Piece | What it is |
 |-------|------------|
-| `data/comcast-springfield-lineup.yml` | the lineup: a number, a category and the *source* of that number for each network (see the file header) |
+| `data/comcast-springfield-channels.tsv` | the dial itself, exactly as the operator supplied it: one `number<TAB>name` per line, nothing inferred. This is the authoritative source for a channel number |
 | `scripts/livetv_lineup.py` | matches the streams against it, numbers them, and writes the playlists and the renumbered guide into `/opt/epg` |
 | `/opt/epg/comcast-springfield.m3u` | the dial — Jellyfin's tuner points here |
 | `/opt/epg/comcast-springfield.xml` | the guide, renumbered from the `iptv` container's `guide.xml`; programmes are the guide's own, with each channel's number as its display name and `<lcn>` |
@@ -1090,21 +1090,30 @@ systemctl start monarch-livetv-dial.service      # rebuild now
 journalctl -u monarch-livetv-dial -n 20          # what it did
 ```
 
-Two things worth knowing before editing the lineup:
+Three things worth knowing before editing the dial:
 
-* **A number is only as good as its source.** Numbers marked `springfield` come
-  from Comcast's own filed lineup for this franchise (Feb 2025); `ma-convention`
-  is Comcast's Massachusetts numbering from another system's filing, which is the
-  convention rather than a promise; `fast-only` means the stream has no cable
-  counterpart and deliberately gets a category band instead of borrowing some
-  channel's number. Replace a `ma-convention` number with the real one as soon as
-  you can see it — `xfinity.com/support/local-channel-lineup` resolves numbers
-  from the service address behind a login, and the filed PDFs are scans.
-* **Order in the file is order of matching.** Aliases are regexes and the first
-  hit wins, which is why the locals are listed before the networks and why
-  `\bcbs news\b` sits above the CBS affiliate: otherwise "CBS News 24/7" would
-  take channel 3. Sub-feeds of one network share its number with a decimal
-  (`25`, `25.1`, `25.2`), exactly as a cable dial does.
+* **The dataset is the operator's list, not a reconstruction.** Every number in
+  `comcast-springfield-channels.tsv` is Comcast's for the Springfield franchise,
+  so there is no "approximately right" row in it. That is why it is stored as
+  pasted: transcribing it into another format is how a number gets quietly
+  changed. If a channel moves, edit the TSV and re-run the generator.
+* **A name is matched on its identifying words, not on a regex per channel.**
+  Feed words (`HD`, `SD`, `East`, `DT2`, a parenthetical) are dropped, so `CNN`,
+  `CNN HD` and `CNN HD East` are one channel — and the *lowest* number wins, which
+  is why CNN lands on 42 rather than its 842 or 1111 simulcast. A shorthand that
+  cannot collide (`DIAL_ALIASES`: HGTV for "Home & Garden Television", MSNBC for
+  "MS NOW", Nat Geo for "National Geographic") binds to the dial's own legacy
+  name. A lone generic word — "Cable News Network" reduces to just `news` — may
+  never carry a match, so "CBS News 24/7" is *not* handed CNN's number.
+* **Most of the dial has no stream, and gets none.** The list has 1,378 channels;
+  the playlist has ~1,500 streams, and only the ones that name a channel in the
+  dial take its number. Everything else — the Xumo FAST services, the Spanish
+  feeds, the sports-team overflow — takes a number in its category's band
+  instead of borrowing somebody's. The generator prints both counts, and lists
+  dial entries left empty, so the gap is visible rather than implied.
+
+Sub-feeds of one network share its number with a decimal (`25`, `25.1`, `25.2`),
+exactly as a cable dial does.
 
 To add a category or a network playlist as a second tuner in Jellyfin (they are
 served at `http://iptv:3000/news.m3u`, `.../network-pbs.m3u`, …), add an M3U
