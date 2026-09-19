@@ -1052,6 +1052,57 @@ sudo docker restart iptv        # triggers an EPG grab right away
 iptv-org streams are community-sourced — most play, but some channels may be
 offline or geo-blocked.
 
+### The Comcast dial
+
+Out of the box the tuner is the raw iptv-org playlist: thousands of rows in
+playlist order, no channel numbers, and no News/Sports/Movies split. A cable box
+is the shape people already know, so this deployment runs its own dial on top of
+the same streams:
+
+| Piece | What it is |
+|-------|------------|
+| `data/comcast-springfield-lineup.yml` | the lineup: a number, a category and the *source* of that number for each network (see the file header) |
+| `scripts/livetv_lineup.py` | matches the streams against it, numbers them, and writes the playlists and the renumbered guide into `/opt/epg` |
+| `/opt/epg/comcast-springfield.m3u` | the dial — Jellyfin's tuner points here |
+| `/opt/epg/comcast-springfield.xml` | the guide, renumbered from the `iptv` container's `guide.xml`; programmes are the guide's own, with each channel's number as its display name and `<lcn>` |
+| `/opt/epg/<category>.m3u`, `/opt/epg/network-<name>.m3u` | News/Weather/Sports/Movies/Kids/Music/Documentary/Lifestyle/Local/Entertainment/General, plus one per network that appears more than once (the "several ABC stations, one subcategory" rule) |
+
+The `iptv` container serves `/opt/epg` at `http://iptv:3000/<name>`, which is how
+Jellyfin reaches all of it with nothing else running.
+
+```bash
+cd /usr/src/projects/complete/3-media/monarch
+python3 scripts/livetv_lineup.py --plan              # the taxonomy + what lines up
+python3 scripts/livetv_lineup.py --guide /opt/epg/guide.xml --out /opt/epg
+python3 scripts/verify-livetv-lineup.py               # the dial and the guide, as Jellyfin holds them
+```
+
+Re-run the generator whenever the lineup changes or the guide is re-grabbed — it
+is idempotent, and Jellyfin picks the files up on its next guide refresh
+(**Dashboard → Scheduled Tasks → Refresh Guide**, or the API).
+
+Two things worth knowing before editing the lineup:
+
+* **A number is only as good as its source.** Numbers marked `springfield` come
+  from Comcast's own filed lineup for this franchise (Feb 2025); `ma-convention`
+  is Comcast's Massachusetts numbering from another system's filing, which is the
+  convention rather than a promise; `fast-only` means the stream has no cable
+  counterpart and deliberately gets a category band instead of borrowing some
+  channel's number. Replace a `ma-convention` number with the real one as soon as
+  you can see it — `xfinity.com/support/local-channel-lineup` resolves numbers
+  from the service address behind a login, and the filed PDFs are scans.
+* **Order in the file is order of matching.** Aliases are regexes and the first
+  hit wins, which is why the locals are listed before the networks and why
+  `\bcbs news\b` sits above the CBS affiliate: otherwise "CBS News 24/7" would
+  take channel 3. Sub-feeds of one network share its number with a decimal
+  (`25`, `25.1`, `25.2`), exactly as a cable dial does.
+
+To add a category or a network playlist as a second tuner in Jellyfin (they are
+served at `http://iptv:3000/news.m3u`, `.../network-pbs.m3u`, …), add an M3U
+tuner per file and point the same XMLTV provider at
+`http://iptv:3000/comcast-springfield.xml`; the channels duplicate the dial's,
+which is why the dial is the tuner this deployment uses by default.
+
 
 ## Restart services
 
