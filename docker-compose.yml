@@ -503,13 +503,17 @@ services:
       # Two days is two thirds of the work, for a guide that is re-grabbed twice a
       # day anyway, and it is the lever that keeps the whole channel list: trimming
       # the list instead would drop the guide for channels the dial carries.
-      DAYS: "2"
-      # Headroom over Node's default old-space ceiling, which is what the first
-      # failure hit. The service's own memory limit is the hard stop, so a runaway
-      # grab is killed inside this container rather than taking Jellyfin and the
-      # *arr stack down with it - the second failure was the host's OOM killer.
-      NODE_OPTIONS: "--max-old-space-size=3072"
-    mem_limit: 4g
+      #
+      # The size below is measured, not guessed. With a 4 GB limit the two-day run
+      # was killed at task 10,622 of 12,764 (83%) - the same fraction the three-day
+      # run died at, both times - so the peak tracks the total work and two days
+      # lands between 4 and 6 GB. The first failure was Node's own default ceiling
+      # (~2.4 GB) and the second was the *host's* OOM killer, which is the one to
+      # avoid: the limit makes this container the boundary, so the worst case is
+      # this guide not being written rather than Jellyfin or an *arr container being
+      # killed instead. The host has ~10 GB free when the grab runs.
+      NODE_OPTIONS: "--max-old-space-size=5120"
+    mem_limit: 6g
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # Host /opt/epg holds channels.xml (EPG channel list, written by
