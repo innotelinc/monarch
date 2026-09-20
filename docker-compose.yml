@@ -492,14 +492,24 @@ services:
       CRON_SCHEDULE: "0 0,12 * * *"
       MAX_CONNECTIONS: "8"
       RUN_AT_STARTUP: "true"
-      # The grabber holds a whole site's listings in memory before it writes
-      # anything, and Node's default old-space ceiling is not enough for a
-      # channel list of this size: the 00:00 run on 2026-09-20 died at channel
-      # 13161 of 15308 with "Reached heap limit Allocation failed - JavaScript
-      # heap out of memory", 15 minutes in, and left the day's guide unwritten.
-      # The heap that failed was ~2.4 GB; 6 GB covers a list several times this
-      # big without crowding the other containers on a 14 GB host.
-      NODE_OPTIONS: "--max-old-space-size=6144"
+      # The row count below is days x channels, and the grabber holds every listing
+      # it has fetched until it writes the file at the end - so peak memory is the
+      # whole run. Both factors are large here: ~6,400 channels across the ten
+      # configured sites, three days. That did not fit. The 00:00 run on 2026-09-20
+      # died at task 13166 of 15308 and the run before it at 13161 with "Reached
+      # heap limit Allocation failed - JavaScript heap out of memory", so the guide
+      # was never written and /opt/epg/guide.xml stayed a day old.
+      #
+      # Two days is two thirds of the work, for a guide that is re-grabbed twice a
+      # day anyway, and it is the lever that keeps the whole channel list: trimming
+      # the list instead would drop the guide for channels the dial carries.
+      DAYS: "2"
+      # Headroom over Node's default old-space ceiling, which is what the first
+      # failure hit. The service's own memory limit is the hard stop, so a runaway
+      # grab is killed inside this container rather than taking Jellyfin and the
+      # *arr stack down with it - the second failure was the host's OOM killer.
+      NODE_OPTIONS: "--max-old-space-size=3072"
+    mem_limit: 4g
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # Host /opt/epg holds channels.xml (EPG channel list, written by
