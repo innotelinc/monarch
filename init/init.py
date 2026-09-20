@@ -718,6 +718,60 @@ def jellyfin_reset_wizard_flag() -> bool:
 
 
 @arrived("jellyfin setup")
+def jellyfin_admin_permissions() -> dict[str, bool]:
+    """The policy flags a member of the admin group holds.
+
+    Read from OIDC_ROLE_MAPPINGS rather than restated, so the account this is
+    applied to and the account that logs in through the provider cannot drift.
+    """
+    for mapping in OIDC_ROLE_MAPPINGS:
+        if mapping.get("role") == LDAP_ADMIN_GROUP:
+            return {
+                "EnableContentDeletion": mapping.get("content_deletion") == "true",
+                "EnableLiveTvManagement": mapping.get("live_tv_management") == "true",
+            }
+    return {}
+
+
+def jellyfin_ensure_admin_permissions(token) -> bool:
+    """Give the local admin the rights the group mapping only grants on login.
+
+    The OIDC plugin applies the role mapping when a user *logs in through the
+    provider*, so it never reaches `MONARCH_USERNAME` - a local account, and the
+    one an operator uses to run the DVR. Without `EnableLiveTvManagement`
+    Jellyfin offers no way to delete a recording, so the Recordings library only
+    ever grows and the fix is a shell on the host.
+
+    `POST /Users/{id}/Policy` replaces the whole policy rather than merging into
+    it, so this reads the policy, folds the flags in, and writes it back - and
+    leaves it alone when it already agrees.
+    """
+    wanted = jellyfin_admin_permissions()
+    if not wanted:
+        return False
+    status, _, users = _http(JELLYFIN_BASE, "/Users", headers=jellyfin_headers(token))
+    if status != 200 or not isinstance(users, list):
+        _issues.append(f"Jellyfin: could not list users to check the admin policy (HTTP {status})")
+        return False
+    admin = next((user for user in users if user.get("Name") == USER), None)
+    if admin is None:
+        _issues.append(f"Jellyfin: no account named '{USER}' to grant the admin rights to")
+        return False
+    policy = dict(admin.get("Policy") or {})
+    missing = {name: value for name, value in wanted.items() if policy.get(name) != value}
+    if not missing:
+        _log(f"Jellyfin: '{USER}' already holds the admin rights - policy left alone")
+        return True
+    policy.update(missing)
+    status, _, _ = _http(JELLYFIN_BASE, f"/Users/{admin['Id']}/Policy", method="POST",
+                         body=policy, headers=jellyfin_headers(token))
+    if status in (200, 204):
+        _log(f"Jellyfin: gave '{USER}' " + ", ".join(sorted(missing)))
+        return True
+    _issues.append(f"Jellyfin: could not set the admin policy on '{USER}' (HTTP {status})")
+    return False
+
+
 def configure_jellyfin():
     _log("--- Jellyfin ---")
     if not wait_for(JELLYFIN_BASE, "/System/Info/Public", "Jellyfin"):
@@ -875,6 +929,8 @@ def configure_jellyfin():
             _log(f"Added Jellyfin library '{lib['name']}' -> {lib['path']}")
         else:
             _issues.append(f"Jellyfin library '{lib['name']}' could not be added (HTTP {status})")
+
+    jellyfin_ensure_admin_permissions(token)
 
     _results["jellyfin"] = "configured"
     return True
