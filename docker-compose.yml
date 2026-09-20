@@ -492,26 +492,33 @@ services:
       CRON_SCHEDULE: "0 0,12 * * *"
       MAX_CONNECTIONS: "8"
       RUN_AT_STARTUP: "true"
-      # The row count below is days x channels, and the grabber holds every listing
-      # it has fetched until it writes the file at the end - so peak memory is the
-      # whole run. Both factors are large here: ~6,400 channels across the ten
-      # configured sites, three days. That did not fit. The 00:00 run on 2026-09-20
-      # died at task 13166 of 15308 and the run before it at 13161 with "Reached
-      # heap limit Allocation failed - JavaScript heap out of memory", so the guide
-      # was never written and /opt/epg/guide.xml stayed a day old.
+      # How many days the grab loads, straight through to the grabber's own --days
+      # option (`grab.ts` reads it as DAYS). The image's pm2 config never passes
+      # --days, so this environment variable is the only way to set it.
+      DAYS: "2"
+      # The row count is DAYS x channels, and the grabber holds every listing it has
+      # fetched until it writes the file at the end - so peak memory is the whole
+      # run. Both factors are large here: ~6,400 channels across the ten configured
+      # sites. Three days of that was never written at all: the 00:00 run on
+      # 2026-09-20 died at task 13166 of 15308 and the run before it at 13161 with
+      # "Reached heap limit Allocation failed - JavaScript heap out of memory", so
+      # /opt/epg/guide.xml stayed a day old and the dial renumbered a stale guide
+      # every twelve hours.
       #
       # Two days is two thirds of the work, for a guide that is re-grabbed twice a
       # day anyway, and it is the lever that keeps the whole channel list: trimming
       # the list instead would drop the guide for channels the dial carries.
       #
-      # The size below is measured, not guessed. With a 4 GB limit the two-day run
-      # was killed at task 10,622 of 12,764 (83%) - the same fraction the three-day
-      # run died at, both times - so the peak tracks the total work and two days
-      # lands between 4 and 6 GB. The first failure was Node's own default ceiling
-      # (~2.4 GB) and the second was the *host's* OOM killer, which is the one to
-      # avoid: the limit makes this container the boundary, so the worst case is
-      # this guide not being written rather than Jellyfin or an *arr container being
-      # killed instead. The host has ~10 GB free when the grab runs.
+      # Sizes below are measured, not guessed. Three days at Node's default ceiling
+      # (~2.4 GB) aborted, and three days with a 6 GB heap grew past what the box
+      # could spare and was killed by the *host's* OOM killer (`oomkilled=true` on
+      # the container), which is the failure worth avoiding because it endangers
+      # Jellyfin and the *arr stack. Two days under a 4 GB limit got to task 10,622
+      # of 12,764 - 83%, the same fraction every run reached - so the peak tracks
+      # the total work and two days needs roughly 4.8 GB. Hence 5 GB of heap so
+      # Node itself is never the thing that stops, and a 6 GB container limit as the
+      # real boundary: a runaway grab dies in its own cgroup with roughly 10 GB
+      # still free on the host.
       NODE_OPTIONS: "--max-old-space-size=5120"
     mem_limit: 6g
     volumes:
