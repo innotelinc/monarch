@@ -25,6 +25,9 @@ What it does
 2. Writes a channel file per site, in chunks of `--max-channels`, so a site whose
    own listing is large is split further rather than trusted to fit.
 3. Runs the grabber once per chunk inside the container, writing one part guide.
+   A chunk whose grab runs out of heap is halved and retried (down to
+   `MIN_CHANNELS`), because the heap a grab needs is set by the *programmes* its
+   channels carry, not by the channel count the chunking was sized against.
 4. Merges the parts into `--out`: channels deduplicated by id, programmes by
    (channel, start), in part order so the same input always produces the same file.
 
@@ -47,6 +50,20 @@ SITE_RE = re.compile(r'\bsite="([^"]*)"')
 # The container mounts the EPG directory at /epg/public, so a host path under the
 # EPG dir is a container path under this prefix.
 CONTAINER_PUBLIC = "public"
+
+# A grab that runs out of heap is split and retried until its channels are down to
+# this many. The variation is real: 900 channels of tvtv.us fit inside this
+# container's heap, while 729 of epg.iptvx.one did not, and the channel count is not
+# what decides it — those 729 channels carry enough programmes to hold more than the
+# 3 GB the grabber is given. Halving costs a retry and keeps the site in the guide;
+# dropping the part silently costs that site's listings for the whole run.
+MIN_CHANNELS = 100
+
+# How the grabber dies when it is out of heap: V8 aborts with SIGABRT (134) and says
+# why on stderr, and a grab killed by the container's own memory limit comes back as
+# SIGKILL (137). Both are memory, and both get smaller if the part is split.
+OOM_MARKERS = ("heap out of memory", "reached heap limit")
+OOM_EXIT_CODES = (134, 137)
 
 
 def parse_channels(text: str) -> "dict[str, list[str]]":
@@ -103,6 +120,56 @@ def grabber_command(container: str, channels: str, output: str, days: int) -> "l
         f"--days={days}",
         f"--output={output}",
     ]
+
+
+def is_oom(result) -> bool:
+    """Whether a failed grab died of memory rather than of the site or the network.
+
+    Only memory is worth retrying smaller: a site that answered 404 will answer 404
+    for half its channels too, and splitting there just doubles the failures.
+    """
+    text = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    return result.returncode in OOM_EXIT_CODES or any(m in text for m in OOM_MARKERS)
+
+
+def run_part(container: str, epg_dir: Path, parts_dir: Path, name: str,
+             entries: "list[str]", days: int, outputs: "list[Path]",
+             failed: "list[str]") -> None:
+    """Grab one part, halving it and retrying if the grabber runs out of heap.
+
+    The successful outputs are appended in the order the parts are run, which is what
+    keeps the merge deterministic: a split part contributes its halves in place of
+    itself, so the channel that `channels.xml` lists first still wins its slot.
+    """
+    inputs = parts_dir / f"channels-{name}.xml"
+    output = parts_dir / f"guide-{name}.xml"
+    write_channel_list(inputs, entries)
+    # A part left by an earlier run must not be mistaken for this run's: the merge
+    # below takes whatever exists, so yesterday's `guide-<site>.xml` would be read as
+    # today's listings for that site. Remove it first, and only trust what this run
+    # writes.
+    output.unlink(missing_ok=True)
+
+    command = grabber_command(container, container_path(inputs, epg_dir),
+                              container_path(output, epg_dir), days)
+    print(f"  {output.name}: " + " ".join(command[3:]), flush=True)
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode == 0 and output.exists():
+        outputs.append(output)
+        return
+
+    if is_oom(result) and len(entries) > MIN_CHANNELS:
+        pieces = chunk(entries, (len(entries) + 1) // 2)
+        print(f"    out of heap at {len(entries)} channel(s) — retrying as "
+              f"{len(pieces)} part(s) of <= {len(pieces[0])}", file=sys.stderr)
+        for index, piece in enumerate(pieces):
+            run_part(container, epg_dir, parts_dir, f"{name}-split{index + 1}",
+                     piece, days, outputs, failed)
+        return
+
+    failed.append(output.name)
+    tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+    print(f"    FAILED ({result.returncode}): " + " / ".join(tail), file=sys.stderr)
 
 
 def merge_guides(parts: "list[Path]", out_path: Path) -> "dict[str, int]":
@@ -183,43 +250,36 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"{channels_path} has no <channel> entries with a site attribute", file=sys.stderr)
         return 1
 
-    plan: list[tuple[Path, Path]] = []
+    plan: list[tuple[str, "list[str]"]] = []
     for site, entries in grouped.items():
         pieces = chunk(entries, args.max_channels)
         for index, piece in enumerate(pieces):
-            name = site if len(pieces) == 1 else f"{site}-{index + 1}"
-            inputs = parts_dir / f"channels-{name}.xml"
-            output = parts_dir / f"guide-{name}.xml"
-            write_channel_list(inputs, piece)
-            plan.append((inputs, output))
+            plan.append((site if len(pieces) == 1 else f"{site}-{index + 1}", piece))
 
     print(f"{sum(len(v) for v in grouped.values())} channel entries across {len(grouped)} site(s) "
           f"-> {len(plan)} grab(s) of <= {args.max_channels} channels, {args.days} day(s) each")
 
     if args.dry_run:
-        for inputs, output in plan:
+        for name, piece in plan:
+            inputs = parts_dir / f"channels-{name}.xml"
+            write_channel_list(inputs, piece)
             print("  " + " ".join(grabber_command(
-                args.container, container_path(inputs, epg_dir), container_path(output, epg_dir), args.days)))
+                args.container, container_path(inputs, epg_dir),
+                container_path(parts_dir / f"guide-{name}.xml", epg_dir), args.days)))
         return 0
 
     failed: list[str] = []
-    for inputs, output in plan:
-        command = grabber_command(args.container, container_path(inputs, epg_dir),
-                                 container_path(output, epg_dir), args.days)
-        print(f"  {output.name}: " + " ".join(command[3:]), flush=True)
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode != 0 or not output.exists():
-            failed.append(output.name)
-            tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
-            print(f"    FAILED ({result.returncode}): " + " / ".join(tail), file=sys.stderr)
+    outputs: list[Path] = []
+    for name, piece in plan:
+        run_part(args.container, epg_dir, parts_dir, name, piece, args.days, outputs, failed)
 
-    # A part that failed is left out rather than guessed at: the guide keeps every
-    # other site's listings, and the summary says which ones are missing, which is
-    # the difference between a short guide and a wrong one.
+    # A part that still failed is left out rather than guessed at: the guide keeps
+    # every other site's listings, and the summary says which ones are missing, which
+    # is the difference between a short guide and a wrong one.
     if failed:
         print(f"  {len(failed)} part(s) failed and were left out: {', '.join(failed)}", file=sys.stderr)
 
-    merged = merge_guides([output for _, output in plan if output.exists()], Path(args.out))
+    merged = merge_guides(outputs, Path(args.out))
     print(f"wrote {args.out}: {merged['channels']} channel(s), {merged['programmes']} programme(s)")
     return 0 if not failed else 1
 
