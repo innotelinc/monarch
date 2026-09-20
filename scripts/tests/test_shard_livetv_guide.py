@@ -184,10 +184,14 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
     """A part that runs out of heap is halved and retried, never silently dropped.
 
     `--max-channels` is a guess at what a grab can hold, and the real figure is the
-    programmes those channels carry: 729 channels of epg.iptvx.one held more than
-    the 3 GB the grabber is given, while 900 of tvtv.us fit comfortably. A dropped
-    part costs that site's listings for the whole run, which is why the retry exists
-    rather than a bigger heap or a smaller guess.
+    programmes those channels carry: 900 channels of tvtv.us fit comfortably, 900 of
+    another site did not. A dropped part costs that site's listings for the whole
+    run, which is why the retry exists rather than a bigger heap or a smaller guess.
+
+    Halving alone is not enough for a site that cannot be grabbed at *any* size —
+    one here failed at 729 channels, at 365, at 182, at 91, and then on a single
+    channel at `MAX_CONNECTIONS=1` — so a site is asked once whether one channel
+    fits, and dropped for the run if it does not.
     """
 
     def setUp(self) -> None:
@@ -232,15 +236,17 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
 
         self.run_part("epg.iptvx.one", entries, seen, run)
 
-        # 400 -> two of 200, each of which is still too much -> four of 100.
-        self.assertEqual(seen, [400, 200, 100, 100, 200, 100, 100])
+        # 400 fails, one channel proves the site is grabbable at all, then 400 -> two
+        # of 200, each still too much -> four of 100.
+        self.assertEqual(seen, [400, 1, 200, 100, 100, 200, 100, 100])
         self.assertEqual(self.failed, [])
         self.assertEqual([p.name for p in self.outputs], [
+            "guide-epg.iptvx.one-probe1.xml",
             "guide-epg.iptvx.one-split1-split1.xml",
             "guide-epg.iptvx.one-split1-split2.xml",
             "guide-epg.iptvx.one-split2-split1.xml",
             "guide-epg.iptvx.one-split2-split2.xml",
-        ], "the halves take the place of the part they replace, in order")
+        ], "the probe and then the halves, in the order they replace the part")
 
     def test_a_site_that_is_simply_unreachable_is_not_retried(self) -> None:
         entries = [channel("tvpassport.com", f"E{i}.us@SD") for i in range(400)]
@@ -258,8 +264,50 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
 
         self.run_part("tiny.tv", entries, seen, run)
 
-        self.assertEqual(seen, [shard.MIN_CHANNELS])
+        self.assertEqual(seen, [shard.MIN_CHANNELS, 1], "the floor is probed, never split")
         self.assertEqual(self.failed, ["guide-tiny.tv.xml"])
+
+    def test_a_site_that_cannot_grab_one_channel_is_dropped_after_the_probe(self) -> None:
+        """Bisecting a site that fails at every size only spends the host's memory.
+
+        This is the measured case: parts of 729, 365, 182 and 91 channels all died at
+        the heap limit, and then a single channel did too, in 214 seconds at
+        `MAX_CONNECTIONS=1`. The alternative to this rule was fifteen minutes of a
+        near-4 GB grab per run, on the host that also runs Jellyfin, to reach the same
+        answer the probe reaches in one grab.
+        """
+        entries = [channel("epg.iptvx.one", f"E{i}.us@SD") for i in range(400)]
+        seen, run = self.fake_grabber(fits=0, code=134,
+                                      stderr="FATAL ERROR: Reached heap limit")
+
+        self.run_part("epg.iptvx.one", entries, seen, run)
+
+        self.assertEqual(seen, [400, 1], "one probe, and no split")
+        self.assertEqual(self.outputs, [])
+        self.assertEqual(self.failed, ["guide-epg.iptvx.one.xml"])
+
+    def test_the_next_chunk_of_a_dropped_site_is_not_retried(self) -> None:
+        """Once a site is dropped, its other parts are skipped rather than attempted.
+
+        A site big enough to be chunked at `--max-channels` arrives as `site-1`,
+        `site-2`, … and every one of them is the same site to this rule — otherwise
+        dropping the first chunk would buy a fresh probe for each chunk after it.
+        """
+        first = [channel("epg.iptvx.one", f"E{i}.us@SD") for i in range(400)]
+        second = [channel("epg.iptvx.one", f"F{i}.us@SD") for i in range(50)]
+        seen, run = self.fake_grabber(fits=0, code=134,
+                                      stderr="FATAL ERROR: Reached heap limit")
+        progress = shard.SiteProgress()
+
+        with mock.patch.object(shard, "subprocess", SimpleNamespace(run=run)):
+            shard.run_part("iptv", self.dir, self.parts, "epg.iptvx.one-1", first, 3,
+                           self.outputs, self.failed, site="epg.iptvx.one", progress=progress)
+            before = len(seen)
+            shard.run_part("iptv", self.dir, self.parts, "epg.iptvx.one-2", second, 3,
+                           self.outputs, self.failed, site="epg.iptvx.one", progress=progress)
+
+        self.assertIn("epg.iptvx.one", progress.abandoned)
+        self.assertEqual(len(seen), before)
 
     def test_yesterdays_part_is_removed_rather_than_merged_in(self) -> None:
         stale = self.parts / "guide-xumo.tv.xml"

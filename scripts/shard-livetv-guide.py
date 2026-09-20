@@ -53,10 +53,9 @@ CONTAINER_PUBLIC = "public"
 
 # A grab that runs out of heap is split and retried until its channels are down to
 # this many. The variation is real: 900 channels of tvtv.us fit inside this
-# container's heap, while 729 of epg.iptvx.one did not, and the channel count is not
-# what decides it — those 729 channels carry enough programmes to hold more than the
-# 3 GB the grabber is given. Halving costs a retry and keeps the site in the guide;
-# dropping the part silently costs that site's listings for the whole run.
+# container's heap, while 729 of one site did not, and the channel count is not what
+# decides it. Halving costs a retry and keeps the site in the guide; dropping the
+# part silently costs that site's listings for the whole run.
 MIN_CHANNELS = 100
 
 # How the grabber dies when it is out of heap: V8 aborts with SIGABRT (134) and says
@@ -132,40 +131,92 @@ def is_oom(result) -> bool:
     return result.returncode in OOM_EXIT_CODES or any(m in text for m in OOM_MARKERS)
 
 
+class SiteProgress:
+    """What the run has proved about each site so far.
+
+    `--max-channels` guesses that a grab's cost follows its channel count, and
+    halving is what tests the guess. One site here fails the guess outright: its
+    parts ran out of heap at 729 channels, at 365, at 182, and at 91 — and then a
+    *single* channel of it exhausted a 3 GB heap in 214 seconds with
+    `MAX_CONNECTIONS=1`. No split can fix that, and each attempt spends minutes of
+    this host's memory (the same host runs Jellyfin) to learn nothing.
+
+    So a site is asked once whether one channel fits. If it does not, the site is
+    dropped for this run and reported once: a guide missing that site's listings is
+    the same outcome as bisecting it to the floor, without the memory or the time.
+    If it does, splitting continues as normal — a dense site whose halves do fit is
+    exactly the case the splitting was built for. Next run probes again, so a site
+    that recovers comes back with no change to anything.
+    """
+
+    def __init__(self) -> None:
+        self.probed: "set[str]" = set()
+        self.succeeded: "set[str]" = set()
+        self.abandoned: "set[str]" = set()
+
+
 def run_part(container: str, epg_dir: Path, parts_dir: Path, name: str,
              entries: "list[str]", days: int, outputs: "list[Path]",
-             failed: "list[str]") -> None:
-    """Grab one part, halving it and retrying if the grabber runs out of heap.
+             failed: "list[str]", *, site: "str | None" = None,
+             progress: "SiteProgress | None" = None) -> None:
+    """Grab one part, halving it if the grabber runs out of heap.
 
     The successful outputs are appended in the order the parts are run, which is what
     keeps the merge deterministic: a split part contributes its halves in place of
     itself, so the channel that `channels.xml` lists first still wins its slot.
     """
-    inputs = parts_dir / f"channels-{name}.xml"
-    output = parts_dir / f"guide-{name}.xml"
-    write_channel_list(inputs, entries)
-    # A part left by an earlier run must not be mistaken for this run's: the merge
-    # below takes whatever exists, so yesterday's `guide-<site>.xml` would be read as
-    # today's listings for that site. Remove it first, and only trust what this run
-    # writes.
-    output.unlink(missing_ok=True)
+    site = site or name
+    progress = progress if progress is not None else SiteProgress()
+    # A site the run has given up on: its sibling parts are skipped rather than
+    # retried, which is the difference between two wasted grabs and fifteen.
+    if site in progress.abandoned:
+        return
 
-    command = grabber_command(container, container_path(inputs, epg_dir),
-                              container_path(output, epg_dir), days)
-    print(f"  {output.name}: " + " ".join(command[3:]), flush=True)
-    result = subprocess.run(command, capture_output=True, text=True)
+    def grab(part_name: str, part_entries: "list[str]"):
+        inputs = parts_dir / f"channels-{part_name}.xml"
+        output = parts_dir / f"guide-{part_name}.xml"
+        write_channel_list(inputs, part_entries)
+        # A part left by an earlier run must not be mistaken for this run's: the merge
+        # takes whatever exists, so yesterday's `guide-<site>.xml` would be read as
+        # today's listings for that site. Remove it first, and only trust what this
+        # run writes.
+        output.unlink(missing_ok=True)
+        command = grabber_command(container, container_path(inputs, epg_dir),
+                                  container_path(output, epg_dir), days)
+        print(f"  {output.name}: " + " ".join(command[3:]), flush=True)
+        return output, subprocess.run(command, capture_output=True, text=True)
+
+    output, result = grab(name, entries)
     if result.returncode == 0 and output.exists():
         outputs.append(output)
+        progress.succeeded.add(site)
         return
 
-    if is_oom(result) and len(entries) > MIN_CHANNELS:
-        pieces = chunk(entries, (len(entries) + 1) // 2)
-        print(f"    out of heap at {len(entries)} channel(s) — retrying as "
-              f"{len(pieces)} part(s) of <= {len(pieces[0])}", file=sys.stderr)
-        for index, piece in enumerate(pieces):
-            run_part(container, epg_dir, parts_dir, f"{name}-split{index + 1}",
-                     piece, days, outputs, failed)
-        return
+    if is_oom(result):
+        if len(entries) > 1 and site not in progress.probed:
+            # One channel is the cheapest honest answer to "can this site be grabbed
+            # at all?", and the only one that separates a dense site from a broken
+            # one before minutes are spent bisecting.
+            progress.probed.add(site)
+            probe_output, probe = grab(f"{site}-probe1", entries[:1])
+            if probe.returncode == 0 and probe_output.exists():
+                outputs.append(probe_output)
+            else:
+                progress.abandoned.add(site)
+                print(f"  {site}: dropped for this run — a single channel of it does not "
+                      f"fit the grabber's heap either, so {len(entries)} channel(s) were "
+                      f"not retried smaller", file=sys.stderr)
+                failed.append(output.name)
+                return
+
+        if len(entries) > MIN_CHANNELS:
+            pieces = chunk(entries, (len(entries) + 1) // 2)
+            print(f"    out of heap at {len(entries)} channel(s) — retrying as "
+                  f"{len(pieces)} part(s) of <= {len(pieces[0])}", file=sys.stderr)
+            for index, piece in enumerate(pieces):
+                run_part(container, epg_dir, parts_dir, f"{name}-split{index + 1}",
+                         piece, days, outputs, failed, site=site, progress=progress)
+            return
 
     failed.append(output.name)
     tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
@@ -250,17 +301,21 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"{channels_path} has no <channel> entries with a site attribute", file=sys.stderr)
         return 1
 
-    plan: list[tuple[str, "list[str]"]] = []
+    # Each entry is (part name, its channels, the site they came from). The site is
+    # carried separately so that a site split at `--max-channels` is still one site
+    # to the abandonment rule below: dropping the first chunk must not cost a probe
+    # of the second.
+    plan: list[tuple[str, "list[str]", str]] = []
     for site, entries in grouped.items():
         pieces = chunk(entries, args.max_channels)
         for index, piece in enumerate(pieces):
-            plan.append((site if len(pieces) == 1 else f"{site}-{index + 1}", piece))
+            plan.append((site if len(pieces) == 1 else f"{site}-{index + 1}", piece, site))
 
     print(f"{sum(len(v) for v in grouped.values())} channel entries across {len(grouped)} site(s) "
           f"-> {len(plan)} grab(s) of <= {args.max_channels} channels, {args.days} day(s) each")
 
     if args.dry_run:
-        for name, piece in plan:
+        for name, piece, _site in plan:
             inputs = parts_dir / f"channels-{name}.xml"
             write_channel_list(inputs, piece)
             print("  " + " ".join(grabber_command(
@@ -270,8 +325,10 @@ def main(argv: "list[str] | None" = None) -> int:
 
     failed: list[str] = []
     outputs: list[Path] = []
-    for name, piece in plan:
-        run_part(args.container, epg_dir, parts_dir, name, piece, args.days, outputs, failed)
+    progress = SiteProgress()
+    for name, piece, site in plan:
+        run_part(args.container, epg_dir, parts_dir, name, piece, args.days, outputs,
+                 failed, site=site, progress=progress)
 
     # A part that still failed is left out rather than guessed at: the guide keeps
     # every other site's listings, and the summary says which ones are missing, which
