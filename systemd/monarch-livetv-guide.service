@@ -1,0 +1,35 @@
+[Unit]
+Description=Monarch Live TV guide (one EPG grab per site, merged into guide.xml)
+Documentation=https://github.com/innotelinc/monarch
+Requires=docker.service
+After=monarch.service docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/monarch
+
+# The grabber holds every listing it has fetched until it writes the file at the end,
+# so one run's peak is days x channels. The whole channel list in a single process
+# needed 5+ GB and never finished on this host — three days died against Node's
+# default heap, three days with a 6 GB heap was killed by the host's OOM killer, two
+# days at 4 GB died 83% of the way through with full GCs leaving 5.07 GB *live*, and
+# one day at 4 GB died at task 5,311 of 6,382. One day at 6 GB was the first run to
+# complete, which is why the guide was only ever a day deep.
+#
+# Sharding is what buys the horizon back: the peak is per process, and a part is one
+# site (split further at --max-channels), so the days can be asked for again. The day
+# count is an argument here rather than an environment variable on the container,
+# because the image's pm2 config never passes `--days` and this unit is now the only
+# thing that starts a grab. The container mounts init/iptv-pm2.config.js, which is the
+# server alone, so nothing else writes guide.xml while this runs.
+ExecStart=/usr/bin/python3 scripts/shard-livetv-guide.py --days 3 --out /opt/epg/guide.xml
+# Ten-odd parts, run one after another, each of which can take minutes at
+# MAX_CONNECTIONS=8.
+TimeoutStartSec=5400s
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

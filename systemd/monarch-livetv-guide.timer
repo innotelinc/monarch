@@ -1,0 +1,14 @@
+[Unit]
+Description=Build the Monarch Live TV guide twice a day
+Documentation=https://github.com/innotelinc/monarch
+
+[Timer]
+# Ahead of the dial's 00:30/12:30, which is what consumes it. Persistent catches up
+# after downtime, and the unit runs a part at a time so a late start is not a pile-up.
+OnCalendar=*-*-* 00:00:00
+OnCalendar=*-*-* 12:00:00
+Persistent=true
+Unit=monarch-livetv-guide.service
+
+[Install]
+WantedBy=timers.target

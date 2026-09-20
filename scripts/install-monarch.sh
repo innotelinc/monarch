@@ -98,6 +98,18 @@ install_service() {
   $SUDO cp "$root$TARGET/systemd/monarch-drift-check.timer" "$root/etc/systemd/system/monarch-drift-check.timer" 2>/dev/null || \
     $SUDO cp "$ROOT/systemd/monarch-drift-check.timer" "$root/etc/systemd/system/monarch-drift-check.timer"
   $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" "$root/etc/systemd/system/monarch-drift-check.service"
+  # Live TV guide and dial: the guide is built one site at a time (a single grab of
+  # the whole channel list holds every listing until it writes the file, and has never
+  # fitted here — see systemd/monarch-livetv-guide.service), then the dial renumbers
+  # what it wrote. Both are oneshots on their own timers, 00:00/12:00 and 00:30/12:30.
+  for unit in monarch-livetv-guide.service monarch-livetv-guide.timer \
+              monarch-livetv-dial.service monarch-livetv-dial.timer; do
+    $SUDO cp "$root$TARGET/systemd/$unit" "$root/etc/systemd/system/$unit" 2>/dev/null || \
+      $SUDO cp "$ROOT/systemd/$unit" "$root/etc/systemd/system/$unit"
+  done
+  $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" \
+    "$root/etc/systemd/system/monarch-livetv-guide.service" \
+    "$root/etc/systemd/system/monarch-livetv-dial.service"
   # Local Nginx Proxy Manager is opt-in via the "npm" compose profile. When
   # NPM_MODE=remote (MONARCH_NPM_LOCAL=0) drop the --profile flag so the unit
   # never starts a local NPM container.
@@ -120,10 +132,20 @@ install_service() {
       $SUDO ln -sf /etc/systemd/system/monarch.service "$sysroot/etc/systemd/system/multi-user.target.wants/monarch.service"
     $SUDO systemctl --root "$sysroot" enable monarch-drift-check.timer 2>/dev/null || \
       $SUDO ln -sf /etc/systemd/system/monarch-drift-check.timer "$sysroot/etc/systemd/system/timers.target.wants/monarch-drift-check.timer"
+    # The Live TV guide and dial timers. Enabled here rather than left to whoever
+    # noticed the guide going stale: without the guide timer the dial renumbers
+    # whatever /opt/epg/guide.xml holds, and without the dial timer nothing renumbers
+    # at all.
+    for timer in monarch-livetv-guide.timer monarch-livetv-dial.timer; do
+      $SUDO systemctl --root "$sysroot" enable "$timer" 2>/dev/null || \
+        $SUDO ln -sf "/etc/systemd/system/$timer" "$sysroot/etc/systemd/system/timers.target.wants/$timer"
+    done
     # start only makes sense with a running systemd (live install)
     if [ -z "$root" ] && [ -d /run/systemd/system ]; then
       $SUDO systemctl start monarch.service 2>/dev/null || true
       $SUDO systemctl start monarch-drift-check.timer 2>/dev/null || true
+      $SUDO systemctl start monarch-livetv-guide.timer 2>/dev/null || true
+      $SUDO systemctl start monarch-livetv-dial.timer 2>/dev/null || true
     fi
   else
     $SUDO systemctl daemon-reload 2>/dev/null || true

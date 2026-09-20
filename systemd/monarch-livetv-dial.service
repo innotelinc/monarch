@@ -1,0 +1,27 @@
+[Unit]
+Description=Monarch Live TV dial (renumber the guide and playlists onto the Comcast lineup)
+Documentation=https://github.com/innotelinc/monarch
+Requires=docker.service
+After=docker.service network-online.target
+# Ordered behind the guide build and not required by it: a guide that failed to
+# build leaves the dial renumbering whatever guide is on disk, which is exactly what
+# it did before there was a guide unit at all. The pairing is the point — the dial
+# reads /opt/epg/guide.xml, so building it in the same breath is what stops the
+# numbering being applied to yesterday's listings.
+Wants=monarch-livetv-guide.service
+After=monarch-livetv-guide.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/monarch
+ExecStart=/usr/bin/python3 scripts/livetv_lineup.py --guide /opt/epg/guide.xml --out /opt/epg
+# The dial rewrites a guide that is now days deep rather than a day, so it is given
+# room to take longer than it used to.
+TimeoutStartSec=3600s
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

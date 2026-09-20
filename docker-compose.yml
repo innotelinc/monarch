@@ -488,58 +488,29 @@ services:
       # nothing on the LAN needs a second door to a guide file.
       - 127.0.0.1:3011:3000
     environment:
-      # Re-grab the guide twice a day; 8 parallel requests speeds it up.
-      CRON_SCHEDULE: "0 0,12 * * *"
+      # 8 parallel requests per grab. Every grab this container runs is now one part
+      # of the guide, started by scripts/shard-livetv-guide.py rather than by a cron
+      # here, so there is no CRON_SCHEDULE, no RUN_AT_STARTUP and no DAYS: the day
+      # count is a `--days` argument on the command line that starts a part.
       MAX_CONNECTIONS: "8"
-      RUN_AT_STARTUP: "true"
-      # How many days the grab loads, straight through to the grabber's own --days
-      # option (`grab.ts` reads it as DAYS). The image's pm2 config never passes
-      # --days, so this environment variable is the only way to set it.
-      #
-      # One day, because the grabber holds all the programme data it has fetched and
-      # the run has never fitted twice. The guide is re-grabbed twice a day, so one
-      # day still leaves 12+ hours of listings ahead of Jellyfin at all times, and
-      # the second day was largely wasted: the site that dies it (watchyour.tv)
-      # reports "0 programs" for its second day on every channel.
-      DAYS: "1"
-      # The row count is DAYS x channels, and the grabber holds every listing it has
-      # fetched until it writes the file at the end - so peak memory is the whole
-      # run. Both factors are large here: ~6,400 channels across the ten configured
-      # sites. Three days of that was never written at all: the 00:00 run on
-      # 2026-09-20 died at task 13166 of 15308 and the run before it at 13161 with
-      # "Reached heap limit Allocation failed - JavaScript heap out of memory", so
-      # /opt/epg/guide.xml stayed a day old and the dial renumbered a stale guide
-      # every twelve hours.
-      #
-      # Two days is two thirds of the work, for a guide that is re-grabbed twice a
-      # day anyway, and it is the lever that keeps the whole channel list: trimming
-      # the list instead would drop the guide for channels the dial carries.
-      #
-      # Sizes below are measured, not guessed. Three days at Node's default ceiling
-      # (~2.4 GB) aborted with "Reached heap limit", and three days with a 6 GB heap
-      # grew past what the box could spare and was killed by the *host's* OOM killer
-      # (`oomkilled=true` on the container) - the failure worth avoiding, because it
-      # endangers Jellyfin and the *arr stack rather than failing on its own.
-      #
-      # Two days at a 5 GB heap died the same way at task 10,622 of 12,764, and the
-      # full GCs there left 5.07 GB *live*, so the run is holding real programme data
-      # and not garbage. One day is about half of that, which is where the numbers
-      # below come from: the one-day run reached 3.8 GB and died against a 4 GB heap,
-      # so 6 GB of heap is the ceiling Node stops at and 7 GB of container limit is
-      # the real boundary - a runaway grab dies in its own cgroup with ~10 GB still
-      # free on the host, and never as the host's OOM kill.
-      #
-      # The last site in the list is what tips it over, not its payload: watchyour.tv
-      # answers every channel with one 482 KB guide.json, so there is no request size
-      # to cap. What it does add is the guide for ~1,095 channels in a single burst at
-      # the end of the run, which is why the one-day run died 23 tasks into it.
-      NODE_OPTIONS: "--max-old-space-size=6144"
-    mem_limit: 7g
+      # A part is at most `--max-channels` (900) channels of one site, times the days
+      # asked for, and the grabber holds all of it until it writes the file. The whole
+      # channel list in one process needed 5+ GB and never finished; one day of all
+      # 6,400 channels needed 3.8 GB. A part is a ninth of that work, so this is sized
+      # for a part with room to spare, and the container limit is still the boundary a
+      # runaway dies at - inside its own cgroup, not as the host's OOM killer.
+      NODE_OPTIONS: "--max-old-space-size=3072"
+    mem_limit: 4g
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # Host /opt/epg holds channels.xml (EPG channel list, written by
       # monarch-init) and receives guide.xml (served at http://iptv:3000/guide.xml).
       - /opt/epg:/epg/public
+      # The image's own pm2 config starts a `grab` app on a cron *and* one at startup,
+      # which is the single process that held every listing and never finished on this
+      # host. This file replaces it with the server alone; monarch's shard script runs
+      # the grabs, one site at a time. See init/iptv-pm2.config.js.
+      - ./init/iptv-pm2.config.js:/epg/pm2.config.js:ro
 
   ###############################################
   # CLIPBUCKET - Video Platform
