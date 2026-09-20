@@ -13,9 +13,12 @@ provenance) and writes:
 
   * `comcast-springfield.m3u` — the dial. A stream whose network has a cable
     number takes that number, and the playlist is ordered by it, so channel 5
-    sits where channel 5 sits. Streams with no cable counterpart (FAST services)
-    keep the category bands below, so nothing is hidden and nothing pretends to
-    be a cable channel it is not.
+    sits where channel 5 sits. A stream that advertises HD takes the network's
+    HD row, and the SD row beside it is then empty — so the same feed is listed
+    there as well, because the lineup says both numbers are that one channel and
+    a viewer typing the low number should still land on it. Streams with no
+    cable counterpart (FAST services) keep the category bands below, so nothing
+    is hidden and nothing pretends to be a cable channel it is not.
   * one playlist per category (News, Weather, Sports, Movies, Kids, Music,
     Documentary, Lifestyle, Local, Entertainment, General), and one per network
     that appears more than once — the "more than one ABC station, one
@@ -400,6 +403,60 @@ def lineup_of(name: str, lineup: list[dict]) -> dict | None:
     return best_entry
 
 
+def simulcast_rows(entries: list[dict], lineup: list[dict]) -> list[dict]:
+    """Extra dial entries for the SD rows the HD rule leaves empty.
+
+    The dial lists a network's SD and HD positions as two rows, and `lineup_of`
+    sends an HD stream to the HD row — which is right, but it leaves the classic
+    position showing nothing, so the low end of the dial empties out and a viewer
+    typing "8" finds no Jewelry Television at all. The lineup says both rows are
+    the same channel, so where the SD row is empty the stream goes on it as well
+    and both numbers resolve.
+
+    The SD row is found by running the same matcher over the non-HD rows, which
+    is the row the stream would have taken before quality was scored at all: a
+    name like "Jewelry TV 2" shares no identifying word with row 8's "Jewelry
+    Television", yet the token match still finds it, and only the real matcher
+    knows that.
+    """
+    sd_rows = [row for row in lineup if row.get("quality") != "hd"]
+    taken = {
+        float((entry.get("lineup") or {}).get("number"))
+        for entry in entries
+        if isinstance((entry.get("lineup") or {}).get("number"), (int, float))
+    }
+    out: list[dict] = []
+    for entry in entries:
+        cable = entry.get("lineup") or {}
+        if cable.get("quality") != "hd":
+            continue
+        row = lineup_of(entry["name"], sd_rows)
+        if row is None or float(row["number"]) in taken:
+            continue
+        taken.add(float(row["number"]))
+        out.append({**entry, "lineup": row, "simulcast": True})
+    return out
+
+
+def _split_extinf(line: str) -> tuple[str, str]:
+    """``(head, title)`` for an `#EXTINF` line.
+
+    The title is what follows the comma that *ends the attribute list*, and that
+    is not the first comma: attribute values are quoted and may contain one.
+    iptv-org's `http-user-agent` does — "…AppleWebKit/537.36 (KHTML, like Gecko)
+    Chrome/144…" — so splitting on the first comma puts half a user agent into
+    the title and, for a stream with no `tvg-name`, hands it the name: channel 33
+    was listed as `like Gecko) Chrome/144.0.0.0 Safari/537.36" group-title=…`.
+    """
+    quoted = False
+    for index, character in enumerate(line):
+        if character == '"':
+            quoted = not quoted
+        elif character == "," and not quoted:
+            return line[:index], line[index + 1:]
+    return line, ""
+
+
 def parse_m3u(text: str) -> list[dict]:
     """``[{name, url, attrs, group}]`` for the `#EXTINF` entries in a playlist."""
     entries: list[dict] = []
@@ -407,7 +464,7 @@ def parse_m3u(text: str) -> list[dict]:
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#EXTINF:"):
-            head, _, display = line.partition(",")
+            head, display = _split_extinf(line)
             attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', head))
             pending = {
                 "name": (attrs.get("tvg-name") or display).strip(),
@@ -628,6 +685,10 @@ def main() -> int:
         return 1
 
     by_category, by_network = plan(entries, lineup)
+    # Added after `plan` on purpose: the simulcasts belong on the dial, which is
+    # what Jellyfin tunes to, but a category playlist listing one channel twice
+    # would just be a longer list of the same thing.
+    entries = entries + simulcast_rows(entries, lineup)
     numbers = dial_numbers(entries)
     order = order_for_dial(entries, numbers)
 

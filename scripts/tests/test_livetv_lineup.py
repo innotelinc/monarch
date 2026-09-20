@@ -138,6 +138,66 @@ class Matching(unittest.TestCase):
             self.assertEqual(dial(name), number, name)
 
 
+class Parsing(unittest.TestCase):
+    """The playlist is somebody else's file, and it is not always tidy."""
+
+    def test_a_comma_inside_an_attribute_is_not_the_title(self) -> None:
+        # iptv-org ships `http-user-agent="…(KHTML, like Gecko)…"`, so a split on
+        # the *first* comma makes half a user agent the channel's name — which is
+        # how channel 33 came to be listed as "like Gecko) Chrome/144.0.0.0". The
+        # title follows the comma that ends the attributes, and that comma is the
+        # first one *outside* a quoted value.
+        line = (
+            '#EXTINF:-1 tvg-id="TNTInternational.ru@SD" tvg-logo="http://x/l.png" '
+            'http-user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36" '
+            'group-title="Entertainment",TNT International (480p)'
+        )
+        parsed = lineup_mod.parse_m3u(line + "\nhttp://stream.test/tnt\n")
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["name"], "TNT International (480p)")
+        self.assertEqual(parsed[0]["attrs"]["tvg-id"], "TNTInternational.ru@SD")
+        self.assertEqual(parsed[0]["attrs"]["group-title"], "Entertainment")
+        self.assertEqual(parsed[0]["url"], "http://stream.test/tnt")
+
+    def test_a_title_may_contain_a_comma_itself(self) -> None:
+        parsed = lineup_mod.parse_m3u(
+            '#EXTINF:-1 tvg-id="X.us@SD",X, The Channel\nhttp://stream.test/x\n')
+        self.assertEqual(parsed[0]["name"], "X, The Channel")
+
+
+class Simulcast(unittest.TestCase):
+    """An HD feed leaves its SD row empty, and both numbers are one channel."""
+
+    def test_an_hd_feed_also_keeps_its_sd_row(self) -> None:
+        # 8 Jewelry Television / 1032 Jewelry Television HD are two rows for one
+        # channel, and the HD stream takes 1032 — so 8 is filled with it too.
+        stream = entry("Jewelry TV 2 (720p)", "JewelryTV2.us@SD")
+        lineup_mod.plan([stream], LINEUP)
+        self.assertEqual((stream["lineup"] or {}).get("number"), 1032)
+        self.assertEqual([row["lineup"]["number"] for row in lineup_mod.simulcast_rows([stream], LINEUP)],
+                         [8])
+
+    def test_an_sd_feed_is_not_duplicated_onto_its_own_row(self) -> None:
+        # A name that claims no quality is already on the classic position, and
+        # the HD row above it is not ours to fill.
+        stream = entry("CNN", "CNN.us@SD")
+        lineup_mod.plan([stream], LINEUP)
+        self.assertEqual(lineup_mod.simulcast_rows([stream], LINEUP), [])
+
+    def test_a_row_another_stream_already_holds_is_left_alone(self) -> None:
+        # CNN and CNN HD are both in the playlist: 42 is taken by the SD feed and
+        # must not be handed the HD one as well.
+        hd, sd = entry("CNN HD", "CNN.us@HD"), entry("CNN", "CNN.us@SD")
+        lineup_mod.plan([hd, sd], LINEUP)
+        self.assertEqual(lineup_mod.simulcast_rows([hd, sd], LINEUP), [])
+
+    def test_a_stream_with_no_cable_row_is_left_alone(self) -> None:
+        stream = entry("Some Obscure FAST Channel (720p)", "Obscure.us@FAST")
+        lineup_mod.plan([stream], LINEUP)
+        self.assertEqual(lineup_mod.simulcast_rows([stream], LINEUP), [])
+
+
 class Numbers(unittest.TestCase):
     def plan(self, names: list[str]) -> tuple[list[dict], dict[int, str]]:
         entries = [entry(name) for name in names]
