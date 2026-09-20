@@ -523,12 +523,18 @@ services:
       #
       # Two days at a 5 GB heap died the same way at task 10,622 of 12,764, and the
       # full GCs there left 5.07 GB *live*, so the run is holding real programme data
-      # and not garbage: two days projects past 6 GB, which this box cannot give it
-      # while Jellyfin is running. One day is about half that. 4 GB of heap is the
-      # ceiling Node stops at, and the 6 GB container limit is the real boundary, so
-      # a runaway grab dies in its own cgroup with ~10 GB still free on the host.
-      NODE_OPTIONS: "--max-old-space-size=4096"
-    mem_limit: 6g
+      # and not garbage. One day is about half of that, which is where the numbers
+      # below come from: the one-day run reached 3.8 GB and died against a 4 GB heap,
+      # so 6 GB of heap is the ceiling Node stops at and 7 GB of container limit is
+      # the real boundary - a runaway grab dies in its own cgroup with ~10 GB still
+      # free on the host, and never as the host's OOM kill.
+      #
+      # The last site in the list is what tips it over, not its payload: watchyour.tv
+      # answers every channel with one 482 KB guide.json, so there is no request size
+      # to cap. What it does add is the guide for ~1,095 channels in a single burst at
+      # the end of the run, which is why the one-day run died 23 tasks into it.
+      NODE_OPTIONS: "--max-old-space-size=6144"
+    mem_limit: 7g
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # Host /opt/epg holds channels.xml (EPG channel list, written by
