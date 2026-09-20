@@ -1130,12 +1130,16 @@ Three things worth knowing before editing the dial:
   changed. If a channel moves, edit the TSV and re-run the generator.
 * **A name is matched on its identifying words, not on a regex per channel.**
   Feed words (`HD`, `SD`, `East`, `DT2`, a parenthetical) are dropped, so `CNN`,
-  `CNN HD` and `CNN HD East` are one channel — and the *lowest* number wins, which
-  is why CNN lands on 42 rather than its 842 or 1111 simulcast. A shorthand that
-  cannot collide (`DIAL_ALIASES`: HGTV for "Home & Garden Television", MSNBC for
-  "MS NOW", Nat Geo for "National Geographic") binds to the dial's own legacy
-  name. A lone generic word — "Cable News Network" reduces to just `news` — may
-  never carry a match, so "CBS News 24/7" is *not* handed CNN's number.
+  `CNN HD` and `CNN HD East` are one channel. Among the dial rows that match, the
+  *feed* then decides, because the dial lists a network's SD and HD positions as
+  separate rows: an HD stream takes the HD row (`CNN HD` is 842, `Fox News
+  Channel (720p)` is 841) and a name that says nothing stays on the classic
+  position (`CNN` is 42). The lowest number only breaks what specificity and feed
+  leave tied. A shorthand that cannot collide (`DIAL_ALIASES`: HGTV for "Home &
+  Garden Television", MSNBC for "MS NOW", Nat Geo for "National Geographic")
+  binds to the dial's own legacy name. A lone generic word — "Cable News Network"
+  reduces to just `news` — may never carry a match, so "CBS News 24/7" is *not*
+  handed CNN's number.
 * **Most of the dial has no stream, and gets none.** The list has 1,378 channels;
   the playlist has ~1,500 streams, and only the ones that name a channel in the
   dial take its number. Everything else — the Xumo FAST services, the Spanish

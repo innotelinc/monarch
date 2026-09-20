@@ -192,6 +192,37 @@ FEED_TOKENS = {
 # the Spanish feeds do too.
 KEEP_TOKENS = {"en", "espanol", "espa", "black", "wild", "family", "classic"}
 
+# The dial lists a network's SD and HD positions as separate rows (41 Fox News
+# Channel / 841 Fox News Channel HD, 42 Cable News Network / 842 CNN HD), and a
+# stream says which one it belongs on. Quality is read from the *raw* name rather
+# than from the identifying words, because those words are exactly what is dropped
+# above (`HD`, and a `(720p)` parenthetical). A name that says nothing is "" — and
+# "" matches a dial row that also says nothing, which is the classic SD slot.
+#
+# Without this, every HD feed binds to the lowest-numbered simulcast and the HD
+# block is the block nothing reaches.
+HD_WORDS = {"hd", "fhd", "uhd", "4k", "8k"}
+SD_WORDS = {"sd", "ld"}
+RESOLUTION = re.compile(r"\b(\d{3,4})[pi]\b", re.I)
+
+
+def quality_of(name: str) -> str:
+    """``"hd"``, ``"sd"`` or ``""`` for the feed a name advertises (or none).
+
+    A quality word anywhere in the name wins, then a resolution in brackets
+    (720p and up is HD, 480p and below is SD). ``""`` means the name claims
+    neither, and that is matched against the dial rows that claim neither.
+    """
+    words = set(re.findall(r"[a-z0-9]+", name.lower()))
+    if words & HD_WORDS:
+        return "hd"
+    if words & SD_WORDS:
+        return "sd"
+    resolutions = [int(value) for value in RESOLUTION.findall(name)]
+    if resolutions:
+        return "hd" if max(resolutions) >= 720 else "sd"
+    return ""
+
 # The dial keeps some channels under names nobody says out loud — "Cable News
 # Network" is CNN, "Home & Garden Television" is HGTV, "MS NOW" is what MSNBC
 # became. A stream is named the way people say it, so each of these adds the
@@ -310,6 +341,7 @@ def load_lineup(path: Path | str = LINEUP_PATH) -> list[dict]:
             "normalised": _normalised(name),
             "tokens": [t for t in token_sets if t],
             "category": categorise(name),
+            "quality": quality_of(name),
             "kind": "network",
         })
     return entries
@@ -321,17 +353,23 @@ def lineup_of(name: str, lineup: list[dict]) -> dict | None:
     Matching is on the identifying words, not on a regex per channel: every token
     of the dial entry has to appear in the stream's name, and the *most specific*
     entry wins. Specificity is what keeps "CNN en Español" off CNN's 42 — it
-    matches both, and the one whose words are all used is the right one — and the
-    lowest number breaks the remaining ties, which is what makes the classic SD
-    position the canonical one rather than a 1100-block simulcast.
+    matches both, and the one whose words are all used is the right one.
 
-    A tie in *both* is genuinely ambiguous (two dial entries with the same name),
-    and the lowest number is the honest answer: it is the position a viewer would
-    try first.
+    Among equally specific entries the *feed* decides, because the dial lists a
+    network's SD and HD positions as separate rows: an HD stream takes the HD row
+    (CNN HD is 842, Fox News Channel (720p) is 841) and a name that says nothing
+    stays on the classic position (CNN is 42). Only then does the lowest number
+    decide, which is what makes one channel's full name and its shorthand land on
+    the same row rather than on a 1100-block simulcast.
+
+    A tie in *all* of those is genuinely ambiguous (two dial entries with the same
+    name and feed), and the lowest number is the honest answer: it is the position
+    a viewer would try first.
     """
     stream_tokens = _tokens(name)
     if not stream_tokens:
         return None
+    stream_quality = quality_of(name)
     best: tuple | None = None
     best_entry: dict | None = None
     for entry in lineup:
@@ -349,12 +387,14 @@ def lineup_of(name: str, lineup: list[dict]) -> dict | None:
             ):
                 continue
             extra = len(stream_tokens - tokens)
-            # Fewest unused stream words first, then the longest qualifying name,
-            # then the lowest number. The shorthand for a channel and the channel's
-            # full name score identically (both leave nothing unused), and the
-            # lower number — the classic SD position — is the one a viewer would
-            # try, so that is the dial slot the stream takes.
-            key = (extra, -len(tokens), number)
+            # Fewest unused stream words first, so a more specific channel still
+            # wins: "CNN en Español HD" is 709 even though CNN's 842 row is the HD
+            # one. Then the feed has to agree — an HD stream takes the HD row and
+            # a name that says nothing stays on the classic position — and only
+            # then does the lower number decide, which is what makes one channel's
+            # full name and its shorthand land on the same row.
+            quality = 0 if entry.get("quality", "") == stream_quality else 1
+            key = (extra, quality, -len(tokens), number)
             if best is None or key < best:
                 best, best_entry = key, entry
     return best_entry

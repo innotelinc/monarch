@@ -86,13 +86,25 @@ class Matching(unittest.TestCase):
         ):
             self.assertEqual(dial(name), number, name)
 
-    def test_a_quality_suffix_does_not_move_the_channel(self) -> None:
-        # "CNN HD" is CNN, and CNN is 42 — the classic SD position, not the 842
-        # simulcast. Handing out a 1100-block number for an HD duplicate is how a
-        # dial stops looking like the one in the viewer's head.
+    def test_an_hd_feed_takes_the_hd_dial_row(self) -> None:
+        # The dial lists both positions as rows, so the stream says which one it
+        # belongs on: "CNN HD" is the 842 simulcast, while a name that says
+        # nothing stays on the classic 42. Handing the HD feed the SD number is
+        # how the HD block becomes the block nothing reaches.
         self.assertEqual(dial("CNN"), 42)
-        self.assertEqual(dial("CNN HD"), 42)
-        self.assertEqual(dial("CNN HD East"), 42)
+        self.assertEqual(dial("CNN HD"), 842)
+        self.assertEqual(dial("CNN HD East"), 842)
+
+    def test_a_resolution_counts_as_the_feed_too(self) -> None:
+        # The playlist spells quality in brackets more often than as a word, so
+        # "Fox News Channel (720p)" is the HD feed and belongs on 841.
+        self.assertEqual(dial("Fox News Channel"), 41)
+        self.assertEqual(dial("Fox News Channel (720p)"), 841)
+
+    def test_a_specific_feed_still_beats_the_hd_row(self) -> None:
+        # Specificity is scored before the feed: CNN en Español HD is the Spanish
+        # service on 709, not CNN's 842.
+        self.assertEqual(dial("CNN en Español HD"), 709)
 
     def test_the_dials_legacy_name_binds_to_the_name_people_use(self) -> None:
         self.assertEqual(dial("CNN"), dial("Cable News Network"))
