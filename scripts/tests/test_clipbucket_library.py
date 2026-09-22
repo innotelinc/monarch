@@ -652,6 +652,144 @@ class CollectionFindings(unittest.TestCase):
         self.assertEqual(cl.missing_collections(series, {}, self.facts), [])
 
 
+class Serving(unittest.TestCase):
+    """`--serve-check`: the app's own answer, not this tool's model of it.
+
+    The model — the file the app derives from a row — is the thing every other
+    check here trusts. This one asks the watch page instead, because the way the
+    model is wrong is invisible: the row is right, the file is there, and the
+    page has no playable source on it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.files = os.path.join(self.tmp.name, "volume")
+        os.makedirs(os.path.join(self.files, "upload", "files", "videos", "imported"))
+        self.item = cl.Item(
+            kind="movie",
+            source="/data/media/movies/Film (2026)/Film (2026) WEBRip-1080p.mp4",
+            rel="movies/Film (2026)/Film (2026) WEBRip-1080p.mp4",
+            category="Movies",
+            title="Film (2026)",
+        )
+        self.facts = {"container": "clipbucket", "files_path": self.files}
+
+    @property
+    def _source_url(self) -> str:
+        return f"https://tube.example/files/videos/imported/{self.item.file_name}-1080.mp4"
+
+    def _on_disk(self) -> str:
+        path = cl.source_file(self._source_url, self.files)
+        with open(path, "wb") as fh:
+            fh.write(b"0" * 16)
+        return path
+
+    def _report(self, page, code=206):
+        with mock.patch.object(cl, "watch_page", page), mock.patch.object(
+            cl, "serves_bytes", lambda container, url: code
+        ):
+            return cl.serve_report([self.item], self.facts, {self.item.file_name: 7})
+
+    def test_it_reads_the_sources_the_page_emits(self):
+        body = (
+            "<video><source src='https://tube.example/files/videos/imported/a-1080.mp4' "
+            "type=\"video/mp4\"/>"
+            "<source src=\"https://tube.example/files/videos/imported/a-720.mp4\"/></video>"
+        )
+        self.assertEqual(
+            cl.page_sources(body),
+            [
+                "https://tube.example/files/videos/imported/a-1080.mp4",
+                "https://tube.example/files/videos/imported/a-720.mp4",
+            ],
+        )
+
+    def test_a_files_url_maps_onto_the_volume(self):
+        # The web root is <volume>/upload, the same arithmetic the apply uses.
+        self.assertEqual(
+            cl.source_file("https://tube.example/files/videos/imported/a-1080.mp4", "/vol"),
+            "/vol/upload/files/videos/imported/a-1080.mp4",
+        )
+
+    def test_a_url_outside_files_has_no_file_of_ours(self):
+        self.assertEqual(cl.source_file("https://tube.example/player/video.js", "/vol"), "")
+
+    def test_a_page_serving_a_real_file_is_no_problem(self):
+        self._on_disk()
+        problems = self._report(lambda c, v: (200, f"<source src='{self._source_url}'/>"))
+        self.assertEqual(problems, [])
+
+    def test_a_page_with_no_source_is_reported(self):
+        # The first pass's rows: complete by every filesystem check, playing
+        # nowhere, because the app built a different name than the tool wrote.
+        self._on_disk()
+        problems = self._report(lambda c, v: (200, "<video>nothing playable</video>"))
+        self.assertIn("emits no <source>", problems[0][1])
+        self.assertEqual(problems[0][0], self.item.file_name)
+
+    def test_a_source_with_no_file_behind_it_is_reported(self):
+        problems = self._report(
+            lambda c, v: (
+                200,
+                "<source src='https://tube.example/files/videos/imported/gone-1080.mp4'/>",
+            )
+        )
+        self.assertIn("no file at", problems[0][1])
+
+    def test_a_file_the_web_server_will_not_serve_is_reported(self):
+        # What `ls` cannot see: readable by root, 403 to nginx.
+        self._on_disk()
+        problems = self._report(
+            lambda c, v: (200, f"<source src='{self._source_url}'/>"), code=403
+        )
+        self.assertIn("HTTP 403", problems[0][1])
+
+    def test_a_watch_page_that_is_not_200_is_reported(self):
+        problems = self._report(lambda c, v: (404, "nope"))
+        self.assertIn("HTTP 404", problems[0][1])
+
+    def test_an_item_with_no_row_is_reported(self):
+        problems = cl.serve_report([self.item], self.facts, {})
+        self.assertIn("no cb_video row", problems[0][1])
+
+    def test_a_fetch_that_could_not_run_is_a_finding_not_a_traceback(self):
+        def boom(container, videoid):
+            raise cl.ImportError_("curl is not there")
+
+        problems = self._report(boom)
+        self.assertIn("curl is not there", problems[0][1])
+
+
+class ServePreconditions(unittest.TestCase):
+    """Serving an item needs no encoder, so a media host is never "cannot tell"."""
+
+    def _facts(self, **over):
+        facts = {
+            "docker": True,
+            "container_running": True,
+            "files_path": "/vol",
+            "media_root": "/data/media",
+            "media_root_is_dir": True,
+            "install_version": cl.CORE_VERSION,
+            "ffmpeg": False,
+            "ffprobe": False,
+        }
+        facts.update(over)
+        return facts
+
+    def test_it_judges_without_ffmpeg_on_the_host(self):
+        cl.evaluate_serve(self._facts())
+
+    def test_without_a_container_it_is_cannot_tell(self):
+        with self.assertRaises(cl.CantTell):
+            cl.evaluate_serve(self._facts(container_running=False))
+
+    def test_a_version_this_script_does_not_know_is_cannot_tell(self):
+        with self.assertRaises(cl.CantTell):
+            cl.evaluate_serve(self._facts(install_version="5.4.0"))
+
+
 class Sql(unittest.TestCase):
     def test_quotes_are_escaped(self):
         self.assertEqual(cl.sql_quote("It's a test"), "It''s a test")

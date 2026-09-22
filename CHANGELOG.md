@@ -10,6 +10,21 @@ are written by hand and describe the behaviour change, not the commits.
 
 ## [Unreleased]
 
+### Added
+
+- **ClipBucket's library check now asks the site, not just the filesystem.**
+  `scripts/clipbucket-library.py --serve-check` fetches every catalogue item's
+  watch page, takes the `<source>` URLs the page emits, and requires a file
+  behind each one that the web server will actually return bytes from. The
+  existing `--check` judges this repo's *model* of the app — the name
+  `get_video_files()` builds from a row — and every check in that model can pass
+  while the site plays nothing, which is exactly how the first import's
+  `<name>-<hash>.mp4` rows looked complete and had no playable source at all.
+  Byte-serving is the half `ls` cannot see: a file the container user cannot
+  read is listed fine and answered 403. `drift-check` runs it after the
+  catalogue check, and it needs no `ffmpeg` on the host, so a media host is
+  judged on what it serves rather than refused for lacking an encoder.
+
 ### Fixed
 
 - **ClipBucket can no longer start with a blank MariaDB password.** The password

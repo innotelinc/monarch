@@ -218,6 +218,7 @@ tube.innotel.us lists, put there by `scripts/clipbucket-library.py`:
 python3 scripts/clipbucket-library.py --check   # 0 in sync, 1 behind, 2 cannot tell
 python3 scripts/clipbucket-library.py --apply   # import what is missing
 python3 scripts/clipbucket-library.py --apply --only tv --limit 2   # a first look
+python3 scripts/clipbucket-library.py --serve-check   # does the site serve it?
 ```
 
 It is idempotent and reads the library read-only. An item's identity is its
@@ -242,6 +243,17 @@ row is invisible.
   generate, at the five resolutions `VideoThumbs` declares, with the app's own
   ffmpeg command and `cb_video_image`/`cb_video_thumb` rows behind them. A row
   without them renders a broken image.
+
+`--serve-check` is the end-to-end half, and the only check that asks the
+*application* rather than this tool's model of it: it fetches every item's watch
+page, takes the `<source>` URLs the page emits, and requires a file behind each
+one that the web server will actually return bytes from. Everything else here
+can pass while the site plays nothing — that is exactly how the first import's
+`<name>-<hash>.mp4` rows looked complete under every filesystem check and had no
+playable source at all, and byte-serving is the half `ls` cannot see (a file the
+container user cannot read is listed fine and answered 403). It needs no
+`ffmpeg`, so the media host is judged on what it actually serves; `drift-check`
+runs it after the catalogue check.
 
 **Nothing is re-encoded unless you ask.** Measured over the library as it stood
 on 2026-09-22 — 2 H.264/AAC MP4, 8 H.264-in-MKV, 5 HEVC — an MP4 that is already
@@ -1065,6 +1077,7 @@ against the services:
 | Jellyseerr | initialized, Jellyfin sign-in enabled, owned by the account the manifest names (`seerr-owner.py --check`) |
 | Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
 | ClipBucket | the install is *finished*, not merely serving: schema present, `version` row populated, admin user with an owner profile, `base_url` matching `MONARCH_BASE_URL`, and the installer locked (`scripts/clipbucket-install.py --check`; skipped when the container isn't reachable) |
+| ClipBucket playback | every catalogue item's watch page emits a `<source>` with a file behind it that the web server returns bytes from (`scripts/clipbucket-library.py --serve-check`; skipped when the container isn't reachable) |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
 | Cerulean Vault | `.env` holds materialized values with no unresolved `vault://` reference — the drift-check greps for leftovers (read-only; `scripts/vault-migrate.py --dry-run` shows which plaintext values are not in the store yet) |
 | Magnate (when `MAGNATE_URL` is set) | every managed user's Jellyfin policy matches its Magnate tier (`scripts/magnate-entitlements.py --check`, read-only; skipped when no Jellyfin API key) |

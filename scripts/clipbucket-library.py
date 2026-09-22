@@ -66,15 +66,23 @@ USAGE
     python3 scripts/clipbucket-library.py --apply --only tv
     python3 scripts/clipbucket-library.py --apply --limit 2 # a first look
     python3 scripts/clipbucket-library.py --apply --reencode-hevc   # hours of CPU
+    python3 scripts/clipbucket-library.py --serve-check    # does the site serve it?
 
 `--check` is read-only and exits 1 when the catalogue is behind the library,
 which is what makes it usable from a drift check. `--apply` is idempotent: an
 item already in the catalogue keeps its rows and only has missing files,
 thumbnails or metadata restored.
 
-Exit codes: 0 in sync (or applied) — 1 behind/drift, or a file this tool will
-not guess about — 2 cannot tell (no container, no docker, no ffmpeg, or a media
-root that is not there).
+`--serve-check` is the end-to-end half, and the only check that asks the *app*
+rather than this tool's model of it: it fetches every item's watch page, takes
+the `<source>` URLs the page emits, and requires a file behind each one that the
+web server will actually serve bytes from. Everything else here can pass while
+the site serves nothing — that is exactly how the first import's
+`<name>-<hash>.mp4` rows looked complete and played nowhere.
+
+Exit codes: 0 in sync (or applied, or every item served) — 1 behind/drift, or a
+file this tool will not guess about — 2 cannot tell (no container, no docker, no
+ffmpeg, or a media root that is not there).
 
 The deployment's own state is not in this repo: the media root is named by
 `--media-root` / `CLIPBUCKET_MEDIA_ROOT` and defaults to `/data/media`.
@@ -589,6 +597,161 @@ def evaluate(facts: dict) -> None:
         raise CantTell("ffmpeg is not on PATH")
     if not facts.get("ffprobe"):
         raise CantTell("ffprobe is not on PATH")
+    if not facts.get("files_path"):
+        raise CantTell("the container's file volume could not be located on this host")
+    if not facts.get("media_root_is_dir"):
+        raise CantTell(f"the media root {facts.get('media_root')!r} is not a directory")
+    if facts.get("install_version") != CORE_VERSION:
+        raise CantTell(
+            f"the install reports version {facts.get('install_version')!r}, not "
+            f"{CORE_VERSION!r} — re-read this script's constants against the release"
+        )
+
+
+# ── the site actually serving what the catalogue holds ──────────────────────
+#
+# Everything above judges this tool's *model* of the app: the file name
+# `get_video_files()` builds, the `video_files` JSON, the thumbnail layout. A
+# model can be wrong in a way nothing above notices — the row exists, the file
+# exists, and the watch page comes back with no playable source because the app
+# builds a different name. That is not hypothetical: the first pass wrote
+# `<name>-<hash>.mp4` and produced rows whose pages had no `<source>` at all.
+#
+# So `--serve-check` asks the app instead of the model. It fetches each item's
+# watch page from inside the container, takes the sources the page emits, and
+# requires (a) at least one, (b) a file on disk behind each, and (c) bytes from
+# the web server for it. (c) is the half no filesystem check can see: a file
+# the container user cannot read is listed by `ls` and answered with a 403.
+SERVE_MARKER = "/files/"
+SOURCE_RE = re.compile(r"<source\b[^>]*\bsrc=['\"]([^'\"]+)['\"]", re.IGNORECASE)
+WATCH_URL_DEFAULT = "http://127.0.0.1/watch_video.php?v={videoid}"
+
+
+def page_sources(body: str) -> list[str]:
+    """The `src` of every `<source>` the watch page emits, in page order."""
+    return SOURCE_RE.findall(body)
+
+
+def source_file(url: str, files_path: str) -> str:
+    """Where a page's `/files/...` source lives on this host, or "".
+
+    The web root is `<volume>/upload`, so a URL path of `/files/videos/…` is
+    `<files_path>/upload/files/videos/…` on disk — the same arithmetic the
+    apply uses when it writes the file in the first place.
+    """
+    idx = url.find(SERVE_MARKER)
+    if idx < 0:
+        return ""
+    return os.path.join(files_path, "upload", url[idx + 1:].lstrip("/"))
+
+
+def _curl_in(container: str, url: str, write_out: str = "") -> subprocess.CompletedProcess:
+    """curl the site from inside the container.
+
+    Inside, because the page's own URLs carry a public hostname that may not
+    resolve from here (and must not be needed to judge a deployment), while
+    127.0.0.1:80 is the same site the caller reaches.
+    """
+    args = ["docker", "exec", container, "curl", "-sS", "-m", "30", "-o", write_out or "/dev/null"]
+    return run(args + [url], timeout=120)
+
+
+def watch_page(container: str, videoid: int) -> tuple[int, str]:
+    """(HTTP status, body) for a watch page, fetched inside the container."""
+    proc = run(
+        [
+            "docker", "exec", container, "curl", "-sS", "-m", "30",
+            "-w", "\n%{http_code}",
+            WATCH_URL_DEFAULT.format(videoid=videoid),
+        ],
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise ImportError_(
+            f"could not fetch the watch page for v={videoid} in {container}: "
+            f"{proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else proc.returncode}"
+        )
+    body, _, code = proc.stdout.rpartition("\n")
+    try:
+        return int(code.strip()), body
+    except ValueError:
+        return 0, body
+
+
+def serves_bytes(container: str, url: str) -> int:
+    """The status the site answers a 1 KiB range of `url` with, or 0."""
+    idx = url.find(SERVE_MARKER)
+    if idx < 0:
+        return 0
+    proc = run(
+        [
+            "docker", "exec", container, "curl", "-sS", "-m", "30",
+            "-o", "/dev/null", "-w", "%{http_code}", "-r", "0-1023",
+            f"http://127.0.0.1{url[idx:]}",
+        ],
+        timeout=120,
+    )
+    try:
+        return int(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+def serve_report(items: list[Item], facts: dict, ids: dict[str, int]) -> list[tuple[str, str]]:
+    """(file_name, why) for every item whose watch page does not serve a file."""
+    problems: list[tuple[str, str]] = []
+    for item in items:
+        videoid = ids.get(item.file_name)
+        if not videoid:
+            problems.append((item.file_name, "no cb_video row, so there is no watch page"))
+            continue
+        try:
+            status, body = watch_page(facts["container"], videoid)
+        except ImportError_ as exc:
+            problems.append((item.file_name, str(exc)))
+            continue
+        if status != 200:
+            problems.append(
+                (item.file_name, f"watch_video.php?v={videoid} answered HTTP {status}")
+            )
+            continue
+        urls = page_sources(body)
+        if not urls:
+            problems.append(
+                (
+                    item.file_name,
+                    f"the watch page (v={videoid}) emits no <source> — the app "
+                    "built no playable file for this row",
+                )
+            )
+            continue
+        bad = []
+        for url in urls:
+            path = source_file(url, facts["files_path"])
+            if not path:
+                bad.append(f"{url} is not a {SERVE_MARKER} URL")
+            elif not os.path.isfile(path):
+                bad.append(f"{url} has no file at {path}")
+            else:
+                code = serves_bytes(facts["container"], url)
+                if code not in (200, 206):
+                    bad.append(f"{url} answered HTTP {code} to a range request")
+        if bad:
+            problems.append((item.file_name, "; ".join(bad)))
+    return problems
+
+
+def evaluate_serve(facts: dict) -> None:
+    """Preconditions for judging what the *site* serves.
+
+    Deliberately not `evaluate`: serving an item needs no ffmpeg and no media
+    root, and refusing to judge a media host because it has no encoder on PATH
+    would turn a working deployment into a "cannot tell".
+    """
+    if not facts.get("docker"):
+        raise CantTell("docker is not available here")
+    if not facts.get("container_running"):
+        raise CantTell("the clipbucket container is not running")
     if not facts.get("files_path"):
         raise CantTell("the container's file volume could not be located on this host")
     if not facts.get("media_root_is_dir"):
@@ -1269,6 +1432,12 @@ def main(argv: list[str] | None = None) -> int:
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--check", action="store_true", help="report drift, write nothing")
     action.add_argument("--apply", action="store_true", help="write the catalogue")
+    action.add_argument(
+        "--serve-check",
+        action="store_true",
+        help="fetch every item's watch page and require a playable source it "
+             "will actually serve bytes from (write nothing)",
+    )
     parser.add_argument("--quiet", action="store_true", help="only the summary line")
     args = parser.parse_args(argv)
 
@@ -1292,7 +1461,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"clipbucket-library: {exc}", file=sys.stderr)
         return 2
     try:
-        evaluate(facts)
+        # `--serve-check` judges what the app serves, which needs no encoder and
+        # no media probe — see evaluate_serve.
+        (evaluate_serve if args.serve_check else evaluate)(facts)
     except CantTell as exc:
         print(f"clipbucket-library: {exc}", file=sys.stderr)
         return 2
@@ -1311,6 +1482,30 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.serve_check:
+        # The app's own answer, item by item: the page it serves and the file
+        # behind the source on it. This is the check that would have caught the
+        # first pass's `<name>-<hash>.mp4` rows, which every filesystem check
+        # above called complete.
+        ids, _durations = catalogue_state(items, facts)
+        problems = serve_report(items, facts, ids)
+        out = sys.stderr if args.quiet else sys.stdout
+        for name, why in problems:
+            print(f"  not served   {name}: {why}", file=out)
+        if problems:
+            print(
+                f"clipbucket-library: {len(problems)} of {len(items)} item(s) do not "
+                "serve a playable file — re-run --apply, then check the file "
+                "volume's ownership; see docs/operations.md 'ClipBucket'",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"clipbucket-library: every one of {len(items)} item(s) serves a "
+            "playable file"
+        )
+        return 0
 
     if args.check:
         report = build_report(items, unparsed, facts)

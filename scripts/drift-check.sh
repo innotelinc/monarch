@@ -52,6 +52,9 @@ set -uo pipefail
 #     - the catalogue holds the media library: one cb_video row, one playable
 #       file under the name the app builds, and the card's thumbnails, per
 #       movie and TV episode (scripts/clipbucket-library.py --check)
+#     - the site serves it: every item's watch page emits a source with a file
+#       behind it the web server will read (scripts/clipbucket-library.py
+#       --serve-check)
 #   Authentik:
 #     - LDAP outpost provisioned (when AUTHENTIK_BASE_URL is set)
 #   Nginx Proxy Manager:
@@ -1039,6 +1042,30 @@ if [ "$clipbucket_code" -eq 0 ]; then
   else
     fail "clipbucket: the catalogue is behind the media library - run scripts/clipbucket-library.py --apply; see docs/operations.md 'ClipBucket'"
     printf '%s\n' "$clip_lib_out" | indent >&2
+  fi
+fi
+
+# ClipBucket — is the *site* serving that library?
+# ───────────────────────────────────────────────────────────────────────────
+# The check above judges this repo's model of the app — the name the app's
+# get_video_files() builds for a row. Everything in that model can be right and
+# the site still play nothing, which is not hypothetical: the first import wrote
+# `<name>-<hash>.mp4` and produced rows every filesystem check called complete
+# while their watch pages had no `<source>` at all. This asks the app: fetch each
+# item's watch page, take the sources it emits, and require a file behind each
+# that the web server will actually serve bytes from — the half `ls` cannot see,
+# because a file the container user cannot read is listed fine and answered 403.
+# Only judged once the install is finished, for the same reason as above.
+if [ "$clipbucket_code" -eq 0 ]; then
+  clip_serve_out=$(python3 scripts/clipbucket-library.py --serve-check 2>&1)
+  clip_serve_code=$?
+  if [ "$clip_serve_code" -eq 0 ]; then
+    say "ok: ClipBucket serves a playable file for every catalogue item"
+  elif [ "$clip_serve_code" -eq 2 ]; then
+    say "note: ClipBucket's playback could not be judged (skipped) - $(printf '%s' "$clip_serve_out" | tail -1)"
+  else
+    fail "clipbucket: a catalogue item's watch page serves no playable file - re-run scripts/clipbucket-library.py --apply, then check the file volume's ownership; see docs/operations.md 'ClipBucket'"
+    printf '%s\n' "$clip_serve_out" | indent >&2
   fi
 fi
 
