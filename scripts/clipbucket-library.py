@@ -23,10 +23,14 @@ Two things make this less obvious than "copy the files in":
    files: 2 are H.264/AAC MP4 (playable as they are), 8 are H.264 in an MKV
    (browsers will not demux Matroska), and 5 are **HEVC**, which plays only
    where the client has an HEVC decoder. The container and audio half of that is
-   cheap to fix and is fixed here; the HEVC half is not (measured on an 8-core
-   host: 24s of wall time per minute of 1080p, i.e. ~2.5h for this library's
-   five HEVC items, and proportionally longer on fewer cores), so it is
-   **opt-in** (`--reencode-hevc`) and reported rather than silently skipped.
+   cheap to fix and is fixed here; the HEVC half of it is a codec the client may
+   not decode, and this tool's answer is to **keep the codec** rather than
+   spend hours replacing it: a stream copy costs seconds and no quality, and
+   **the count is reported** (by `--check` and by `--apply`) so the limitation is
+   a recorded number rather than a surprise. That number is on `.46` and on
+   `.56`; an earlier version of this tool re-encoded those seven items on `.56`
+   and five on `.46`, and this one treats a copy that is not a stream copy of
+   its source as drift and repairs it.
 
 WHAT IT DOES
 ------------
@@ -38,8 +42,13 @@ For every movie and TV episode it can recognise under the media root:
   `get_video_files()` builds and `update_video_files()` parses back — by
   hardlink when the source is already H.264/AAC MP4 (no copy at all — the media
   root and the docker volume share a filesystem here), otherwise by a stream
-  copy (`-c:v copy`) with the audio converted to stereo AAC. Video is never
-  re-encoded unless `--reencode-hevc` is passed. The source library is read-only
+  copy (`-c:v copy`) with the audio converted to stereo AAC. **Video is never
+  re-encoded** — the copy keeps the source's video codec, and a copy whose
+  codec does not match its source's (one an earlier version transcoded, or one
+  written before the source was replaced) is rebuilt as a stream copy, which is
+  the repair for exactly that. The only exception is a source codec no browser
+  decodes at all, where there is no cheaper way to make it playable. The source
+  library is read-only
   and is never modified; a file this tool wrote under a name it no longer uses
   is *renamed*, never deleted.
 * **Thumbnails** — the five the app itself would generate (`num_thumbs`), each
@@ -65,7 +74,6 @@ USAGE
     python3 scripts/clipbucket-library.py --apply          # import everything
     python3 scripts/clipbucket-library.py --apply --only tv
     python3 scripts/clipbucket-library.py --apply --limit 2 # a first look
-    python3 scripts/clipbucket-library.py --apply --reencode-hevc   # hours of CPU
     python3 scripts/clipbucket-library.py --serve-check    # does the site serve it?
 
 `--check` is read-only and exits 1 when the catalogue is behind the library,
@@ -160,9 +168,10 @@ THUMB_RESOLUTIONS = (
 # read as a resolution.
 QUALITY_LADDER = (1080, 720, 480, 360, 240)
 
-# Codecs a browser will play from an MP4 unaided. Anything else is remuxed
-# (video) or converted (audio); HEVC is additionally *reported*, because a
-# stream copy of it is playable only where the client can decode HEVC.
+# Codecs a browser will play from an MP4 unaided. An MKV or an odd audio codec
+# is remuxed (video copied) or converted (audio); HEVC is kept as HEVC and
+# *reported*, because a stream copy of it is playable only where the client can
+# decode HEVC. Nothing here re-encodes a video on purpose.
 WEB_VIDEO = ("h264",)
 WEB_AUDIO = ("aac",)
 HEVC = "hevc"
@@ -272,16 +281,16 @@ def file_name_for(relpath: str, base: str) -> str:
     return f"{trim(base, BASE_LENGTH) or 'item'}-{hashlib.sha1(relpath.encode()).hexdigest()[:8]}"
 
 
-def media_decision(
-    video_codec: str, audio_codec: str, container: str, reencode_hevc: bool = False
-) -> str:
+def media_decision(video_codec: str, audio_codec: str, container: str) -> str:
     """`link` (no work), `remux` (container/audio only), or `transcode`.
 
     `container` is ffprobe's `format_name` as reported — comma-joined when the
     format is ambiguous (`.mp4` is `mov,mp4,m4a,3gp,3g2,mj2`), so it is read as a
-    set. Pure, because this decides whether an import takes seconds or most of a
-    day, and because the expensive branch has to be *asked for* rather than
-    discovered by finding the CPU busy.
+    set. Pure, and it takes no "how hard may I try" argument on purpose: the
+    answer is decided by the source alone, so an import is seconds or minutes
+    and never hours because of a flag somebody left on. `transcode` survives for
+    the one case with no cheaper option — a video codec no browser decodes — and
+    is unreachable for HEVC, which is remuxed.
     """
     containers = {part.strip().lower() for part in str(container).split(",")}
     if video_codec in WEB_VIDEO and audio_codec in WEB_AUDIO and containers & MP4_CONTAINERS:
@@ -290,9 +299,21 @@ def media_decision(
         # A stream copy of something no browser decodes is not an import. The
         # re-encode is silent here only because there is no cheaper option.
         return "transcode"
-    if video_codec == HEVC and reencode_hevc:
-        return "transcode"
+    # HEVC included: a stream copy with the audio fixed is playable wherever the
+    # client decodes HEVC, and re-encoding it is the thing this tool no longer
+    # does at all.
     return "remux"
+
+
+def expected_codec(video_codec: str, decision: str) -> str:
+    """The video codec a faithful copy of this source carries.
+
+    `link` and `remux` copy the stream, so the codec is the source's; a
+    `transcode` produces H.264. This is what a copy already in place is judged
+    against, which is what makes "a stream copy of the source" an invariant
+    rather than an intention.
+    """
+    return "h264" if decision == "transcode" else video_codec
 
 
 def quality_for(width: int, height: int) -> int:
@@ -1041,12 +1062,18 @@ class Report:
     missing_thumbs: list[str]
     missing_collections: list[str]
     unparsed: list[str]
+    # Present and playable, but not what a stream copy of the source produces:
+    # a copy an earlier version of this tool re-encoded. Its own category
+    # because "the file is missing" is a different repair from "the file is
+    # here and the wrong codec", and because a check that stayed silent about
+    # it would call a host in sync while `--apply` rewrote its media.
+    converted: list[str]
 
     @property
     def drift(self) -> bool:
         return bool(
             self.missing_rows or self.missing_media or self.missing_thumbs
-            or self.missing_collections
+            or self.missing_collections or self.converted
         )
 
 
@@ -1065,6 +1092,40 @@ def missing_thumbs(thumb_dir: str, file_name: str, num_thumbs: int) -> list[str]
             if not os.path.exists(os.path.join(thumb_dir, file_name, name)):
                 wanted.append(name)
     return wanted
+
+
+def media_is_faithful(item: Item, videos: str) -> str:
+    """Why this item's catalogue file is not a stream copy of its source.
+
+    Empty when it is one. This is the read-only half of the rule the apply path
+    enforces through `copy_is_reusable`: without it `--check` reports `in sync`
+    for a host whose every file `--apply` would replace, which is the one thing
+    a drift check must never do. Judged by codec rather than duration because
+    the copy exists at all here, and a converted file has the right length.
+
+    A source that cannot be probed is left unsaid rather than guessed at — the
+    apply will refuse it on its own terms.
+    """
+    app_named = [n for n in media_files(videos, item.file_name) if MEDIA_NAME_RE.match(n)]
+    try:
+        source = probe(item.source)
+    except (ImportError_, OSError):
+        return ""
+    want = expected_codec(
+        source["video_codec"],
+        media_decision(source["video_codec"], source["audio_codec"], source["container"]),
+    )
+    for name in app_named:
+        try:
+            found = probe(os.path.join(videos, name))["video_codec"]
+        except (ImportError_, OSError):
+            continue
+        if found != want:
+            return (
+                f"its catalogue file holds {found} where a stream copy of the "
+                f"source is {want}"
+            )
+    return ""
 
 
 def catalogue_state(items: list[Item], facts: dict) -> tuple[dict[str, int], dict[str, int]]:
@@ -1091,6 +1152,7 @@ def build_report(items: list[Item], unparsed: list[str], facts: dict) -> Report:
     missing_rows: list[str] = []
     missing_media: list[str] = []
     missing_thumbs_: list[str] = []
+    converted: list[str] = []
     for item in items:
         name = item.file_name
         if name not in ids:
@@ -1099,6 +1161,11 @@ def build_report(items: list[Item], unparsed: list[str], facts: dict) -> Report:
         problems = False
         if not named_for_the_app(media_files(videos, name)):
             missing_media.append(name)
+            problems = True
+        elif (why := media_is_faithful(item, videos)):
+            # Only when the file is there and named as the app expects: over a
+            # missing file this is the same finding twice.
+            converted.append(f"{name}: {why}")
             problems = True
         # A row without its thumbnails renders a broken card, which is why this
         # is drift and not a cosmetic note.
@@ -1115,6 +1182,7 @@ def build_report(items: list[Item], unparsed: list[str], facts: dict) -> Report:
         missing_thumbs=missing_thumbs_,
         missing_collections=missing_collections(series, ids, facts),
         unparsed=unparsed,
+        converted=converted,
     )
 
 
@@ -1125,12 +1193,52 @@ def describe(report: Report, stream) -> None:
         print(f"  missing      {name}: no cb_video row — the library item is invisible", file=stream)
     for name in report.missing_media:
         print(f"  incomplete   {name}: the row exists and its media file does not", file=stream)
+    for entry in report.converted:
+        print(
+            f"  converted    {entry} — re-run --apply to re-copy it from the "
+            f"source (a stream copy, seconds, no re-encode)",
+            file=stream,
+        )
     for name in report.missing_thumbs:
         print(f"  incomplete   {name}: thumbnails are missing — the card renders broken", file=stream)
     for name in report.missing_collections:
         print(f"  incomplete   {name}: no series collection, or it does not hold its episodes", file=stream)
     for path in report.unparsed:
         print(f"  skipped      {path}: no season/episode in the name, so not guessed at", file=stream)
+
+
+def hevc_line(count: int) -> str:
+    """The recorded limitation, phrased once for every place it is reported.
+
+    HEVC is *kept* rather than converted, so this is not a note about work left
+    undone — it is the number of items whose playability depends on the client
+    having an HEVC decoder (Safari, Edge, and Chrome on hardware that decodes
+    it; Firefox has none). One function so `--check` and `--apply` cannot
+    describe the same count two different ways.
+    """
+    return (
+        f"clipbucket-library: {count} item(s) carry HEVC — a stream copy of it plays "
+        "where the client decodes HEVC (Safari, Edge, HEVC-capable Chrome) and not "
+        "in Firefox. Nothing here re-encodes; the source codec is kept"
+    )
+
+
+def hevc_sources(items: list[Item]) -> int:
+    """How many items' sources are HEVC. Read-only, one ffprobe each.
+
+    Judged from the source rather than the catalogue copy, so the number is a
+    property of the library and not of whatever the last run happened to write.
+    """
+    count = 0
+    for item in items:
+        try:
+            if probe(item.source)["video_codec"] == HEVC:
+                count += 1
+        except (ImportError_, OSError):
+            # Unreadable is not a claim that it is H.264, and a source this tool
+            # cannot read is already a finding of its own.
+            continue
+    return count
 
 
 # ── the apply ───────────────────────────────────────────────────────────────
@@ -1154,62 +1262,89 @@ def media_is_complete(dest: str, expected_duration: int) -> bool:
         return False
 
 
-def copy_is_reusable(path: str, expected_duration: int, reencode_hevc: bool) -> bool:
+def copy_is_reusable(path: str, expected_duration: int, want_codec: str) -> bool:
     """Whether a file already in place can be left where it is.
 
-    A complete H.264 copy can always be left alone. A complete **HEVC** one can
-    only be left alone when the run was not asked for H.264: `--reencode-hevc`
-    exists to replace exactly those, so treating them as "done" would make the
-    flag do nothing on the one library it is meant for — the second run would
-    report `already there` for the very items the first run flagged.
+    Two questions, and the second is the one this tool learned the hard way: is
+    it written to the end, and does it carry the codec a stream copy of the
+    source would? Duration alone called a transcoded file "done" — it has the
+    right length — so the codec is what separates *converted* from *copied*, and
+    an item that was converted to H.264 in an earlier version of this tool
+    reads as drift now and is replaced by a stream copy. That is the repair, and
+    it costs seconds rather than the hours the conversion cost.
     """
     if not media_is_complete(path, expected_duration):
         return False
-    if not reencode_hevc:
-        return True
     try:
-        return probe(path)["video_codec"] != HEVC
+        return probe(path)["video_codec"] == want_codec
     except ImportError_:
-        # Unreadable is not a reason to call it good, and the conversion below
+        # Unreadable is not a reason to call it good, and the rebuild below
         # overwrites it anyway.
         return False
 
 
-def materialise_media(item: Item, source_facts: dict, videos_dir: str, reencode_hevc: bool) -> tuple[str, int]:
+def replacement_reason(
+    path: str, expected_duration: int, decision: str, source_codec: str
+) -> str:
+    """Why a complete-but-unusable file is being replaced.
+
+    "Replaced an incomplete file" over a file that was written to the end reads
+    as data loss, so the cases are named separately — and the converted one
+    names both codecs, because "it was converted" is the fact that explains why
+    a repair is happening at all.
+    """
+    if not media_is_complete(path, expected_duration):
+        return "replaced an incomplete file"
+    if decision == "transcode":
+        return "replaced a file that is not a web-playable copy"
+    try:
+        found = probe(path)["video_codec"]
+    except ImportError_:
+        return "replaced an unreadable copy"
+    if found != source_codec:
+        return (
+            f"replaced a converted ({found}) copy with a stream copy of the "
+            f"{source_codec} source"
+        )
+    return f"replaced a {found} copy with a stream copy of the source"
+
+
+def materialise_media(item: Item, source_facts: dict, videos_dir: str) -> tuple[str, int]:
     """Put a playable MP4 in `videos_dir`. Returns (what it had to do, quality)."""
     quality = quality_for(source_facts["width"], source_facts["height"])
     dest = os.path.join(videos_dir, media_name(item.file_name, quality))
     os.makedirs(videos_dir, exist_ok=True)
+    # Decided from the source alone, before anything is looked at, so the reuse
+    # rule and the rebuild agree about what a faithful copy is.
+    decision = media_decision(
+        source_facts["video_codec"], source_facts["audio_codec"], source_facts["container"],
+    )
+    want_codec = expected_codec(source_facts["video_codec"], decision)
     prefix = ""
-    if copy_is_reusable(dest, source_facts["duration"], reencode_hevc):
+    if copy_is_reusable(dest, source_facts["duration"], want_codec):
         return "already there", quality
     if os.path.exists(dest):
         # Only ever this tool's own artifact, under its own name, and only
         # because it is provably not the video: a usable file never reaches
-        # here. Say which of the two reasons it was, since "replaced an
-        # incomplete file" over a file that was complete reads as data loss.
-        replaced = "replaced an HEVC stream copy" if media_is_complete(dest, source_facts["duration"]) else "replaced an incomplete file"
+        # here.
+        prefix = (
+            f"{replacement_reason(dest, source_facts['duration'], decision, source_facts['video_codec'])}, "
+        )
         os.remove(dest)
-        prefix = f"{replaced}, "
 
     stale = stale_media(videos_dir, item.file_name, media_name(item.file_name, quality))
     if len(stale) == 1 and copy_is_reusable(
-        os.path.join(videos_dir, stale[0]), source_facts["duration"], reencode_hevc
+        os.path.join(videos_dir, stale[0]), source_facts["duration"], want_codec
     ):
-        # One earlier attempt under the previous name, written to the end: the
-        # bytes are right, only the label the app reads the resolution from was
-        # wrong, so renaming repairs it. A *partial* one falls through to the
-        # conversion below, which overwrites it — and so does an HEVC one on a
-        # run that was asked for H.264.
+        # One earlier attempt under the previous name, written to the end and
+        # carrying the right codec: the bytes are right, only the label the app
+        # reads the resolution from was wrong, so renaming repairs it. A partial
+        # one, or a converted one, falls through to the rebuild below.
         os.rename(os.path.join(videos_dir, stale[0]), dest)
         return f"{prefix}adopted {stale[0]}", quality
     for name in stale:
         os.remove(os.path.join(videos_dir, name))
 
-    decision = media_decision(
-        source_facts["video_codec"], source_facts["audio_codec"],
-        source_facts["container"], reencode_hevc,
-    )
     if decision == "link":
         try:
             # The media root and the docker volumes share a filesystem here, so
@@ -1227,7 +1362,7 @@ def materialise_media(item: Item, source_facts: dict, videos_dir: str, reencode_
             f"ffmpeg stopped short on {item.source} — {dest} is not the whole video"
         )
     if decision == "transcode":
-        return f"{prefix}re-encoded to H.264", quality
+        return f"{prefix}re-encoded to H.264 (no browser decodes {source_facts['video_codec']})", quality
     return f"{prefix}remuxed (video copied, audio to stereo AAC)", quality
 
 
@@ -1370,7 +1505,7 @@ def thumbs_sql(videoid: int, item: Item, source_facts: dict) -> str:
 
 def apply_item(
     item: Item, source_facts: dict, facts: dict, category_id: int,
-    tag_id: int | None, reencode_hevc: bool,
+    tag_id: int | None,
 ) -> tuple[str, int]:
     """Bring one item into the catalogue. Returns (a one-line note, videoid)."""
     container = facts["container"]
@@ -1379,7 +1514,7 @@ def apply_item(
     thumb_dir = os.path.join(files_path, "upload", "files", "thumbs", "video", thumb_subdir(item.file_name))
     name = item.file_name
 
-    note, quality = materialise_media(item, source_facts, videos, reencode_hevc)
+    note, quality = materialise_media(item, source_facts, videos)
     thumbs = write_thumbs(item, source_facts, thumb_dir)
 
     rows = mysql_query(container, f"SELECT videoid FROM cb_video WHERE file_name='{sql_quote(name)}';")
@@ -1422,13 +1557,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--only", choices=("movies", "tv"), help="import one half of the library")
     parser.add_argument("--limit", type=int, help="stop after N items (a first look)")
-    parser.add_argument(
-        "--reencode-hevc",
-        action="store_true",
-        help="re-encode HEVC to H.264 instead of stream-copying it, which only "
-             "plays where the client decodes HEVC. Measured 24s of wall time per "
-             "minute of 1080p on 8 cores (~2.5h for this library); slower with fewer",
-    )
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--check", action="store_true", help="report drift, write nothing")
     action.add_argument("--apply", action="store_true", help="write the catalogue")
@@ -1508,12 +1636,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.check:
+        out = sys.stderr if args.quiet else sys.stdout
         report = build_report(items, unparsed, facts)
-        describe(report, sys.stderr if args.quiet else sys.stdout)
+        describe(report, out)
+        # Reported on the clean run as well as a drifted one: a limitation that
+        # is only mentioned when something is wrong is the kind that gets
+        # rediscovered as a surprise.
+        hevc = hevc_sources(items)
+        if hevc:
+            print(hevc_line(hevc), file=out)
         if report.drift or report.unparsed:
             print(
                 f"clipbucket-library: {len(report.missing_rows)} item(s) missing from the "
                 f"catalogue, {len(report.missing_media) + len(report.missing_thumbs)} incomplete, "
+                f"{len(report.converted)} item(s) to re-copy as a stream copy, "
                 f"{len(report.missing_collections)} series collection(s) behind, "
                 f"{len(report.unparsed)} skipped",
                 file=sys.stderr,
@@ -1525,6 +1661,9 @@ def main(argv: list[str] | None = None) -> int:
     movies_category = ensure_category(container, "Movies")
     tv_category = ensure_category(container, "TV Shows")
     print(f"clipbucket-library: {len(items)} item(s) to converge", file=sys.stderr)
+    # Counted from the sources, and always: the run cannot decide to convert
+    # them away, so the number is a property of the library rather than of what
+    # this run did.
     hevc_remuxed = 0
     videoid_by_file: dict[str, int] = {}
     for n, item in enumerate(items, start=1):
@@ -1532,10 +1671,10 @@ def main(argv: list[str] | None = None) -> int:
         category_id = tv_category if item.kind == "episode" else movies_category
         # A show is a set worth naming; a film's category is already its set.
         tag_id = ensure_tag(container, item.tag) if item.kind == "episode" else None
-        note, videoid = apply_item(item, source_facts, facts, category_id, tag_id, args.reencode_hevc)
+        note, videoid = apply_item(item, source_facts, facts, category_id, tag_id)
         videoid_by_file[item.file_name] = videoid
         print(f"  [{n}/{len(items)}] {item.title} — {note}", file=sys.stderr)
-        if source_facts["video_codec"] == HEVC and not args.reencode_hevc:
+        if source_facts["video_codec"] == HEVC:
             hevc_remuxed += 1
 
     # After the items, never before: a collection is a list of videoids, and
@@ -1568,12 +1707,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"clipbucket-library: catalogue holds {rows[0][0] if rows else '?'} imported video(s)")
     if hevc_remuxed:
-        print(
-            f"clipbucket-library: {hevc_remuxed} item(s) are HEVC stream copies — they play "
-            "where the client decodes HEVC, not everywhere. Re-run with --reencode-hevc to "
-            "convert them (measured: 24s of wall time per minute of 1080p on 8 cores)",
-            file=sys.stderr,
-        )
+        print(hevc_line(hevc_remuxed), file=sys.stderr)
     return 1 if unparsed else 0
 
 

@@ -131,15 +131,15 @@ are written by hand and describe the behaviour change, not the commits.
   **path**, so a re-run converges rather than duplicating and a title edit in the
   admin area is not undone.
 
-  Nothing is re-encoded unless asked for. Measured across the library (2
-  H.264/AAC MP4, 8 H.264 in MKV, 5 HEVC): an already-web-playable MP4 is
-  **hardlinked** (the media root and the docker volume share a filesystem, so it
-  costs nothing), an MKV is remuxed with `-c:v copy` and audio to stereo AAC.
-  HEVC is remuxed too, which leaves it playable where the client decodes HEVC
-  and not in Firefox — a full transcode measured 24s of wall time per minute of
-  1080p on an 8-core host, ~2.5h for this library's five HEVC items, so it is
-  `--reencode-hevc` and every apply ends by naming how many items are still in
-  that state.
+  Nothing is re-encoded, ever. Measured across the library (2 H.264/AAC MP4, 8
+  H.264 in MKV, 5 HEVC): an already-web-playable MP4 is **hardlinked** (the
+  media root and the docker volume share a filesystem, so it costs nothing), an
+  MKV is remuxed with `-c:v copy` and audio to stereo AAC, and HEVC is remuxed
+  the same way — playable where the client decodes HEVC and not in Firefox. Both
+  `--check` and `--apply` name how many items carry HEVC, so it is a recorded
+  number rather than a surprise. The copy's video codec is checked against the
+  source's, which is what makes "a stream copy" an invariant: a copy an earlier
+  version transcoded reads as drift and is rebuilt in seconds.
   `drift-check` runs the check (only once the install is finished, since every
   finding after that is a consequence of it), and the library IS the list: what
   should not be on the site belongs out of `/data/media`, not on a second

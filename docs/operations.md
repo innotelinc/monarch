@@ -185,8 +185,11 @@ python3 scripts/clipbucket-install.py --apply   # finish the install
 Applied and verified on `.46` (2026-09-22): 87 tables, login `302 → /`, the site
 `200` with `<title>Monarch Clips</title>`, the admin area `200` with the
 Administration Panel, and `includes/config.php` + `files/temp/install.me.not` in
-place. **`.56` still needs that same one command** — its volume measures empty
-too, and nothing in this repo reaches that host.
+place. **`.56` needed that same one command and has now had it** — measured
+there on 2026-09-22: `--check` reports `installed — 87 tables, config.php
+present, base_url https://tube.innotel.us, admin 'admin', installer locked`, the
+same shape as `.46`. The admin password went into that host's `.env` rather than
+into a terminal, for the reason below.
 
 Two steps the wizard gets for free and neither is optional:
 
@@ -255,24 +258,34 @@ container user cannot read is listed fine and answered 403). It needs no
 `ffmpeg`, so the media host is judged on what it actually serves; `drift-check`
 runs it after the catalogue check.
 
-**Nothing is re-encoded unless you ask.** Measured over the library as it stood
-on 2026-09-22 — 2 H.264/AAC MP4, 8 H.264-in-MKV, 5 HEVC — an MP4 that is already
-web-playable is **hardlinked** (no copy at all: the media root and the docker
-volume share a filesystem, so this costs no space and no time) and an MKV is
-remuxed with `-c:v copy` and its audio converted to stereo AAC. HEVC is
-remuxed the same way. A hardlinked file has **two names**, which is the trade the
-free copy makes: deleting the video in ClipBucket removes one name and leaves the
-library's file intact, while anything that rewrote the catalogue's file *in
-place* would rewrite the library's too — which is why nothing may be asked to
-modify `files/videos/imported/`, and why the tool only ever replaces a file it
-wrote itself. A remux is seconds per file; a
-re-encode is not, so HEVC is left as HEVC unless `--reencode-hevc` is passed —
-measured on an 8-core host at 24s of wall time per minute of 1080p — **~2.5h for
-this library's five HEVC items**, and proportionally longer on fewer cores.
-**The consequence is worth stating plainly:** those items play where the
-client decodes HEVC (Chrome/Safari/Edge on modern hardware) and not in Firefox.
-Every apply ends by naming how many items are in that state, so it is a recorded
-limitation rather than a surprise.
+**Nothing is ever re-encoded.** Measured over the library as it stood on
+2026-09-22 — 2 H.264/AAC MP4, 8 H.264-in-MKV, 5 HEVC on `.46`; 24 H.264 and 8
+HEVC on `.56` — an MP4 that is already web-playable is **hardlinked** (no copy
+at all: the media root and the docker volume share a filesystem, so this costs
+no space and no time), an MKV is remuxed with `-c:v copy` and its audio
+converted to stereo AAC, and HEVC is remuxed the same way. A hardlinked file has
+**two names**, which is the trade the free copy makes: deleting the video in
+ClipBucket removes one name and leaves the library's file intact, while anything
+that rewrote the catalogue's file *in place* would rewrite the library's too —
+which is why nothing may be asked to modify `files/videos/imported/`, and why
+the tool only ever replaces a file it wrote itself.
+
+**A stream copy is an invariant, not an intention.** The copy keeps the
+source's video codec, and a copy whose codec is not the one a stream copy would
+carry is drift: `--apply` rebuilds it from the source. That rule is what makes
+"we do not transcode" checkable rather than a promise — an earlier version of
+this tool *did* offer a HEVC→H.264 transcode as an opt-in flag, and it was used
+on this estate (7 items on `.56`, 5 on `.46`, hours of CPU); those copies now
+read as converted and are re-remuxed back to HEVC in seconds. The one case that
+still re-encodes is a source codec no browser decodes at all, where there is no
+cheaper way to make it playable, and no item in either library is in it.
+
+**The consequence is worth stating plainly:** HEVC items play where the client
+decodes HEVC (Chrome/Safari/Edge on modern hardware) and **not in Firefox**, and
+that is accepted rather than bought off with a transcode. Both `--check` and
+`--apply` end by naming how many items carry HEVC — measured 8 on `.56` and 5 on
+`.46` — so it is a recorded number rather than a surprise, and `drift-check`
+reports it on a clean run as well as a drifted one.
 
 The library root is deployment state, named by `CLIPBUCKET_MEDIA_ROOT`
 (`--media-root`), and defaults to `/data/media` — the same path Jellyfin reads.

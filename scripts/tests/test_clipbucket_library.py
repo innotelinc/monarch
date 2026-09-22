@@ -18,6 +18,7 @@ Run:  python3 -m unittest discover -s scripts/tests -v
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import os
 import re
 import sys
@@ -215,12 +216,22 @@ class MediaDecision(unittest.TestCase):
     def test_an_mkv_is_not_mistaken_for_an_mp4(self):
         self.assertEqual(cl.media_decision("h264", "aac", "matroska,webm"), "remux")
 
-    def test_hevc_is_remuxed_unless_the_transcode_is_asked_for(self):
+    def test_hevc_is_remuxed_and_cannot_be_asked_to_transcode(self):
         self.assertEqual(cl.media_decision("hevc", "eac3", "matroska"), "remux")
-        self.assertEqual(cl.media_decision("hevc", "eac3", "matroska", True), "transcode")
+        # No "how hard may I try" argument exists: the decision follows from the
+        # source, so an import is never hours long because of a flag.
+        params = list(inspect.signature(cl.media_decision).parameters)
+        self.assertEqual(params, ["video_codec", "audio_codec", "container"])
 
     def test_an_exotic_video_codec_is_transcoded(self):
+        # Kept for the one case with no cheaper option, and unreachable from
+        # HEVC: a stream copy of an MPEG-4 in an AVI plays nowhere.
         self.assertEqual(cl.media_decision("mpeg4", "mp3", "avi"), "transcode")
+
+    def test_a_faithful_copy_carries_the_source_codec(self):
+        self.assertEqual(cl.expected_codec("hevc", "remux"), "hevc")
+        self.assertEqual(cl.expected_codec("h264", "link"), "h264")
+        self.assertEqual(cl.expected_codec("mpeg4", "transcode"), "h264")
 
 
 class MediaCommand(unittest.TestCase):
@@ -235,7 +246,7 @@ class MediaCommand(unittest.TestCase):
         self.assertIn("hvc1", cl.media_argv("/in/x.mkv", "/out/x.mp4", "remux", "hevc"))
 
     def test_a_transcode_re_encodes_video_to_h264(self):
-        argv = cl.media_argv("/in/x.mkv", "/out/x.mp4", "transcode", "hevc")
+        argv = cl.media_argv("/in/x.avi", "/out/x.mp4", "transcode", "mpeg4")
         self.assertEqual(argv[argv.index("-c:v") + 1], "libx264")
         self.assertIn("yuv420p", argv)
 
@@ -383,87 +394,159 @@ class Verdict(unittest.TestCase):
             cl.evaluate(self._facts(install_version="5.4.0"))
 
 
-class ReusableCopy(unittest.TestCase):
-    """When an existing file may be left alone — the difference `--reencode-hevc` makes."""
+def _item() -> "cl.Item":
+    return cl.Item(
+        kind="episode", source="/lib/tv/Show/e.mkv", rel="tv/Show/e.mkv",
+        category="TV Shows", title="Show - S01E01 - Pilot", tag="Show",
+        season=1, episode=1,
+    )
 
-    def test_a_complete_h264_copy_is_left_alone(self):
+
+def _facts(video_codec: str) -> dict:
+    return {"width": 1920, "height": 1080, "duration": 100,
+            "video_codec": video_codec, "audio_codec": "aac", "container": "matroska"}
+
+
+class _Materialise:
+    """Shared plumbing for the materialise tests.
+
+    `media_is_complete` is mocked to say "written to the end" so these tests are
+    about the codec rule, and the ffmpeg stand-in writes the destination file
+    because `materialise_media` checks that its own artifact appeared.
+    """
+
+    def _run(
+        self, source_facts: dict, find_codec: str,
+        want_writes: bool = False, existing_copy: bool = False,
+    ):
+        item = _item()
+        ctx = tempfile.TemporaryDirectory()
+        videos = ctx.__enter__()
+        dest = os.path.join(videos, cl.media_name(item.file_name, cl.quality_for(1920, 1080)))
+        # An earlier run's artifact, already at the name this run wants: the
+        # only thing that makes it "not the video" is what it holds.
+        if existing_copy:
+            with open(dest, "wb") as fh:
+                fh.write(b"0" * 16)
+        written = []
+
+        def ffmpeg(argv, *_args, **_kwargs):
+            written.append(argv)
+            if want_writes:
+                with open(dest, "wb") as fh:
+                    fh.write(b"0" * 16)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(cl, "media_is_complete", return_value=True), \
+             mock.patch.object(cl, "probe", return_value={"video_codec": find_codec, "duration": 100}), \
+             mock.patch.object(cl, "run", side_effect=ffmpeg):
+            note, quality = cl.materialise_media(item, source_facts, videos)
+        ctx.__exit__(None, None, None)
+        return note, written, dest
+
+
+class ReusableCopy(_Materialise, unittest.TestCase):
+    """When an existing file may be left alone — a stream copy of its source."""
+
+    def test_a_faithful_h264_copy_is_left_alone(self):
         with mock.patch.object(cl, "media_is_complete", return_value=True), \
              mock.patch.object(cl, "probe", return_value={"video_codec": "h264"}):
-            self.assertTrue(cl.copy_is_reusable("/v/x-1080.mp4", 100, False))
+            self.assertTrue(cl.copy_is_reusable("/v/x-1080.mp4", 100, "h264"))
 
-    def test_an_hevc_copy_is_left_alone_when_h264_was_not_asked_for(self):
+    def test_a_faithful_hevc_copy_is_left_alone(self):
+        # The library keeps its codec, so an HEVC copy that *is* a stream copy
+        # of its source is finished work, not something to redo.
         with mock.patch.object(cl, "media_is_complete", return_value=True), \
              mock.patch.object(cl, "probe", return_value={"video_codec": cl.HEVC}):
-            self.assertTrue(cl.copy_is_reusable("/v/x-1080.mp4", 100, False))
+            self.assertTrue(cl.copy_is_reusable("/v/x-1080.mp4", 100, cl.HEVC))
 
-    def test_an_hevc_copy_is_rebuilt_when_h264_was_asked_for(self):
-        # The whole reason the flag exists: without this the second run would
-        # report the flagged items as "already there" and convert nothing.
-        with mock.patch.object(cl, "media_is_complete", return_value=True), \
-             mock.patch.object(cl, "probe", return_value={"video_codec": cl.HEVC}):
-            self.assertFalse(cl.copy_is_reusable("/v/x-1080.mp4", 100, True))
-
-    def test_a_converted_copy_is_left_alone_on_a_second_transcode_run(self):
+    def test_a_converted_copy_is_not_reusable(self):
+        # The repair rule: an H.264 copy of an HEVC source is what an earlier
+        # version of this tool produced, and "already there" is exactly the
+        # answer that would leave it there.
         with mock.patch.object(cl, "media_is_complete", return_value=True), \
              mock.patch.object(cl, "probe", return_value={"video_codec": "h264"}):
-            self.assertTrue(cl.copy_is_reusable("/v/x-1080.mp4", 100, True))
+            self.assertFalse(cl.copy_is_reusable("/v/x-1080.mp4", 100, cl.HEVC))
 
     def test_an_incomplete_file_is_never_reusable(self):
         with mock.patch.object(cl, "media_is_complete", return_value=False), \
              mock.patch.object(cl, "probe", return_value={"video_codec": "h264"}):
-            self.assertFalse(cl.copy_is_reusable("/v/x-1080.mp4", 100, False))
+            self.assertFalse(cl.copy_is_reusable("/v/x-1080.mp4", 100, "h264"))
 
     def test_a_file_ffprobe_cannot_read_is_not_called_good(self):
         with mock.patch.object(cl, "media_is_complete", return_value=True), \
              mock.patch.object(cl, "probe", side_effect=cl.ImportError_("no")):
-            self.assertFalse(cl.copy_is_reusable("/v/x-1080.mp4", 100, True))
+            self.assertFalse(cl.copy_is_reusable("/v/x-1080.mp4", 100, cl.HEVC))
 
-    def test_the_replacement_says_which_reason_it_was(self):
+    def test_a_converted_copy_is_named_as_converted_and_rebuilt(self):
         # "replaced an incomplete file" over a file that was whole reads as data
-        # loss, so the note a transcode run prints has to distinguish them.
-        item = cl.Item(
-            kind="episode", source="/lib/tv/Show/e.mkv", rel="tv/Show/e.mkv",
-            category="TV Shows", title="Show - S01E01 - Pilot", tag="Show",
-            season=1, episode=1,
+        # loss, so the note has to say the file was complete and what it held.
+        note, written, _dest = self._run(
+            _facts(cl.HEVC), find_codec="h264", want_writes=True, existing_copy=True
         )
-        source_facts = {"width": 1920, "height": 1080, "duration": 100,
-                        "video_codec": cl.HEVC, "audio_codec": "aac", "container": "matroska"}
+        self.assertNotIn("incomplete", note)
+        self.assertIn("converted (h264)", note)
+        self.assertIn("stream copy of the hevc source", note)
+        self.assertEqual(len(written), 1, "the copy has to be rebuilt, not adopted")
+        # ...and rebuilt as a stream copy, not a second transcode.
+        self.assertEqual(written[0][written[0].index("-c:v") + 1], "copy")
+        self.assertIn("remuxed (video copied, audio to stereo AAC)", note)
+
+    def test_an_incomplete_copy_says_so(self):
+        item = _item()
         with tempfile.TemporaryDirectory() as videos:
             dest = os.path.join(
                 videos, cl.media_name(item.file_name, cl.quality_for(1920, 1080))
             )
             with open(dest, "wb") as fh:
                 fh.write(b"0" * 16)
-            with mock.patch.object(cl, "media_is_complete", return_value=True), \
-                 mock.patch.object(cl, "probe", return_value={"video_codec": cl.HEVC, "duration": 100}), \
-                 mock.patch.object(cl, "run") as runner:
-                # The conversion's own artifact: the real ffmpeg writes it, so
-                # the stand-in has to as well or the caller sees a failed run.
-                def wrote_something(_argv, *_args, **_kwargs):
-                    with open(dest, "wb") as fh:
-                        fh.write(b"0" * 16)
-                    return mock.Mock(returncode=0)
-
-                runner.side_effect = wrote_something
-                note, _quality = cl.materialise_media(item, source_facts, videos, True)
-            self.assertNotIn("incomplete", note)
-            self.assertIn("replaced an HEVC stream copy", note)
+            # `media_is_complete` is the real one here: the file exists, and the
+            # probe says it is 10s of a 100s video, which is what makes it
+            # incomplete rather than the note being a guess.
+            with mock.patch.object(
+                cl, "probe", return_value={"video_codec": "h264", "duration": 10}
+            ):
+                reason = cl.replacement_reason(dest, 100, "remux", cl.HEVC)
+        self.assertEqual(reason, "replaced an incomplete file")
 
     def test_an_unchanged_item_is_left_alone(self):
-        item = cl.Item(
-            kind="episode", source="/lib/tv/Show/e.mkv", rel="tv/Show/e.mkv",
-            category="TV Shows", title="Show - S01E01 - Pilot", tag="Show",
-            season=1, episode=1,
-        )
-        source_facts = {"width": 1920, "height": 1080, "duration": 100,
-                        "video_codec": cl.HEVC, "audio_codec": "aac", "container": "matroska"}
-        with tempfile.TemporaryDirectory() as videos:
-            with mock.patch.object(cl, "media_is_complete", return_value=True), \
-                 mock.patch.object(cl, "probe", return_value={"video_codec": "h264"}), \
-                 mock.patch.object(cl, "run") as runner:
-                note, _quality = cl.materialise_media(item, source_facts, videos, True)
+        note, written, _dest = self._run(_facts(cl.HEVC), find_codec=cl.HEVC)
         self.assertEqual(note, "already there")
-        runner.assert_not_called()
+        self.assertEqual(written, [])
+
+    def _faithful(self, copy_codec: str) -> str:
+        item = _item()
+        with tempfile.TemporaryDirectory() as videos:
+            dest = os.path.join(videos, cl.media_name(item.file_name, 1080))
+            with open(dest, "wb") as fh:
+                fh.write(b"0" * 16)
+
+            def probe(path, _dest=dest):
+                return {
+                    "video_codec": copy_codec if path == _dest else cl.HEVC,
+                    "audio_codec": "aac", "container": "matroska", "duration": 100,
+                }
+
+            with mock.patch.object(cl, "probe", side_effect=probe):
+                return cl.media_is_faithful(item, videos)
+
+    def test_a_faithful_copy_is_not_drift(self):
+        self.assertEqual(self._faithful(cl.HEVC), "")
+
+    def test_a_converted_copy_is_drift_not_silence(self):
+        # `--check` has to see what `--apply` would replace: a check that called
+        # a host in sync while the apply rewrote its media is the one answer a
+        # drift check may never give.
+        why = self._faithful("h264")
+        self.assertIn("h264", why)
+        self.assertIn(cl.HEVC, why)
+
+    def test_drift_includes_a_converted_copy(self):
+        report = cl.Report(
+            ok=[], missing_rows=[], missing_media=[], missing_thumbs=[],
+            missing_collections=[], unparsed=[], converted=["x: whatever"],
+        )
+        self.assertTrue(report.drift)
 
 
 class SeriesGroups(unittest.TestCase):
