@@ -247,7 +247,8 @@ row is invisible.
 on 2026-09-22 — 2 H.264/AAC MP4, 8 H.264-in-MKV, 5 HEVC — an MP4 that is already
 web-playable is **hardlinked** (no copy at all: the media root and the docker
 volume share a filesystem, so this costs no space and no time) and an MKV is
-remuxed with `-c:v copy` and its audio convertedto stereo AAC. HEVC is remuxed the same way. A hardlinked file has **two names**, which is the trade the
+remuxed with `-c:v copy` and its audio converted to stereo AAC. HEVC is
+remuxed the same way. A hardlinked file has **two names**, which is the trade the
 free copy makes: deleting the video in ClipBucket removes one name and leaves the
 library's file intact, while anything that rewrote the catalogue's file *in
 place* would rewrite the library's too — which is why nothing may be asked to
@@ -263,6 +264,31 @@ limitation rather than a surprise.
 
 The library root is deployment state, named by `CLIPBUCKET_MEDIA_ROOT`
 (`--media-root`), and defaults to `/data/media` — the same path Jellyfin reads.
+
+### The media host's order of operations
+
+The two tools run **on the host, not in the container** — they read
+`/data/media` and the file volume directly, and reach the database through
+`docker exec` — so they need `ffmpeg` and `ffprobe` on the *host's* `PATH`.
+Having them inside the app image is not enough, and a host without them stops at
+`ffprobe: command not found` rather than doing something clever:
+
+```bash
+apt-get install -y ffmpeg            # Ubuntu 24.04 ships 6.1.1; the media host
+                                     # had none until 2026-09-22
+python3 scripts/clipbucket-install.py --apply    # first: schema, config, admin
+python3 scripts/clipbucket-library.py --apply    # then: the library
+```
+
+Both are idempotent and safe to re-run; on a host whose install is already
+finished, `--check` on each says so and `--apply` is a no-op. The measured first
+run on `.56` (2026-09-22): 12 films + 10 episodes, 4 remuxed and 2 hardlinked in
+the first four minutes, 25 thumbnails per item.
+
+Set `CLIPBUCKET_ADMIN_PASSWORD` in `.env` before the install where the host is
+built from that file. Left unset, the installer generates one and prints it once
+— which is fine for a one-off and wrong for a host that is rebuilt from `.env`,
+because the printed value goes with the terminal. `.56`'s is set there now.
 
 An interrupted import is not a silent one: a part-written MP4 is detected by its
 own duration against the source's and replaced, because "the file exists and is
