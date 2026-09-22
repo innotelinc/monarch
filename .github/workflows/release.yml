@@ -14,8 +14,14 @@
 #   release-images  docker image bundle (offline install) — parallel VM
 #   release-iso     bootable live/install ISO — parallel VM
 #
+# Version: derived by scripts/release-version.py from the HIGHEST existing
+#   version (tags + releases), never from the newest release record — see that
+#   script for the v1.23 collision that rule came from. `build-images` computes
+#   it once and every other job consumes that output, so the images and the
+#   release can never name different versions.
+#
 # Inputs:
-#   minor | major   - version bump from the last release (default: minor)
+#   minor | major   - version bump from the highest release (default: minor)
 #   lightweight     - skip the docker image bundle + live ISO (quick test only)
 #
 # Asset policy (hosted runners):
@@ -78,32 +84,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The one place the version is decided. Everything downstream — image
+      # tags, the release, the ISO, the summary — reads this output, so a second
+      # computation cannot disagree with the release it is naming.
+      #
+      # On a tag push the tag IS the version (--tag), which keeps
+      # `git tag v1.24 && git push --tags` cutting exactly v1.24.
       - name: Compute release version
         id: version
         env:
           BUMP: ${{ github.event.inputs.bump || 'minor' }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -n "${GITHUB_REF_NAME}" ]; then
-            echo "tagged release: ${GITHUB_REF_NAME}"
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            exit 0
+          set -euo pipefail
+          args=(--bump "$BUMP")
+          if [ -n "$TAG" ]; then
+            args+=(--tag "$TAG")
           fi
-          LAST="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
-          LAST="${LAST#v}"
-          if [ -z "$LAST" ]; then
-            echo "no prior release; starting at v1.0.0"
-            echo "version=v1.0.0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          MAJOR="${LAST%%.*}"; REST="${LAST#*.}"; MINOR="${REST%%.*}"
-          [ -n "$MAJOR" ] && [ -n "$MINOR" ] || { echo "could not parse last release '$LAST'" >&2; exit 1; }
-          if [ "$BUMP" = "major" ]; then
-            MAJOR=$((MAJOR + 1)); MINOR=0
-          else
-            MINOR=$((MINOR + 1))
-          fi
-          echo "last release: v$LAST → next: v${MAJOR}.${MINOR}"
-          echo "version=v${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
+          VERSION="$(python3 scripts/release-version.py "${args[@]}")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -164,40 +163,16 @@ jobs:
     name: Cut release
     needs: build-images
     runs-on: ubuntu-latest
+    # The version is NOT recomputed here. Two jobs deriving it independently is
+    # how the images and the release come to name different versions when a
+    # release is cut in between them; this job reports what was actually built.
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ needs.build-images.outputs.version }}
       release_url: ${{ steps.cut.outputs.release_url }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: Compute release version
-        id: version
-        env:
-          BUMP: ${{ github.event.inputs.bump || 'minor' }}
-        run: |
-          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -n "${GITHUB_REF_NAME}" ]; then
-            echo "tagged release: ${GITHUB_REF_NAME}"
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LAST="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
-          LAST="${LAST#v}"
-          if [ -z "$LAST" ]; then
-            echo "no prior release; starting at v1.0.0"
-            echo "version=v1.0.0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          MAJOR="${LAST%%.*}"; REST="${LAST#*.}"; MINOR="${REST%%.*}"
-          [ -n "$MAJOR" ] && [ -n "$MINOR" ] || { echo "could not parse last release '$LAST'" >&2; exit 1; }
-          if [ "$BUMP" = "major" ]; then
-            MAJOR=$((MAJOR + 1)); MINOR=0
-          else
-            MINOR=$((MINOR + 1))
-          fi
-          echo "last release: v$LAST → next: v${MAJOR}.${MINOR}"
-          echo "version=v${MAJOR}.${MINOR}" >> "$GITHUB_OUTPUT"
 
       - name: Build source bundle
         run: ./scripts/build-source-bundle.sh
@@ -205,10 +180,15 @@ jobs:
       - name: Build deployment payload
         run: ./scripts/build-offline-bundle.sh --deployment-only
 
+      # Idempotent on purpose. `gh release create` fails outright when the
+      # name is taken, which is what made a re-run of this workflow (or a tag
+      # pushed for a version released earlier) fail with "release with the same
+      # tag name already exists" — leaving the run red over a release that is
+      # already correct. An existing release is refreshed instead.
       - name: Cut release
         id: cut
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.build-images.outputs.version }}
           LITE: ${{ github.event.inputs.lightweight }}
         run: |
           if [ "$LITE" = "true" ]; then
@@ -237,13 +217,23 @@ jobs:
           - **Offline** — \`scripts/fetch-offline-bundle.sh\` pulls the deployment bundle + docker image parts for a fully offline install.
           NOTESEOF
           )
-          gh release create "$VERSION" \
-            dist/offline-bundle/monarch-deployment.tar.gz \
-            dist/offline-bundle/SHA256SUMS \
-            dist/source-bundle/monarch-source-bundle.tar.gz \
-            dist/source-bundle/monarch-source-bundle.tar.gz.sha256 \
-            --title "Monarch Media Platform $VERSION" \
-            --notes "$NOTES"
+          TITLE="Monarch Media Platform $VERSION"
+          assets=(
+            dist/offline-bundle/monarch-deployment.tar.gz
+            dist/offline-bundle/SHA256SUMS
+            dist/source-bundle/monarch-source-bundle.tar.gz
+            dist/source-bundle/monarch-source-bundle.tar.gz.sha256
+          )
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::release $VERSION already exists — refreshing its notes and assets"
+            # --draft=false publishes it: a release run's outcome is a published
+            # release, and a draft holding this version would otherwise stay
+            # invisible while blocking the name.
+            gh release edit "$VERSION" --title "$TITLE" --notes "$NOTES" --draft=false
+            gh release upload "$VERSION" "${assets[@]}" --clobber
+          else
+            gh release create "$VERSION" "${assets[@]}" --title "$TITLE" --notes "$NOTES"
+          fi
           echo "release_url=$(gh release view "$VERSION" --json url -q .url)" >> "$GITHUB_OUTPUT"
 
   # ── Docker image bundle (separate VM so its large peak doesn't crowd the
