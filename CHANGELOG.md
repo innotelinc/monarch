@@ -12,6 +12,44 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **ClipBucket can no longer start with a blank MariaDB password.** The password
+  left the compose file on 2026-09-19 and became `CLIPBUCKET_DB_PASSWORD`, but an
+  `.env` written before that day has no such variable — so the runtime was handed
+  `MYSQL_PASSWORD=""`. `clipbucket/entrypoint.sh` uses that value only when there
+  is no database yet, so it bit on a fresh volume (a new host, or a dropped one) by
+  creating the `clipbucket` user with an empty password. That works, which is
+  exactly why nothing reported it: `docker compose config` warned and no run
+  failed. The compose now refuses the stack instead of guessing
+  (`${CLIPBUCKET_DB_PASSWORD:?set … in .env}`, the shape NPM and Capstone already
+  use), and `.env.example` plus `docs/operations.md` record what the value has to
+  be on a host whose `clipbucket_db` volume already exists — the value it was
+  initialized with, because a different one fails at the installer.
+
+- **ClipBucket's install is a command, not a browser wizard.** The app ships a
+  nine-step installer behind `upload/cb_install/`, and a deployment has no browser
+  in it — so a host whose volume never got the wizard sat serving the installer,
+  which looks the same as an installed site with no content. `scripts/
+  clipbucket-install.py` replays the wizard's own steps (the 17 SQL files in
+  `ajax.php`'s order, the version row, `includes/config.php` from its template,
+  the admin account, the site settings, the lock), `--check` reports the state for
+  `drift-check`, and `--apply` is idempotent. Two of those steps are load-bearing
+  and were found by breaking on them: without the **version row** every
+  *logged-in* page returns HTTP 500 from inside `User->get()` (anonymous pages are
+  fine, which is why it reads like a session bug), and without removing
+  `files/temp/install.me` the browser installer stays reachable over the finished
+  site.
+
+- **"ClipBucket is migrated" now says which half.** The migration record claimed
+  the import brought "80 database tables, 2 users, 0 video rows". Measured on
+  2026-09-22, the `clipbucket/` directory in the `monarch_clipbucket_db` volume
+  holds one entry (`db.opt`) — no tables — while the files volume holds the freshly
+  cloned application source, so the container serves its **installer**. The record
+  now states the measured state and both recovery paths, and the route table beside
+  it carries the `.56` targets and today's caller-visible statuses rather than the
+  pre-move `.46` ones. Content is a separate question and this release does not
+  answer it: `.72` — the documented rollback source — answers on no port as of
+  2026-09-22, so the videos are either in a dump taken before that or not at all.
+
 - **The LDAP outpost image tracks the Authentik server version, and drifting
   apart is now a drift finding.** `authentik-ldap` is a *client* of the Cerulean
   Authentik and has to sit on the server's version line; the compose comment has
@@ -48,9 +86,49 @@ are written by hand and describe the behaviour change, not the commits.
   account unreachable when the gateway is the only way in. `scripts/seerr-owner.py`
   hands it over by **swapping** the two accounts (identity, permissions, every
   foreign key onto `user.id`, and the live sessions), so the displaced admin keeps
-  its row, its data and its admin bit. The account is named once in the invariants
-  manifest (`jellyseerr.owner`, `MONARCH_SEERR_OWNER`) and `drift-check` now fails
+  its row, its data and its admin bit.  The account is named once in the invariants manifest (`jellyseerr.owner`,
+  `MONARCH_SEERR_OWNER`) and `drift-check` now fails
   when Seerr is owned by somebody else.
+
+- **ClipBucket's catalogue is the media library, and `tube.innotel.us` now has
+  something in it.** A finished install is an *empty* site — measured
+  2026-09-22, `cb_video` held 0 rows against a `files/videos/` holding only the
+  app's own `example.mp4` — so the site answered correctly and showed nothing,
+  which is the same thing a broken import looks like. `scripts/clipbucket-library.py`
+  imports `/data/media` (what Jellyfin serves: movies and TV) into ClipBucket's
+  catalogue and is idempotent, read-only against the library, and reportable:
+
+  ```bash
+  python3 scripts/clipbucket-library.py --check   # 0 in sync, 1 behind, 2 cannot tell
+  python3 scripts/clipbucket-library.py --apply
+  ```
+
+  Three things have to be true for a video to be visible and each fails
+  invisibly on its own, so one tool owns all three: a `cb_video` row in the
+  state the browse query requires (filed under **Movies** or **TV Shows**, the
+  show name as a tag), a playable file under the name the app itself *builds*
+  (`files/videos/imported/<file_name>-<quality>.mp4` with `video_files` set —
+  found by breaking on it: a bare `<file_name>.mp4` is read by
+  `update_video_files()` as a resolution, so the player then requests a second
+  file that was never written), and the five `num_thumbs` thumbnails at the five
+  `VideoThumbs` resolutions with their `cb_video_image`/`cb_video_thumb` rows,
+  since a row without them renders a broken card. An item's identity is its
+  **path**, so a re-run converges rather than duplicating and a title edit in the
+  admin area is not undone.
+
+  Nothing is re-encoded unless asked for. Measured across the library (2
+  H.264/AAC MP4, 8 H.264 in MKV, 5 HEVC): an already-web-playable MP4 is
+  **hardlinked** (the media root and the docker volume share a filesystem, so it
+  costs nothing), an MKV is remuxed with `-c:v copy` and audio to stereo AAC.
+  HEVC is remuxed too, which leaves it playable where the client decodes HEVC
+  and not in Firefox — a full transcode measured 24s of wall time per minute of
+  1080p on an 8-core host, ~2.5h for this library's five HEVC items, so it is
+  `--reencode-hevc` and every apply ends by naming how many items are still in
+  that state.
+  `drift-check` runs the check (only once the install is finished, since every
+  finding after that is a consequence of it), and the library IS the list: what
+  should not be on the site belongs out of `/data/media`, not on a second
+  exclusion list that would drift from it.
 
 ### Fixed
 

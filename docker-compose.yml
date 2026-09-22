@@ -536,7 +536,18 @@ services:
       # service connects to it. It is baked into the `clipbucket_db` volume at
       # first boot, so changing it later means dropping that volume and letting
       # the installer run again, not just editing the value in `.env`.
-      MYSQL_PASSWORD: ${CLIPBUCKET_DB_PASSWORD}
+      #
+      # REQUIRED, and enforced as such. With a bare `${CLIPBUCKET_DB_PASSWORD}`
+      # and nothing to fall back on, an `.env` written before the variable existed
+      # (anything before 2026-09-19) handed the runtime `MYSQL_PASSWORD=""`.
+      # `entrypoint.sh` uses that value only when there is no database yet
+      # (`/var/lib/mysql/clipbucket` absent), so it bit on a FRESH volume — a new
+      # host, or a dropped volume — by creating the clipbucket user with an EMPTY
+      # password. That works, which is exactly why nothing reported it. A stack
+      # that will not start is the better failure, and the message names the
+      # repair. See docs/operations.md for the value a host with an existing
+      # `clipbucket_db` volume needs.
+      MYSQL_PASSWORD: "${CLIPBUCKET_DB_PASSWORD:?set CLIPBUCKET_DB_PASSWORD in .env}"
       UID: 1000
       GID: 1000
     volumes:

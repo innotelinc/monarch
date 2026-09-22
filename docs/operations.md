@@ -96,12 +96,19 @@ only touches services that are still unconfigured.
 | **Monarch AI** | http://localhost:8002 | `monarch-recs` - AI recommendations + smart search (internal API) |
 | **Monarch Health** | http://localhost:8003 | `monarch-health` - media health analytics (internal API) |
 | Nginx Proxy Manager | http://localhost:2081 | `admin.monarch.innotel.us`; reverse proxy + wildcard SSL (container `:81`) |
-| Clipbucket | http://localhost:8098 | `https://tube.innotel.us`; migrated from `.72`, database and files imported |
+| Clipbucket | http://localhost:8098 | `https://tube.innotel.us`, gated by `clipbucket-sso`; installed with `scripts/clipbucket-install.py`, and its catalogue holds the media library with `scripts/clipbucket-library.py` — see [ClipBucket's library](#clipbuckets-library) |
 | IPTV guide | http://localhost:3011 | `tv.monarch.innotel.us`; XMLTV guide (`/guide.xml`) for Jellyfin Live TV (host 3011 → container 3000) |
 | TVHeadend / NextPVR / Dispatcharr | 9981 / 8866 / 9191 | optional legacy live-TV backends (Jellyfin Live TV uses a native M3U tuner, so these are not required) |
 
 
 ## Completed media migration from the legacy `.72` server
+
+> **This section is the `.72` → `.46` record, and the stack has since moved.**
+> Monarch runs on **`192.168.1.56`** (2026-09-16); `.46` kept Cerulean, Atlas,
+> Distro, Magnate, Signara, ONYX and Rizz Aura. Read the plain `.46` and
+> `localhost` below as "the media host at the time", and trust the route table
+> over the prose — the four media names were re-pointed at the `.56` gateways on
+> 2026-09-17, which is also why every target in it is now a port on `.56`.
 
 The Jellyfin media and user migration to the Monarch instance on `.46`
 (`192.168.1.46`) is complete. The active service is published on host port
@@ -113,11 +120,13 @@ https://media.magnate.innotel.us
 ```
 
 The new instance contains four canonical libraries and the migrated
-Authentik-backed profiles. During the broader migration, the legacy
-`media.innotel.us` endpoint is intentionally active again and routes to the
-original Jellyfin on `.72:8096`; it must remain available until the remaining
-`.72` services have been migrated. The new `.46` endpoint remains available
-at `media.magnate.innotel.us`:
+Authentik-backed profiles. The media host is `.56` now and the edge followed it:
+`media.innotel.us` and `media.magnate.innotel.us` both answer from the `.56`
+Jellyfin — measured 2026-09-22, each is a `302` to its own `/web/` route, with
+the sign-in page served by the app rather than by a gateway redirect. The
+migration-era note that `media.innotel.us` was still the original Jellyfin on
+`.72:8096` is no longer true and is not repeated here; the route table below
+carries the current targets.
 
 | Library | Path | Current items |
 |---------|------|---------------|
@@ -134,11 +143,11 @@ before cutover; the real source Jellyfin database was preserved while the
 obsolete zero-byte `library.db` artifact was removed.
 
 The legacy `.72` machine still hosts unrelated services (including
-databases and TV/download services), as well as the legacy Jellyfin
-currently published at `media.innotel.us`. The billing-api and Clipbucket
-on .72 are retired (Magnate handles billing; Clipbucket is migrated to
-.46). Do not remove that compose project or shared `/docker/appdata` until
-each remaining service has been separately migrated or decommissioned.
+databases and TV/download services). The billing-api and Clipbucket
+on `.72` are retired (Magnate handles billing). Do not remove that compose
+project or shared `/docker/appdata` until each remaining service has been
+separately migrated or decommissioned — and in Clipbucket's case, see the
+schema note below before treating its data as migrated.
 
 ### Legacy `.72` migration boundary
 
@@ -154,14 +163,110 @@ The following remain unique or have not yet been verified on `.46`:
 - Dispatcharr, TVHeadend, NextPVR, jfa-go, Requestarr, Transmission, Deluge,
   SABnzbd, and autobrr.
 
-Clipbucket has now been staged on `.46` at host port `8098` and its public
-route has been cut over to `https://tube.innotel.us`. The imported snapshot
-contains 80 database tables, 2 users, 0 video rows, and the complete
-application/upload tree. The `.72` Clipbucket container remains running on
-`:8088` as a rollback copy; its application files and database were not
-deleted. The NPM database was backed up on `.71` before edge repair, and stale
-generated NPM files were retained under
+Clipbucket is staged at host port `8098` and its public route is
+`https://tube.innotel.us`, gated by `clipbucket-sso` (the name answers `302` to
+Cerulean Authentik with `client_id=monarch-media`, measured 2026-09-22).
+
+**Its schema was empty — the "80 database tables" this paragraph used to claim was
+not what was on disk, and finishing the install is a command now instead of a
+browser wizard.** Measured 2026-09-22: `monarch_clipbucket_db` held a
+`clipbucket/` directory whose only entry was `db.opt` (no tables) while
+`monarch_clipbucket_files` held the freshly cloned application source, so the name
+served its installer — `302 → /cb_install`.
+
+`scripts/clipbucket-install.py` replays what `upload/cb_install/ajax.php` does,
+so the install is repeatable, reportable and safe to re-run:
+
+```bash
+python3 scripts/clipbucket-install.py --check   # 0 installed, 1 not, 2 cannot tell
+python3 scripts/clipbucket-install.py --apply   # finish the install
+```
+
+Applied and verified on `.46` (2026-09-22): 87 tables, login `302 → /`, the site
+`200` with `<title>Monarch Clips</title>`, the admin area `200` with the
+Administration Panel, and `includes/config.php` + `files/temp/install.me.not` in
+place. **`.56` still needs that same one command** — its volume measures empty
+too, and nothing in this repo reaches that host.
+
+Two steps the wizard gets for free and neither is optional:
+
+- **The version row.** The app gates columns and queries on
+  `Update::IsCurrentDBVersionIsHigherOrEqualTo()`, which reads `cb_version`. With
+  that table empty, every *logged-in* page answered **HTTP 500**
+  (`array_key_exists(): Argument #2 ($array) must be of type array, false given`,
+  inside `User->get()`) while anonymous pages were fine — a symptom that reads
+  like a broken session, not a missing row.
+- **The lock.** `cb_install/ajax.php` runs while `files/temp/install.me` exists,
+  so leaving it behind keeps the browser installer reachable on a finished site.
+  `--apply` removes it and writes `install.me.not`.
+
+Nothing from `.72` was carried across: its documented rollback source answers on
+no port at all as of 2026-09-22, so the old videos are either in a dump taken
+while it still ran or nowhere. "Clipbucket is migrated" was true of the
+application files and false of the content, and the prose above is not what to
+book a retention decision on. The NPM database was backed up on `.71` before
+edge repair, and stale generated NPM files were retained under
 `/usr/src/proxy/backups/generated-pre-clipbucket-20260904164122`.
+
+### ClipBucket's library
+
+**The catalogue is the media library, not a migration of the old site.** What
+Jellyfin serves on this host (`/data/media/movies`, `/data/media/tv`) is what
+tube.innotel.us lists, put there by `scripts/clipbucket-library.py`:
+
+```bash
+python3 scripts/clipbucket-library.py --check   # 0 in sync, 1 behind, 2 cannot tell
+python3 scripts/clipbucket-library.py --apply   # import what is missing
+python3 scripts/clipbucket-library.py --apply --only tv --limit 2   # a first look
+```
+
+It is idempotent and reads the library read-only. An item's identity is its
+**path**, so a re-run converges instead of duplicating, editing a title in the
+admin area is not undone, and renaming nothing orphans a file.
+
+Three things have to be true for a video to be visible, and each fails
+invisibly on its own — which is why one tool owns all three rather than leaving
+them to hand-editing:
+
+- **A `cb_video` row** in the state the browse query requires
+  (`status='Successful'`, `active='yes'`, `broadcast='public'`,
+  `subscription_email='pending'`), filed under **Movies** or **TV Shows**, with
+the show name as a tag so a series is reachable as a set. An mp4 on disk with no
+row is invisible.
+- **A playable file** at `files/videos/imported/<file_name>-<quality>.mp4` with
+  `video_files` set to that quality. The name is not decoration: `get_video_files()`
+  *builds* it from the row and `update_video_files()` parses the quality back out
+  of the directory listing, so a bare `<file_name>.mp4` is read as a resolution
+  and the player then asks for a file that was never written.
+- **The card's thumbnails** — the five `num_thumbs` frames the app itself would
+  generate, at the five resolutions `VideoThumbs` declares, with the app's own
+  ffmpeg command and `cb_video_image`/`cb_video_thumb` rows behind them. A row
+  without them renders a broken image.
+
+**Nothing is re-encoded unless you ask.** Measured over the library as it stood
+on 2026-09-22 — 2 H.264/AAC MP4, 8 H.264-in-MKV, 5 HEVC — an MP4 that is already
+web-playable is **hardlinked** (no copy at all: the media root and the docker
+volume share a filesystem, so this costs no space and no time) and an MKV is
+remuxed with `-c:v copy` and its audio convertedto stereo AAC. HEVC is remuxed the same way. A hardlinked file has **two names**, which is the trade the
+free copy makes: deleting the video in ClipBucket removes one name and leaves the
+library's file intact, while anything that rewrote the catalogue's file *in
+place* would rewrite the library's too — which is why nothing may be asked to
+modify `files/videos/imported/`, and why the tool only ever replaces a file it
+wrote itself. A remux is seconds per file; a
+re-encode is not, so HEVC is left as HEVC unless `--reencode-hevc` is passed —
+measured on an 8-core host at 24s of wall time per minute of 1080p — **~2.5h for
+this library's five HEVC items**, and proportionally longer on fewer cores.
+**The consequence is worth stating plainly:** those items play where the
+client decodes HEVC (Chrome/Safari/Edge on modern hardware) and not in Firefox.
+Every apply ends by naming how many items are in that state, so it is a recorded
+limitation rather than a surprise.
+
+The library root is deployment state, named by `CLIPBUCKET_MEDIA_ROOT`
+(`--media-root`), and defaults to `/data/media` — the same path Jellyfin reads.
+
+An interrupted import is not a silent one: a part-written MP4 is detected by its
+own duration against the source's and replaced, because "the file exists and is
+not empty" would otherwise catalogue a video that stops in the middle.
 
 The legacy billing API on `.72` is **RETIRED** — do not migrate it. Magnate
 subscribe.innotel.us is the single billing platform for the entire Innotel
@@ -169,13 +274,20 @@ ecosystem. All Stripe keys, webhook endpoints, and subscription logic live in
 Magnate. The old `api.monarch.innotel.us` route has been removed. Do not
 copy or reuse its live Stripe credentials in a new deployment.
 
-| Legacy route | Current target | Status / migration action |
-|--------------|----------------|---------------------------|
-| `media.innotel.us` | `.72:8096` | Intentionally retained during migration |
-| `media.magnate.innotel.us` | `.46:8097` | New migrated Jellyfin; verified |
-| `dl.innotel.us`, `movies.innotel.us`, `mp3.innotel.us`, `xxx.innotel.us` | `.72` downloader / *arr ports | Active legacy routes; retain until queue/config migration |
-| `tube.innotel.us` | `.46:8098` | Migrated Clipbucket; verified over public HTTPS. Rollback source remains on `.72:8088` |
-| `index.innotel.us`, `req.innotel.us`, `tv.innotel.us`, `brr.innotel.us`, `accounts.innotel.us`, `portainer.innotel.us` | `.72` services | Active legacy routes; verify each during its service migration |
+The `.72` targets this table used to list are no longer current. What the edge
+forwards to now, and what each name actually answered on **2026-09-22** (driven
+from `.46`, so the status is the caller-visible one rather than the config's
+intent):
+
+| Name | Edge forwards to (`192.168.1.56`) | Measured 2026-09-22 |
+|------|-----------------------------------|---------------------|
+| `media.innotel.us`, `media.magnate.innotel.us` | `14010` (`jellyfin-sso`) → `jellyfin:8096` | `302` to its own `/web/` — Jellyfin's page, no gateway redirect |
+| `tube.innotel.us` | `14011` (`clipbucket-sso`) → `clipbucket:80` | `302` to Cerulean Authentik (`client_id=monarch-media`) |
+| `tv.monarch.innotel.us` | `14012` (`iptv-sso`) → `iptv:3000` | `302` to Cerulean Authentik |
+| `requestrr.monarch.innotel.us` | `14013` (`requestrr-sso`) → `requestrr:4545` | `302` to Cerulean Authentik |
+| `dl.`, `movies.`, `mp3.`, `xxx.`, `index.innotel.us` | the *arr gateways in `14001`–`14009` | `302` to Cerulean Authentik |
+| `req.innotel.us`, `req.monarch.innotel.us` | Jellyseerr | `307` to `/login` — Seerr's own page |
+| `brr.innotel.us`, `accounts.innotel.us`, `portainer.innotel.us` | — | `502`: nothing answers behind them. Decide whether to retire the names or restore their targets |
 | `api.monarch.innotel.us` | retired | Billing-api decommissioned — Magnate handles all billing |
 | `subscribe.monarch.innotel.us` | repurposed | Now the shared subscribe portal (public page on :3040); billing still via Magnate |
 
@@ -186,10 +298,10 @@ source service after an explicit retention decision.
 ### Remaining .72 service migration checklist
 
 Enable one service at a time with `MONARCH_LEGACY=1` in `.env` (or
-`docker compose --profile legacy up -d <service>`). Verify on .46, then
-cut the DNS route and remove from .72.
+`docker compose --profile legacy up -d <service>`). Verify on the media host
+(now `.56`), then cut the DNS route and remove from `.72`.
 
-| Service | .72 port | Verify on .46 | DNS cut | .72 removed |
+| Service | .72 port | Verified on the media host | DNS cut | .72 removed |
 |---------|----------|---------------|--------|-------------|
 | Dispatcharr | 9191 | ☐ | ☐ | ☐ |
 | TVHeadend | 9981/9982 | ☐ | ☐ | ☐ |
@@ -926,6 +1038,7 @@ against the services:
 | Jellyfin API keys held by the apps | Jellyseerr's copy in `settings.json` and Homarr's encrypted copy in its database still authenticate — the state a half-finished rotation leaves behind, which nothing else catches since the container and its own UI stay up (`jellyfin-admin-password.py --check-apps`) |
 | Jellyseerr | initialized, Jellyfin sign-in enabled, owned by the account the manifest names (`seerr-owner.py --check`) |
 | Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
+| ClipBucket | the install is *finished*, not merely serving: schema present, `version` row populated, admin user with an owner profile, `base_url` matching `MONARCH_BASE_URL`, and the installer locked (`scripts/clipbucket-install.py --check`; skipped when the container isn't reachable) |
 | Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
 | Cerulean Vault | `.env` holds materialized values with no unresolved `vault://` reference — the drift-check greps for leftovers (read-only; `scripts/vault-migrate.py --dry-run` shows which plaintext values are not in the store yet) |
 | Magnate (when `MAGNATE_URL` is set) | every managed user's Jellyfin policy matches its Magnate tier (`scripts/magnate-entitlements.py --check`, read-only; skipped when no Jellyfin API key) |
@@ -1230,6 +1343,16 @@ sudo docker compose up -d
    by `monarch-init` (including the `paid_users` / `jellyfin_admins` role
    mappings), and the name the plugin builds its `redirect_uri` from is
    `MONARCH_SSO_SERVER_BASE_URL`.
+
+4. **ClipBucket has no content yet** (`tube.innotel.us`). The runtime and the
+   application files are in place; the schema and the admin account are created
+   by `python3 scripts/clipbucket-install.py --apply` (see
+   [Completed media migration](#completed-media-migration-from-the-legacy-72-server)),
+   so what is left is content: a database dump taken while the `.72` container
+   still ran, or a re-upload. `.env` must carry `CLIPBUCKET_DB_PASSWORD` (the
+   compose refuses to start the stack without it) and should carry
+   `CLIPBUCKET_ADMIN_PASSWORD` so the install script does not have to generate
+   one.
 
 
 ## Remaining config

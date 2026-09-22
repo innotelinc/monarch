@@ -45,6 +45,13 @@ set -uo pipefail
 #       (scripts/magnate-entitlements.py --check, read-only)
 #   Bazarr:
 #     - API key readable, basic auth configured
+#   ClipBucket:
+#     - the install is finished, not merely running: schema, version row, admin
+#       password, base_url, and the browser installer locked
+#       (scripts/clipbucket-install.py --check)
+#     - the catalogue holds the media library: one cb_video row, one playable
+#       file under the name the app builds, and the card's thumbnails, per
+#       movie and TV episode (scripts/clipbucket-library.py --check)
 #   Authentik:
 #     - LDAP outpost provisioned (when AUTHENTIK_BASE_URL is set)
 #   Nginx Proxy Manager:
@@ -969,6 +976,70 @@ except Exception:
     say "note: authentik admin/version API unreachable (HTTP $ak_ver_code) - outpost version not checked"
   fi
   rm -f /tmp/drift-akv.$$
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# ClipBucket — is it *installed*, not merely running?
+# ───────────────────────────────────────────────────────────────────────────
+# The app ships a nine-step browser wizard and a deployment has no browser in
+# it, so a host whose clipbucket_db volume never got the wizard sits serving its
+# installer — which looks exactly like an installed site with no content, and is
+# how this stack came to be described as migrated while the volume held a single
+# entry (`db.opt`) against a document claiming "80 database tables, 2 users".
+#
+# scripts/clipbucket-install.py --check is the judgement (schema, version row,
+# admin password, base_url, leftover install.me), and two of its findings are
+# invisible from outside the app: without the version row the app gates its
+# queries on a table that is empty and answers HTTP 500 on every *logged-in*
+# page while anonymous pages are fine, and a leftover `files/temp/install.me`
+# leaves the browser installer reachable over a finished site.
+# Exit 2 is "cannot tell" (no container here, or no docker), which is a note: a
+# host running part of the group is not a drifted host.
+clipbucket_out=$(python3 scripts/clipbucket-install.py --check 2>&1)
+clipbucket_code=$?
+if [ "$clipbucket_code" -eq 0 ]; then
+  say "ok: ClipBucket is installed (schema, version, admin, base_url) with its installer locked"
+elif [ "$clipbucket_code" -eq 2 ]; then
+  say "note: ClipBucket's install state could not be judged (skipped) - $(printf '%s' "$clipbucket_out" | tail -1)"
+else
+  fail "clipbucket: the install is not finished - run scripts/clipbucket-install.py --apply; see docs/operations.md 'Completed media migration'"
+  printf '%s\n' "$clipbucket_out" | indent >&2
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# ClipBucket — does the catalogue hold the library?
+# ───────────────────────────────────────────────────────────────────────────
+# A *finished* install is an empty site, and that is the state this stack sat in
+# while its own docs called it migrated: cb_video held nothing, so
+# tube.innotel.us answered a working site with no content — the same
+# caller-visible result as a broken import, and the reason "installed" and
+# "has the library" are two checks rather than one.
+#
+# The library is /data/media, the same files Jellyfin serves, and
+# scripts/clipbucket-library.py is the judgement: every movie and TV episode
+# there has a catalogue row, a playable file under the name the app's own
+# get_video_files() builds, and the thumbnails its card renders. Each of the
+# three fails invisibly on its own (an invisible row, a dead link, a broken
+# image), which is why they are one check.
+#
+# The library is the list: there is no exclusion mechanism on purpose, so "what
+# should not be on the site" is answered by the media library rather than by a
+# second list here that would drift from it. Exit 2 is "cannot tell" (no
+# container, no docker, no /data/media) and stays a note — a host running part
+# of the group is not a drifted host. Only judged once the install above is
+# finished, because on an unfinished install every finding below is a
+# consequence of that one.
+if [ "$clipbucket_code" -eq 0 ]; then
+  clip_lib_out=$(python3 scripts/clipbucket-library.py --check 2>&1)
+  clip_lib_code=$?
+  if [ "$clip_lib_code" -eq 0 ]; then
+    say "ok: ClipBucket's catalogue holds the media library"
+  elif [ "$clip_lib_code" -eq 2 ]; then
+    say "note: ClipBucket's library could not be judged (skipped) - $(printf '%s' "$clip_lib_out" | tail -1)"
+  else
+    fail "clipbucket: the catalogue is behind the media library - run scripts/clipbucket-library.py --apply; see docs/operations.md 'ClipBucket'"
+    printf '%s\n' "$clip_lib_out" | indent >&2
+  fi
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
