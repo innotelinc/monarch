@@ -738,12 +738,14 @@ that is a decision with a reason worth knowing before reading a log:
   never redirect to it. Re-opening `8097` on the LAN is not the fix if a client
   breaks; that skip line is.
 
-  **The SSO button is two halves that fail silently** — a plugin config pointing
+  **The SSO button is three halves that fail silently** — a plugin config pointing
   at an issuer nobody signs in against (the button renders and dies inside
-  Authentik), and a provider that never got the callback URI registered (it dies
-  at the redirect with `invalid_request: redirect_uri does not match`).
-  `python3 scripts/jellyfin-oidc-sso.py --check` reads both and reports the
-  installed plugin's version; it is run by `scripts/drift-check.sh`. The plugin
+  Authentik), a provider that never got the callback URI registered (it dies
+  at the redirect with `invalid_request: redirect_uri does not match`), and a
+  Jellyfin that does not **trust its proxy** (the button renders, the client
+  cannot follow it — see below).
+  `python3 scripts/jellyfin-oidc-sso.py --check` reads the first two and reports
+  the installed plugin's version; it is run by `scripts/drift-check.sh`. The plugin
   binary is **pinned** in `init/jellyfin-plugins.json` (release plus the sha256 of
   the zip *and* of the assembly inside it): `monarch-init` installs it, so a
   rebuilt host comes back with the button, and
@@ -752,11 +754,45 @@ that is a decision with a reason worth knowing before reading a log:
   (`https://media[.magnate].innotel.us/sso/OIDC/Callback/authentik`) are part of
   `MONARCH_SSO_REDIRECT_URIS`, because a provider refresh takes that list verbatim.
 
+##### Signing in from a phone or TV app (the third half)
+
+Jellyfin's login page is not the only consumer of the SSO button. The plugin
+also serves `/sso/OIDC/Providers`, and a native client reads that endpoint to
+discover the provider and then opens the `StartUrl` in a webview. Jellyfin
+builds that URL from the **request scheme**, and it honours `X-Forwarded-Proto`
+only when the caller is in its own `KnownProxies` — with that list empty it
+forwards nothing at all (`ForwardedHeaders.None`), so the endpoint answered
+`200` while advertising
+
+```
+http://media.magnate.innotel.us/sso/OIDC/Start/authentik      # on an https-only name
+```
+
+A desktop browser rides the `80 -> 443` redirect without noticing, which is how
+this went unseen through several hand-run login tests. An iOS/Android webview
+refuses the cleartext request, and "I cannot sign in from the app" is the whole
+symptom. `monarch-init` records the gateway (its name *and* its current address)
+from `jellyfin_ensure_known_proxies`, and **the list is read at Jellyfin's
+startup**, so init reports the restart instead of taking the media server down:
+
+```
+# after monarch-init reports it:
+sudo docker restart jellyfin
+PASS=$(python3 scripts/verify-sso.py)   # step [2c] asserts the https start URL
+```
+
+The app half of the flow itself is **Quick Connect**, not the login button:
+the app shows a code, you open the server's sign-in page in a browser, sign in
+with Cerulean Authentik, and enter the code. The button on the login page is for
+the browser client (the plugin's own changelog says so) — a code, not a new
+password, is what an app can complete.
+
 `scripts/verify-sso.py` is the committed regression test for all of this: it
 creates a throwaway Authentik identity, drives a real OIDC flow through every
 gateway above, asserts the session opens the app, asserts an identity outside
-`SSO_REQUIRED_GROUP` is refused, and checks that each app port answers on
-loopback and refuses on the LAN. Exit codes: 0 pass, 1 fail, 2 cannot run.
+`SSO_REQUIRED_GROUP` is refused, checks that each app port answers on loopback
+and refuses on the LAN, and asserts that each published Jellyfin name advertises
+an **https** SSO start URL. Exit codes: 0 pass, 1 fail, 2 cannot run.
 
 ##### The four recent names, as deployed (2026-09-17)
 
@@ -789,6 +825,157 @@ loopback-only now.
   `--skip-ssl`, which is what a genuinely cert-less zone checks with). If it ever
   happens again, the pre-change values are in the 02:00 NPM backup
   (`backups/npm-backup-<date>-020000.tar.gz`, table `proxy_host`).
+
+#### The login screen's splash (Jellyfin branding)
+
+The obsidian/champagne splash in `assets/` is **Jellyfin's login screen**, and it
+is the one page every Cerulean identity sees before they have a session. It is not
+configuration, and nothing in the app's own UI can set it:
+
+- Jellyfin *generates* the splash. `SplashscreenPostScanTask` builds a collage
+  from up to 30 posters and 30 thumbnails and writes it to
+  `{DataPath}/splashscreen.png` after **every** library scan — so a hand-copied
+  image put in that file is overwritten by the next scan, which is why the
+  branded splash is a script and not a `cp`.
+- The custom image is `SplashscreenLocation` in the `branding` configuration
+  store (`/docker/appdata/jellyfin/branding.xml`). The API deliberately cannot
+  set it — `BrandingOptionsDto` omits the field, "prevents it from being updated
+  via API" (jellyfin/jellyfin#13744) — so the file is the only way to point a
+  deployment at its own image.
+- That image's data directory is `{config}/data/data` (the same directory
+  `jellyfin.db` and the generated collage live in), so inside the container the
+  installed file is `/config/data/data/monarch-splash.png`. A location naming a
+  path that is **not there** is not an error the server reports — it serves the
+  generated collage instead. The first version of the script recorded
+  `/config/data/monarch-splash.png` while installing one directory lower, and
+  the measurement that caught it was putting a *different* image where the
+  collage goes and watching which one came back from `/Branding/Splashscreen`.
+
+`python3 scripts/jellyfin-splash.py --check` judges all of it (asset committed
+and 1920×1080, file installed and identical, `SplashscreenEnabled=true`, the
+recorded location equal to the one it installs to, and a file that exists where
+that location maps back through the appdata mount). `--apply` installs the
+committed PNG, replaces the generated collage, and points `branding.xml` at the
+custom path while **preserving the keys it does not own** (`LoginDisclaimer`,
+`CustomCss` — a wholesale rewrite drops them); `--apply --variant light` does the
+same with the cream variant, and `--render` regenerates the asset from
+`DESIGN` (needs Pillow, which is why the PNG is committed). Exit codes: 0 fine,
+1 a finding, 2 cannot run (no appdata, no asset and no Pillow).
+
+`scripts/drift-check.sh` runs `--check` read-only on the timer, and reports exit 2
+as a skip so a host running part of the group is not a drifted host. The design
+test (`scripts/tests/test_jellyfin_splash.py`) reads
+`assets/monarch-splash.svg`/`-light.svg` back and fails when `DESIGN` has drifted
+from the art, so changing the splash means changing both.
+
+```bash
+python3 scripts/jellyfin-splash.py --check          # the drift check's half
+sudo python3 scripts/jellyfin-splash.py --apply     # install + point branding
+sudo docker restart jellyfin                        # branding is read at startup
+```
+
+#### The certificate Jellyfin serves (its own HTTPS listener)
+
+`media.innotel.us` is published at the edge, and the edge terminates TLS for it
+with the Cerulean-issued certificate for that name. Jellyfin is *also* asked to
+serve that same material on its own HTTPS listener (8920), so anything reaching
+the app directly — the compose network, a client on the LAN, an operator
+following a redirect — sees our certificate rather than a self-signed one. Three
+things about it are worth knowing before touching it, because **none of them is
+reported by the server**:
+
+- **The file must be PKCS#12.** `CertificatePath` in
+  `/docker/appdata/jellyfin/network.xml` was first pointed at the PEM Cerulean
+  hands out. Jellyfin started,
+  logged nothing, and never opened 8920 — `Connection refused` and no error
+  anywhere. Converting the material to a `.pfx` (with an empty password, matching
+  the empty `CertificatePassword`) brought it up on the same restart.
+- **The file must be readable by the user Jellyfin runs as.** The container runs
+  as uid 1000 here, so a root-owned `600` file reproduces the same closed port
+  and the same silence. `--apply` chowns the bundle to the container's user for
+  exactly this reason.
+- **The certificate is a snapshot.** Cerulean renews it on a timer (90 days,
+  announced as Let's Encrypt's shorter lifetime) and pushes the result to the
+  edge automatically; nothing pushes it *into* this filesystem. The file on disk
+  is the certificate that was current the day it was installed, so the renewal is
+  a step here and not something that happens by itself.
+
+`python3 scripts/jellyfin-tls.py --check` judges the configuration file and then
+the listener itself — the second half is what makes the first trustworthy, since
+neither failure above is visible in the file. It reads `network.xml`
+(`EnableHttps`, `CertificatePath`, and that the path maps through the appdata
+mount to a PKCS#12 file its user can read), then asks the container for the
+certificate it actually serves: a 200 on `/System/Info/Public`, a *verified*
+chain (`ssl_verify_result` 0 — an expired or self-signed certificate is a
+finding, not a warning), SAN coverage of the name, the same fingerprint as the
+`.pem` installed beside it, and an expiry further away than 30 days. Exit codes:
+0 fine, 1 a finding, 2 cannot run (no appdata, no docker, no container, or a
+container with no curl/openssl). `scripts/drift-check.sh` runs `--check`
+read-only on the timer and reports exit 2 as a skip.
+
+`--apply` installs PEM material (certificate + key, the shape Cerulean's
+certificate page hands out) as the PKCS#12 file, gives it to the container's
+user, and points `network.xml` at it while **preserving every setting it does not
+own** (`KnownProxies`, the ports, the published-URI rules). It does not restart
+Jellyfin unless asked: the certificate is read at startup, so `--restart` (which
+runs `docker restart`) is the last step of the install.
+
+```bash
+python3 scripts/jellyfin-tls.py --check                     # the drift check's half
+sudo python3 scripts/jellyfin-tls.py --apply --pem /tmp/media.innotel.us.pem --restart
+# then re-read the check: it reports the certificate the listener now returns
+python3 scripts/jellyfin-tls.py --check
+```
+
+**Renewing it** is one command, because the renewal already lands somewhere this
+stack holds the credentials for. Cerulean renews `media.innotel.us` on its timer
+and pushes the result to the edge (NPM) and nowhere else — so the edge is where
+the current material always is, and `--renew` reads it back from there rather
+than asking an operator to fetch it by hand. It authenticates with the same
+`NPM_BASE_URL` / `NPM_ADMIN_EMAIL` / `NPM_ADMIN_PASSWORD` that
+`npm-proxy-hosts.py` drives the remote NPM with, picks the certificate covering
+the name (an exact match before a covering wildcard, newest expiry first), writes
+it to `ssl/media.innotel.us.pem` — the file `--check` compares the listener
+against — and installs it:
+
+```bash
+python3 scripts/jellyfin-tls.py --renew --restart
+python3 scripts/jellyfin-tls.py --check      # the listener now serves the new one
+```
+
+It is a **no-op when there is nothing to do**, which is what makes that safe to
+run on a schedule: renewing is a stream of the same material until the estate
+actually renews, so `--renew` compares what the edge holds against what the
+listener is serving and, when they are the same, says *already current* and
+installs — and restarts — nothing. Only a positive "the listener is serving
+this" skips; a listener that cannot be reached leaves the question open and the
+material is installed anyway. A restart docker refuses is a **finding** (exit 1),
+not a successful install that changed nothing, because `--check` compares the
+listener against the `.pem` on disk and an un-restarted app is exactly the
+mismatch it reports.
+
+If the edge holds nothing covering the name, `--renew` says so instead of
+installing nothing: issue it in Cerulean first (`Certificates` →
+`media.innotel.us` → *Issue*). Material that is not on the edge yet still takes
+the manual path — save it as PEM (certificate + key, one file), run `--apply`
+with `--pem`, and restart.
+
+**The schedule** is `monarch-jellyfin-tls.timer`, which runs `--renew --restart`
+on Mondays at 04:17 (plus a randomised delay), installed and enabled by
+`install-monarch.sh` alongside the drift-check and Live TV timers. Weekly is
+ahead of the 30-day warning window `--check` uses, so a renewal Cerulean performs
+is picked up within a week of it happening rather than at the expiry; a run that
+finds nothing to do costs one API call.
+
+```bash
+systemctl list-timers monarch-jellyfin-tls.timer
+journalctl -u monarch-jellyfin-tls.service   # last run, and what it decided
+```
+
+That the renewal is a step *here* at all is the point of the check: a renewal
+performed only in Cerulean reaches the edge and never this filesystem, so the day
+the certificate expires the listener starts serving an expired one — which
+`--check` reports before the expiry rather than after.
 
 #### The apps' own sign-in methods
 

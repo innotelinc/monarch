@@ -126,6 +126,18 @@ services:
       # reason a browser could reach a Jellyfin login form without ever passing
       # Authentik. The gateway below is the door now, and it reaches the app by
       # name over the compose network.
+      #
+      # That gateway also has to be in Jellyfin's own **Known proxies**
+      # (Dashboard -> Networking), which is not optional decoration: Jellyfin
+      # honours `X-Forwarded-Proto` only from a caller on that list, and with it
+      # empty it turns forwarded headers off entirely. What breaks is the SSO
+      # **start URL** — the OIDC plugin builds it from the request scheme, so
+      # the login page advertised `http://media…/sso/OIDC/Start/authentik` on a
+      # name that serves https only. A browser follows the 80 -> 443 redirect
+      # and a phone app's webview cannot, which is what "sign in from the app
+      # does nothing" was. `monarch-init` records the gateway (name and
+      # address) via `jellyfin_ensure_known_proxies`, and a change needs a
+      # Jellyfin restart, so init reports it rather than doing it.
       - 127.0.0.1:8097:8096
     volumes:
       - /etc/localtime:/etc/localtime:ro

@@ -12,6 +12,32 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **The renewal is scheduled, and the restart is part of it.**
+  `systemd/monarch-jellyfin-tls.{service,timer}` runs `jellyfin-tls.py --renew
+  --restart` weekly (Mondays 04:17, randomised) and is installed and enabled by
+  `install-monarch.sh` alongside the drift-check and Live TV timers, so a
+  certificate that went stale is repaired without anyone having to notice.
+  Jellyfin reads `network.xml` and the certificate only at startup, which is why
+  `--restart` exists at all and why the timer carries it. `--renew` is a no-op —
+  it installs nothing and restarts nothing — when the edge holds the material the
+  listener is already serving, and only a positive "the listener is serving this"
+  skips: an unreachable listener leaves the question open and the install happens.
+  A restart docker refuses exits 1 rather than reporting a successful install
+  that changed nothing, because `--check` compares the listener against the
+  `.pem` on disk and an un-restarted app is exactly that mismatch.
+
+- **The certificate Jellyfin serves renews itself from the edge.** Cerulean
+  renews `media.innotel.us` on its timer and pushes the result to NPM and
+  nowhere else, so a renewal left the listener serving the material from the day
+  it was installed: the drift check reported it, but the repair was a manual
+  fetch, copy and `--apply`. `scripts/jellyfin-tls.py --renew` closes that. It
+  reads the certificate covering the name back from the edge — an exact match
+  before a covering wildcard, newest expiry first — using the `NPM_BASE_URL` /
+  `NPM_ADMIN_EMAIL` / `NPM_ADMIN_PASSWORD` this stack already drives the remote
+  NPM with, writes it beside the bundle as the `.pem` the check compares against,
+  and installs it. It reads the repo's `.env` itself, and reports instead of
+  installing nothing when the edge holds no certificate for the name.
+
 - **ClipBucket's library check now asks the site, not just the filesystem.**
   `scripts/clipbucket-library.py --serve-check` fetches every catalogue item's
   watch page, takes the `<source>` URLs the page emits, and requires a file

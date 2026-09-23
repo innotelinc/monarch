@@ -25,6 +25,11 @@ whole posture rests on two things holding at once, and both are asserted here:
      (`scripts/seerr-login-methods.py`). What this script asserts for those two
      is the thing that would be a regression in either direction: the app's own
      sign-in page answers, and the name does *not* bounce to the IdP.
+
+     Those pages still have to be *usable*, and for Jellyfin that is a third
+     assertion: the SSO button the login page draws comes from
+     `/sso/OIDC/Providers`, and a start URL built on the wrong scheme is one a
+     phone app cannot follow. See `SSO_PROVIDERS` below.
   2. The group check is real. The same flow with an identity that is *not* in
      SSO_REQUIRED_GROUP must be refused — either by Authentik (application bound
      to the group) or by the gateway (403). A gateway that admits every identity
@@ -116,6 +121,26 @@ PUBLISHED = [
      "Jellyfin"),
     ("jellyseerr", "req.innotel.us", "/login", "Seerr"),
     ("jellyseerr (alias)", "req.{base}", "/login", "Seerr"),
+]
+
+# The names whose app draws an SSO button from an advertised start URL, as
+# (label, host). Jellyfin serves `/sso/OIDC/Providers` (the OIDC plugin) and the
+# login page turns each entry into a button; a client that reads the same
+# endpoint — which is how the mobile/TV apps discover the provider — opens the
+# URL verbatim.
+#
+# Jellyfin builds that URL from the *request scheme*, and it believes
+# X-Forwarded-Proto only from a caller in its NetworkConfiguration
+# `KnownProxies`; with that list empty it sets `ForwardedHeaders.None` and
+# forwards nothing at all. So the failure is not loud: the endpoint answers 200
+# with `http://media.../sso/OIDC/Start/authentik` on a name that only serves
+# https. A desktop browser rides the 80 -> 443 redirect without noticing — which
+# is how this survived a hand-run login test — while an iOS/Android webview
+# refuses the cleartext request, and that is what "I cannot sign in from the
+# app" is. `init/init.py` (`jellyfin_ensure_known_proxies`) provisions it.
+SSO_PROVIDERS = [
+    ("jellyfin", "media.innotel.us"),
+    ("jellyfin (magnate name)", "media.magnate.innotel.us"),
 ]
 
 # (label, port) — bound to 127.0.0.1 only. Every one of these apps is configured
@@ -235,6 +260,8 @@ class Config:
         self.targets = [(label, host.format(base=self.base)) for label, host in SUBDOMAINS]
         self.published = [(label, host.format(base=self.base), path, marker)
                           for label, host, path, marker in PUBLISHED]
+        self.sso_providers = [(label, host.format(base=self.base))
+                              for label, host in SSO_PROVIDERS]
 
         if not self.token:
             raise CannotRun(
@@ -511,6 +538,25 @@ def sso_login(client, cfg, app, username, allow_idp_denial=False):
     return "flow", status, callback_body
 
 
+def start_url_defect(provider):
+    """The reason this advertised SSO start URL is unusable, or "" when it is fine.
+
+    Only the scheme is judged. The host is whichever name the client asked on,
+    and a wrong *host* is a different failure with its own check in
+    `scripts/jellyfin-oidc-sso.py` (the provider's redirect URI list).
+    """
+    start = (provider.get("StartUrl") or "").strip()
+    if not start:
+        return "advertises no StartUrl, so the login page draws no button for it"
+    scheme = urllib.parse.urlsplit(start).scheme.lower()
+    if scheme != "https":
+        return (f"advertises {start!r} ({scheme or 'no scheme'}) — a browser follows "
+                "the http -> https redirect, a mobile app's webview cannot start "
+                "the flow at all (Jellyfin trusts X-Forwarded-Proto only from a "
+                "known proxy: init/init.py jellyfin_ensure_known_proxies)")
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base", help="base domain for the public names")
@@ -618,6 +664,34 @@ def main():
                 print(f"  {BAD}  {unreachable(err, host)}")
                 failures += 1
 
+        # ── 2c. the SSO button's advertised start URL is usable ─────────────
+        # Fetched the way a client learns about the provider, so this judges the
+        # value that actually reaches a device — not the config behind it.
+        print("[2c] the Jellyfin SSO button advertises an https sign-in URL")
+        for label, host in cfg.sso_providers:
+            url = f"https://{host}/sso/OIDC/Providers"
+            print(f"  -- {label} ({url})")
+            try:
+                status, _, body = Client(cfg).get(url)
+                check(status == 200, f"{label}: {url} -> HTTP {status} (expected 200)")
+                providers = json.loads(body)
+                check(isinstance(providers, list) and bool(providers),
+                      f"{label}: no OIDC provider is configured, so the login page "
+                      "draws no SSO button")
+                defects = [f"{p.get('ProviderId')}: {start_url_defect(p)}"
+                           for p in providers if start_url_defect(p)]
+                check(not defects, f"{label}: " + "; ".join(defects))
+                print(f"  {OK}  {len(providers)} provider(s), every start URL https")
+            except CheckFailed as err:
+                print(f"  {BAD}  {err}")
+                failures += 1
+            except (urllib.error.URLError, OSError) as err:
+                print(f"  {BAD}  {unreachable(err, host)}")
+                failures += 1
+            except ValueError as err:
+                print(f"  {BAD}  {label}: {url} did not answer JSON ({err})")
+                failures += 1
+
         # ── 3. the group check is real ─────────────────────────────────────
         print("[3] an identity outside the required group is refused")
         label, host = cfg.targets[0]
@@ -671,7 +745,8 @@ def main():
             print(f"\n{BAD} — {failures} target(s) did not pass", file=sys.stderr)
             return 1
         print("\nPASS — every gated name is Authentik-only, the two published names "
-              "serve their app's own sign-in page, and the app ports are closed")
+              "serve their app's own sign-in page with an https SSO start URL, and "
+              "the app ports are closed")
         return 0
     except CannotRun as err:
         print(f"\nSKIP: {err}", file=sys.stderr)

@@ -79,6 +79,17 @@ INIT_DIR = "/docker/appdata/init"
 SEERR_OWNER = os.environ.get("MONARCH_SEERR_OWNER", "dhunter")
 
 JELLYFIN_BASE = "http://jellyfin:8096"
+# The oauth2-proxy in front of Jellyfin (docker-compose.yml, `jellyfin-sso`).
+# Jellyfin honours X-Forwarded-Proto only when the caller is in its **Known
+# proxies**, and with that list empty it turns forwarded headers off entirely
+# (`ApiServiceCollectionExtensions.ConfigureForwardHeaders` sets
+# `ForwardedHeaders.None`). What that breaks is the SSO **start URL**: the OIDC
+# plugin builds it from the request scheme, so the login page advertised
+# `http://media.../sso/OIDC/Start/authentik` on a name that only serves https. A
+# desktop browser rides the 80 -> 443 redirect without noticing, which is why
+# this hid; a phone app opening the same URL in a webview refuses the cleartext
+# request, which is what "I cannot sign in from the app" was.
+JELLYFIN_SSO_GATEWAY = os.environ.get("JELLYFIN_SSO_GATEWAY", "jellyfin-sso")
 JELLYSEERR_BASE = "http://jellyseerr:5055"
 QBT_BASE = "http://qbittorrent:8080"
 PROWLARR_BASE = "http://prowlarr:9696"
@@ -772,6 +783,66 @@ def jellyfin_ensure_admin_permissions(token) -> bool:
     return False
 
 
+def jellyfin_gateway_entries() -> list[str]:
+    """The SSO gateway as Jellyfin should know it: its name, then its address.
+
+    Both spellings are deliberate. Jellyfin resolves every entry at *startup*
+    and accepts an IP, a CIDR subnet or a hostname, so the name is what survives
+    a recreated gateway (docker DNS resolves it again on the next restart) and
+    the address is what keeps the gateway trusted when that restart happens
+    while the name is unresolvable.
+    """
+    entries = [JELLYFIN_SSO_GATEWAY]
+    try:
+        infos = socket.getaddrinfo(JELLYFIN_SSO_GATEWAY, None, socket.AF_INET)
+    except OSError as exc:
+        _log(f"WARNING: {JELLYFIN_SSO_GATEWAY} does not resolve from here ({exc}) - "
+             "recording the name only")
+        return entries
+    for info in infos:
+        addr = info[4][0]
+        if addr not in entries:
+            entries.append(addr)
+    return entries
+
+
+def jellyfin_ensure_known_proxies(token) -> bool:
+    """Make Jellyfin trust the SSO gateway's X-Forwarded-Proto.
+
+    The list is read once, at startup, so a change here needs a Jellyfin restart
+    - which is reported rather than done (the same call this repo makes for a
+    plugin install). `scripts/verify-sso.py` is what proves the result from the
+    outside: it asserts the login page advertises an https sign-in URL.
+    """
+    status, _, config = _http(JELLYFIN_BASE, "/System/Configuration/network",
+                              headers=jellyfin_headers(token))
+    if status != 200 or not isinstance(config, dict):
+        _issues.append("Jellyfin: could not read the network configuration "
+                       f"(HTTP {status}) - the SSO gateway is not a known proxy, so "
+                       "the login page advertises an http:// sign-in URL")
+        return False
+    known = list(config.get("KnownProxies") or [])
+    missing = [entry for entry in jellyfin_gateway_entries() if entry not in known]
+    if not missing:
+        _log("Jellyfin: the SSO gateway is already a known proxy")
+        return True
+    config["KnownProxies"] = known + missing
+    status, _, _ = _http(JELLYFIN_BASE, "/System/Configuration/network",
+                         method="POST", body=config, headers=jellyfin_headers(token))
+    if status not in (200, 204):
+        _issues.append("Jellyfin: could not record the SSO gateway as a known proxy "
+                       f"(HTTP {status}) - the login page keeps advertising an "
+                       "http:// sign-in URL that an app cannot follow")
+        return False
+    _log(f"Jellyfin: recorded {', '.join(missing)} as a known proxy")
+    _issues.append(
+        "Jellyfin: the SSO gateway was added to Known proxies - restart the jellyfin "
+        "container, or the login page keeps advertising an http:// sign-in URL that "
+        "an app's webview cannot follow (scripts/verify-sso.py asserts the https one)"
+    )
+    return True
+
+
 def configure_jellyfin():
     _log("--- Jellyfin ---")
     if not wait_for(JELLYFIN_BASE, "/System/Info/Public", "Jellyfin"):
@@ -931,6 +1002,7 @@ def configure_jellyfin():
             _issues.append(f"Jellyfin library '{lib['name']}' could not be added (HTTP {status})")
 
     jellyfin_ensure_admin_permissions(token)
+    jellyfin_ensure_known_proxies(token)
 
     _results["jellyfin"] = "configured"
     return True

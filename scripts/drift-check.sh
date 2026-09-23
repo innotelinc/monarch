@@ -36,6 +36,15 @@ set -uo pipefail
 #       otherwise the exported admin token (init writes it; a diverged local
 #       admin password is reported as a note, not a failure)
 #     - media libraries exist
+#     - the login screen shows Monarch's own splash: the rendered asset is
+#       installed under the data dir and branding.xml names it, rather than the
+#       poster collage Jellyfin's own post-scan task regenerates
+#       (scripts/jellyfin-splash.py --check, read-only)
+#     - the app's own HTTPS listener is up on the Cerulean certificate for
+#       media.innotel.us: EnableHttps is on, the file behind CertificatePath is
+#       PKCS#12 and readable by the container's user, the served chain verifies
+#       and still matches the material installed beside it
+#       (scripts/jellyfin-tls.py --check, read-only)
 #   Jellyseerr:
 #     - initialized, Jellyfin sign-in enabled
 #   Cerulean Vault (SecretOps):
@@ -635,6 +644,54 @@ elif [ "$plugins_code" -eq 2 ]; then
 else
   fail "jellyfin: a plugin is not the pinned build, or is installed twice - run scripts/jellyfin-plugin-pin.py --install, then restart Jellyfin; see docs/operations.md"
   printf '%s\n' "$plugins_out" | indent >&2
+fi
+
+# The login screen is the one page every Cerulean identity sees before they have
+# a session, and the image on it is not configuration: Jellyfin *generates* a
+# collage from up to 30 posters and 30 thumbnails into {DataPath}/splashscreen.png
+# after every library scan, so a branded splash exists only if the file is
+# installed AND branding.xml names it - and `SplashscreenLocation` is not
+# settable through the API at all (BrandingOptionsDto omits it,
+# jellyfin/jellyfin#13744), so the configuration file is the only way to point
+# at one. Both halves fail quietly: a location naming a path that is not there
+# is not an error the server reports, it serves the collage instead, and the
+# first version of the splash script aimed at /config/data while installing to
+# /config/data/data (this image's data dir) - measured by putting a different
+# image where the collage goes and watching which one came back from
+# /Branding/Splashscreen. Exit 2 is "cannot look" (no appdata here, so this is
+# not the media host) and stays a note, like the ClipBucket checks.
+splash_out=$(python3 scripts/jellyfin-splash.py --check 2>&1)
+splash_code=$?
+if [ "$splash_code" -eq 0 ]; then
+  say "ok: Jellyfin's login screen shows Monarch's splash, not the generated collage"
+elif [ "$splash_code" -eq 2 ]; then
+  say "note: the Jellyfin splash could not be judged (skipped) - $(printf '%s' "$splash_out" | tail -1)"
+else
+  fail "jellyfin: the login screen is Jellyfin's poster collage, or branding points at a splash that is not there - run scripts/jellyfin-splash.py --apply, then restart Jellyfin; see docs/operations.md"
+  printf '%s\n' "$splash_out" | indent >&2
+fi
+
+# Jellyfin's own HTTPS listener is the other half of "this app is served over
+# TLS": the edge terminates TLS for the published name, and the app is asked to
+# serve the same material for anything that reaches it directly. It fails in
+# three ways, none of which Jellyfin reports: `CertificatePath` naming a PEM
+# (the app loads PKCS#12 only), naming a file the container's user cannot read,
+# and naming the material from the day it was installed - the estate renews on a
+# timer and pushes the result to the edge, never into this filesystem, so the
+# day the certificate expires the app starts serving an expired one. The check
+# reads the configuration *and* the certificate the listener actually returns,
+# which is the only half that proves the file was loaded. Exit 2 is "cannot
+# look" (no appdata here, so this is not the media host, or no docker) and stays
+# a note, like the splash and ClipBucket checks.
+tls_out=$(python3 scripts/jellyfin-tls.py --check 2>&1)
+tls_code=$?
+if [ "$tls_code" -eq 0 ]; then
+  say "ok: Jellyfin serves media.innotel.us over TLS with the certificate this repo installed"
+elif [ "$tls_code" -eq 2 ]; then
+  say "note: Jellyfin's HTTPS listener could not be judged (skipped) - $(printf '%s' "$tls_out" | tail -1)"
+else
+  fail "jellyfin: its HTTPS listener is not serving our certificate - renew media.innotel.us in Cerulean, then run scripts/jellyfin-tls.py --renew and restart Jellyfin; material the edge does not hold takes scripts/jellyfin-tls.py --apply --pem <file>; see docs/operations.md"
+  printf '%s\n' "$tls_out" | indent >&2
 fi
 
 # The LDAP outpost is Jellyfin's credential store now that the page is published,
