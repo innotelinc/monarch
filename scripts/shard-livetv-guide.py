@@ -157,7 +157,7 @@ class SiteProgress:
 
 def run_part(container: str, epg_dir: Path, parts_dir: Path, name: str,
              entries: "list[str]", days: int, outputs: "list[Path]",
-             failed: "list[str]", *, site: "str | None" = None,
+             failed: "list[str]", *, dropped: "list[str]", site: "str | None" = None,
              progress: "SiteProgress | None" = None) -> None:
     """Grab one part, halving it if the grabber runs out of heap.
 
@@ -206,7 +206,7 @@ def run_part(container: str, epg_dir: Path, parts_dir: Path, name: str,
                 print(f"  {site}: dropped for this run — a single channel of it does not "
                       f"fit the grabber's heap either, so {len(entries)} channel(s) were "
                       f"not retried smaller", file=sys.stderr)
-                failed.append(output.name)
+                dropped.append(output.name)
                 return
 
         if len(entries) > MIN_CHANNELS:
@@ -215,7 +215,8 @@ def run_part(container: str, epg_dir: Path, parts_dir: Path, name: str,
                   f"{len(pieces)} part(s) of <= {len(pieces[0])}", file=sys.stderr)
             for index, piece in enumerate(pieces):
                 run_part(container, epg_dir, parts_dir, f"{name}-split{index + 1}",
-                         piece, days, outputs, failed, site=site, progress=progress)
+                         piece, days, outputs, failed, dropped=dropped, site=site,
+                         progress=progress)
             return
 
     failed.append(output.name)
@@ -324,17 +325,29 @@ def main(argv: "list[str] | None" = None) -> int:
         return 0
 
     failed: list[str] = []
+    dropped: list[str] = []
     outputs: list[Path] = []
     progress = SiteProgress()
     for name, piece, site in plan:
         run_part(args.container, epg_dir, parts_dir, name, piece, args.days, outputs,
-                 failed, site=site, progress=progress)
+                 failed, dropped=dropped, site=site, progress=progress)
 
     # A part that still failed is left out rather than guessed at: the guide keeps
     # every other site's listings, and the summary says which ones are missing, which
     # is the difference between a short guide and a wrong one.
     if failed:
         print(f"  {len(failed)} part(s) failed and were left out: {', '.join(failed)}", file=sys.stderr)
+
+    # A site the probe gave up on is the *policy*, not a failure (see SiteProgress),
+    # and it used to be counted as one. That made this command exit 1 on every run of
+    # a timer that is working exactly as designed — the unit went red daily, the
+    # journal said the same thing every time, and the red stopped meaning anything.
+    # So the two are counted apart: a dropped site is reported here and does not
+    # change the exit code, a part that failed for any other reason still does.
+    if dropped:
+        print(f"  {len(dropped)} part(s) dropped for this run and left out "
+              f"({', '.join(dropped)}) — its single channel does not fit the grabber's "
+              f"heap, which the next run probes again", file=sys.stderr)
 
     merged = merge_guides(outputs, Path(args.out))
     print(f"wrote {args.out}: {merged['channels']} channel(s), {merged['programmes']} programme(s)")

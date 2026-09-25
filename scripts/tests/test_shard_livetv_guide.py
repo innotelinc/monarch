@@ -202,6 +202,7 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
         self.parts.mkdir()
         self.outputs: "list[Path]" = []
         self.failed: "list[str]" = []
+        self.dropped: "list[str]" = []
 
     def host_path(self, container: str) -> Path:
         """The host file a container path under public/ names."""
@@ -227,7 +228,8 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
 
     def run_part(self, name: str, entries: "list[str]", seen, run) -> None:
         with mock.patch.object(shard, "subprocess", SimpleNamespace(run=run)):
-            shard.run_part("iptv", self.dir, self.parts, name, entries, 3, self.outputs, self.failed)
+            shard.run_part("iptv", self.dir, self.parts, name, entries, 3, self.outputs,
+                           self.failed, dropped=self.dropped)
 
     def test_a_part_that_runs_out_of_heap_is_split_until_it_fits(self) -> None:
         entries = [channel("epg.iptvx.one", f"E{i}.us@SD") for i in range(400)]
@@ -265,7 +267,10 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
         self.run_part("tiny.tv", entries, seen, run)
 
         self.assertEqual(seen, [shard.MIN_CHANNELS, 1], "the floor is probed, never split")
-        self.assertEqual(self.failed, ["guide-tiny.tv.xml"])
+        # Dropped by policy, so it is reported and does not fail the run — the
+        # distinction below is the whole reason the unit can mean anything.
+        self.assertEqual(self.dropped, ["guide-tiny.tv.xml"])
+        self.assertEqual(self.failed, [])
 
     def test_a_site_that_cannot_grab_one_channel_is_dropped_after_the_probe(self) -> None:
         """Bisecting a site that fails at every size only spends the host's memory.
@@ -284,7 +289,8 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
 
         self.assertEqual(seen, [400, 1], "one probe, and no split")
         self.assertEqual(self.outputs, [])
-        self.assertEqual(self.failed, ["guide-epg.iptvx.one.xml"])
+        self.assertEqual(self.dropped, ["guide-epg.iptvx.one.xml"])
+        self.assertEqual(self.failed, [], "a site this rule gave up on is not a failure")
 
     def test_the_next_chunk_of_a_dropped_site_is_not_retried(self) -> None:
         """Once a site is dropped, its other parts are skipped rather than attempted.
@@ -301,13 +307,17 @@ class PartsThatRunOutOfHeap(unittest.TestCase):
 
         with mock.patch.object(shard, "subprocess", SimpleNamespace(run=run)):
             shard.run_part("iptv", self.dir, self.parts, "epg.iptvx.one-1", first, 3,
-                           self.outputs, self.failed, site="epg.iptvx.one", progress=progress)
+                           self.outputs, self.failed, dropped=self.dropped,
+                           site="epg.iptvx.one", progress=progress)
             before = len(seen)
             shard.run_part("iptv", self.dir, self.parts, "epg.iptvx.one-2", second, 3,
-                           self.outputs, self.failed, site="epg.iptvx.one", progress=progress)
+                           self.outputs, self.failed, dropped=self.dropped,
+                           site="epg.iptvx.one", progress=progress)
 
         self.assertIn("epg.iptvx.one", progress.abandoned)
         self.assertEqual(len(seen), before)
+        self.assertEqual(self.dropped, ["guide-epg.iptvx.one-1.xml"],
+                         "the second chunk is skipped, not dropped a second time")
 
     def test_yesterdays_part_is_removed_rather_than_merged_in(self) -> None:
         stale = self.parts / "guide-xumo.tv.xml"
