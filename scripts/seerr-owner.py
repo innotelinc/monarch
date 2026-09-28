@@ -4,7 +4,7 @@
 WHY THIS EXISTS
 ---------------
 Seerr has exactly one **Owner**, and it is not a permission. Measured in the image
-this stack runs (`ghcr.io/seerr-team/seerr`, v3.4.1, commit 69f73a6):
+this stack runs (`ghcr.io/seerr-team/seerr`, v3.5.0, commit e2f24cb):
 
     server/routes/user/index.ts
       canMakePermissionsChange():

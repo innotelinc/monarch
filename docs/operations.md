@@ -1027,7 +1027,7 @@ What each one deliberately leaves alone:
 #### Seerr's Owner is a row id, not a permission
 
 Seerr has exactly one Owner, and the server decides it by row: in
-`server/routes/user/index.ts` (image `ghcr.io/seerr-team/seerr`, v3.4.1)
+`server/routes/user/index.ts` (image `ghcr.io/seerr-team/seerr`, v3.5.0)
 `canMakePermissionsChange()` refuses to let anybody but `user.id === 1` grant
 admin, and `PUT /:id` refuses to let anybody but row 1 modify row 1. So the
 **badge, and the right to hand out admin, belong to whichever account completed

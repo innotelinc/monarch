@@ -51,6 +51,20 @@ are written by hand and describe the behaviour change, not the commits.
   catalogue check, and it needs no `ffmpeg` on the host, so a media host is
   judged on what it serves rather than refused for lacking an encoder.
 
+### Changed
+
+- **Seerr is on 3.5.0.** The `jellyseerr` container was recreated onto
+  `ghcr.io/seerr-team/seerr:latest` at v3.5.0 (commit `e2f24cb`), up from
+  v3.4.1 (`69f73a6`). 3.5.0 carries one breaking change — `GET
+  /settings/{plex,jellyfin}/library` no longer accepts `sync`/`enable`, which
+  moved to `POST …/library/sync` and `PUT …/library/{id}` — and nothing in this
+  repo or `monarch-init` calls either, so no code changed with it. The Owner
+  row-id rule `scripts/seerr-owner.py` depends on is unchanged in the image
+  (`dist/routes/user/index.js` still refuses `id !== 1`), and `seerr-owner.py
+  --check`, `seerr-login-methods.py --check`, `/api/v1/status`
+  (`updateAvailable: false`) and `req.monarch.innotel.us` were all re-verified
+  after the recreate.
+
 ### Fixed
 
 - **ClipBucket can no longer start with a blank MariaDB password.** The password
