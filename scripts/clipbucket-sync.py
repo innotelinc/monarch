@@ -19,14 +19,19 @@ WHAT IT ADDS OVER `--check` / `--apply`
    file THIS TOOL WROTE is missing. The source being gone is invisible to it.)
    This compares the other way as well and repairs that half.
 
-   The repair is **hide, not delete** — `active='no'`, which is the switch the
-   app's own browse query reads, so the item leaves the site and nothing is
-   destroyed. It also has to be that: the import hardlinks the source into the
-   file volume, so "the source is gone" and "the bytes are gone" are different
-   facts, and a library that is unmounted for a minute must not become a database
-   that has forgotten its films. Re-activating is automatic — the file coming
-   back changes the fingerprint, the import re-runs, and `active` goes back to
-   `yes`. `--remove` does the destructive version for the one case that wants it.
+   The repair **deletes the item**: its catalogue rows, its thumbnails and the
+   media copy this tool wrote for it — the film is gone from `/data/media`, so it
+   should be gone from the site, and leaving a hardlink behind would keep its bytes
+   on disk forever. The rows are removed the way the import writes them (thumbs
+   through `cb_video_image`/`cb_video_thumb`, series membership through
+   `cb_collection_items`), so nothing is left dangling. `--hide` is the reversible
+   variant (`active='no'`, the switch the app's own browse query reads) for a
+   library that is only *temporarily* absent.
+
+   Deleting is therefore guarded, because it is the one operation that cannot be
+   undone by re-running: a run refuses outright when the library is entirely
+   empty (`scan_library` found nothing), which is what an unmounted `/data/media`
+   looks like and is otherwise indistinguishable from "every film was deleted".
 
 2. **A CHEAP TRIGGER, so "automatic" costs nothing when nothing happened.** The
    import walks the whole library and probes every item with ffprobe; running that
@@ -45,7 +50,7 @@ USAGE
     python3 scripts/clipbucket-sync.py --check    # drift in either direction, write nothing
     python3 scripts/clipbucket-sync.py --apply    # converge, if anything changed
     python3 scripts/clipbucket-sync.py --apply --force        # import even if unchanged
-    python3 scripts/clipbucket-sync.py --apply --remove       # delete vanished rows outright
+    python3 scripts/clipbucket-sync.py --apply --hide         # hide instead of deleting
 
 Driven by `systemd/monarch-clipbucket-sync.timer`; see docs/operations.md.
 
@@ -58,6 +63,7 @@ import argparse
 import hashlib
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -126,19 +132,53 @@ def write_state(path: str, value: str) -> None:
 
 
 # ── the catalogue side ───────────────────────────────────────────────────────
-def catalogue_rows(container: str) -> dict[str, bool]:
-    """`file_name -> active` for every row this tool owns, read once.
+def catalogue_rows(container: str) -> dict[str, tuple[int, bool]]:
+    """`file_name -> (videoid, active)` for every row this tool owns, read once.
 
     Scoped by `file_directory` — the same scope the import writes — so a video
-    added by hand in the app's own UI is left alone rather than hidden for the
+    added by hand in the app's own UI is left alone rather than deleted for the
     crime of not being in `/data/media`.
     """
     rows = cl.mysql_query(
         container,
-        "SELECT file_name, active FROM cb_video "
+        "SELECT file_name, videoid, active FROM cb_video "
         f"WHERE file_directory='{cl.MEDIA_DIR}';",
     )
-    return {row[0]: (row[1] == "yes" if len(row) > 1 else True) for row in rows}
+    return {
+        row[0]: (int(row[1]) if len(row) > 1 and row[1].isdigit() else 0,
+                 (row[2] == "yes" if len(row) > 2 else True))
+        for row in rows
+    }
+
+
+def vanished_names(rows: dict[str, tuple[int, bool]], on_disk: set) -> list[str]:
+    """Catalogue rows still listed whose source is not on disk any more.
+
+    An `active='no'` row is already hidden, so it is not drift — otherwise a host
+    converged with `--hide` would report the same row dirty on every run forever.
+    """
+    return sorted(
+        name for name, (_videoid, active) in rows.items() if active and name not in on_disk
+    )
+
+
+# Every table holding a row that points at `cb_video.videoid`, with the column it
+# points through — read off the live schema's foreign keys. `cb_video_image` is
+# the one that matters for ordering (see `remove_items`); `cb_video_subtitle` is
+# the only ON DELETE CASCADE, listed anyway so this is "the whole set" rather
+# than "the whole set except the one handled for us".
+VIDEO_CHILD_TABLES = (
+    ("cb_videos_categories", "id_video"),
+    ("cb_video_conversion_queue", "videoid"),
+    ("cb_video_embed", "videoid"),
+    ("cb_video_image", "videoid"),
+    ("cb_video_rates", "id_video"),
+    ("cb_video_subtitle", "videoid"),
+    ("cb_video_tags", "id_video"),
+    ("cb_video_tmdb", "video_id"),
+    ("cb_video_users", "videoid"),
+    ("cb_video_views", "id_video"),
+)
 
 
 def set_active(container: str, names: list[str], active: str) -> None:
@@ -150,7 +190,66 @@ def set_active(container: str, names: list[str], active: str) -> None:
     )
 
 
-def converge(facts: dict, force: bool, remove: bool, state: str,
+def remove_files(facts: dict, name: str) -> int:
+    """The files this tool wrote for one item: its media copies and its thumbs.
+
+    The media is a hardlink into the source library, so removing the row and
+    leaving the file keeps a deleted film's bytes alive for as long as the volume
+    is. Thumbnails live one directory down, named after the item
+    (`thumbs/video/<dir>/<file_name>/`), which is why this is an `rmtree` rather
+    than a glob over the files.
+    """
+    files_path = facts["files_path"]
+    videos = os.path.join(files_path, "upload", "files", "videos", cl.MEDIA_DIR)
+    thumbs = os.path.join(files_path, "upload", "files", "thumbs", "video", cl.MEDIA_DIR, name)
+    removed = 0
+    # `keep=""` never matches, so this returns every copy for the item, not the
+    # one a repair would have kept.
+    for candidate in cl.stale_media(videos, name, ""):
+        try:
+            os.remove(os.path.join(videos, candidate))
+            removed += 1
+        except OSError:
+            pass  # already gone; the row removal is what matters
+    if os.path.isdir(thumbs):
+        shutil.rmtree(thumbs, ignore_errors=True)
+        removed += 1
+    return removed
+
+
+def remove_items(container: str, facts: dict, named: dict[str, int]) -> int:
+    """Delete the catalogue rows AND the files for these items. Returns files removed.
+
+    The child rows are read off the live schema's foreign keys into `cb_video`,
+    and it has to be *all* of them: nearly every one is RESTRICT or NO ACTION, so
+    a table left out does not merely leave an orphan behind — MySQL aborts the
+    statement at that point, and the item ends up half-deleted instead (media
+    still on disk, `cb_video_image` already gone). Which is exactly what happened
+    the first time this ran, on `cb_videos_categories`.
+
+    Everything runs in one transaction for the same reason: a schema change that
+    turns up a constraint this list does not know about then rolls back to the
+    item still whole, which is a state the next run can judge.
+
+    Thumbs are deleted through a join rather than by `videoid`, because they hang
+    off `cb_video_image.id_video_image`.
+    """
+    ids = ", ".join(str(v) for v in named.values())
+    statements = [
+        # Before the image rows go, since it keys off them.
+        "DELETE t FROM cb_video_thumb t JOIN cb_video_image i "
+        f"ON i.id_video_image=t.id_video_image WHERE i.videoid IN ({ids})",
+        *(f"DELETE FROM {table} WHERE {column} IN ({ids})" for table, column in VIDEO_CHILD_TABLES),
+        # A series holds its episodes through `cb_collection_items`, keyed by
+        # `object_id` with `type='videos'`.
+        f"DELETE FROM cb_collection_items WHERE type='videos' AND object_id IN ({ids})",
+        f"DELETE FROM cb_video WHERE videoid IN ({ids})",
+    ]
+    cl.mysql_exec(container, "START TRANSACTION; " + "; ".join(statements) + "; COMMIT;")
+    return sum(remove_files(facts, name) for name in named)
+
+
+def converge(facts: dict, force: bool, hide: bool, state: str,
              root: str, movies_dir: str, tv_dir: str, settle: int,
              dry_run: bool, stream) -> int:
     """Report and (unless `dry_run`) repair both directions. Returns an exit code."""
@@ -163,10 +262,7 @@ def converge(facts: dict, force: bool, remove: bool, state: str,
     on_disk = {item.file_name for item in items}
 
     rows = catalogue_rows(container)
-    # A row whose file is not on disk any more. `active='no'` rows are already
-    # hidden, so they are not drift — reporting them again would make a converged
-    # host look dirty forever.
-    vanished = sorted(name for name, active in rows.items() if active and name not in on_disk)
+    vanished = vanished_names(rows, on_disk)
 
     if dry_run:
         # The import's own verdict on the other direction: it is the thing that
@@ -177,7 +273,11 @@ def converge(facts: dict, force: bool, remove: bool, state: str,
         for name in missing.missing_rows:
             print(f"  missing      {name}: no cb_video row — the library item is invisible", file=stream)
         for name in vanished:
-            print(f"  vanished     {name}: its source is gone from the media root — hide it", file=stream)
+            print(
+                f"  vanished     {name}: its source is gone from the media root — "
+                f"{'hide' if hide else 'delete'} it",
+                file=stream,
+            )
         if not (missing.drift or unparsed or vanished):
             print(f"clipbucket-sync: in sync ({len(on_disk)} item(s), {len(rows)} catalogue row(s))")
             return 0
@@ -202,21 +302,20 @@ def converge(facts: dict, force: bool, remove: bool, state: str,
         return 2
 
     for name in vanished:
-        verb = "remove" if remove else "hide"
+        verb = "hide" if hide else "delete"
         print(f"  vanished     {name}: its source is gone from the media root — {verb} it", file=stream)
 
     if vanished:
-        if remove:
-            quoted = ", ".join(f"'{cl.sql_quote(n)}'" for n in vanished)
-            cl.mysql_exec(
-                container,
-                f"DELETE FROM cb_video WHERE file_directory='{cl.MEDIA_DIR}' "
-                f"AND file_name IN ({quoted});",
-            )
-            print(f"clipbucket-sync: removed {len(vanished)} vanished row(s)", file=sys.stderr)
-        else:
+        if hide:
             set_active(container, vanished, "no")
             print(f"clipbucket-sync: hid {len(vanished)} vanished row(s)", file=sys.stderr)
+        else:
+            files = remove_items(container, facts, {n: rows[n][0] for n in vanished})
+            print(
+                f"clipbucket-sync: deleted {len(vanished)} vanished item(s) "
+                f"({files} file(s)/directory(ies) removed)",
+                file=sys.stderr,
+            )
 
     # THE TRIGGER IS THE FINGERPRINT ALONE, deliberately. `missing_rows` would
     # also work — an item on disk with no row is the add case — but it counts a
@@ -252,7 +351,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Keep ClipBucket's catalogue in step with the Jellyfin library.",
         epilog=(
             "Exit: 0 in sync/applied · 1 drift (--check) or the import failed · 2 cannot "
-            "judge. Deletions are HIDDEN (active='no') unless --remove is given."
+            "judge. A vanished item is DELETED (rows + media + thumbnails); --hide "
+            "only hides it (active='no') so the next import can bring it back."
         ),
     )
     action = parser.add_mutually_exclusive_group(required=True)
@@ -266,8 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settle", type=int, default=SETTLE_DEFAULT,
                         help="seconds a file must be untouched before it counts (default 180)")
     parser.add_argument("--force", action="store_true", help="import even when the library is unchanged")
-    parser.add_argument("--remove", action="store_true",
-                        help="DELETE vanished rows instead of hiding them (default: hide)")
+    parser.add_argument("--hide", action="store_true",
+                        help="only hide vanished items (active='no'); the default deletes them")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -283,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
     stream = sys.stderr if args.quiet else sys.stdout
     try:
         return converge(
-            facts, args.force, args.remove, args.state_file,
+            facts, args.force, args.hide, args.state_file,
             args.media_root, args.movies_dir, args.tv_dir, args.settle,
             dry_run=args.check, stream=stream,
         )

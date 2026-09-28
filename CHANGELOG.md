@@ -22,15 +22,29 @@ are written by hand and describe the behaviour change, not the commits.
   command. `scripts/clipbucket-sync.py` closes both halves, and
   `systemd/monarch-clipbucket-sync.{service,timer}` runs it every two minutes
   (installed and enabled by `install-monarch.sh` alongside the other oneshots).
-  It **hides** a vanished row (`active='no'`, the switch the app's own browse
-  query reads) rather than deleting it: the import hardlinks the source into the
-  file volume, so "the source is gone" and "the bytes are gone" are different
-  facts, and a library unmounted for a minute must not become a catalogue that has
-  forgotten its films. Re-activating is automatic — the source coming back moves
-  the fingerprint, the import re-runs, and `active` returns to `yes`. `--remove`
-  is the destructive variant and deliberately not what the timer runs.
+  It **deletes** a vanished item — its catalogue rows (plus the
+  `cb_video_image`/`cb_video_thumb` thumbnails the import writes, and its
+  `cb_collection_items` series membership), its thumbnail directory, and the media
+  copy it made. That last part is why deletion rather than hiding is the default:
+  the import **hardlinks** the source into the file volume, so removing the row
+  and leaving the file would keep a deleted film's bytes on disk for as long as
+  the volume lived. `--hide` is the reversible variant (`active='no'`, the switch
+  the app's own browse query reads) for a library that is only temporarily
+  absent.
 
-  Two guards keep it from either doing damage or doing work: the expensive half
+  The row deletions are exhaustive and run inside one transaction, which is a
+  correction rather than a flourish: the first version deleted `cb_video`, its
+  images and its thumbs, and looked right, but `cb_videos_categories` also has a
+  RESTRICT foreign key onto `cb_video.videoid`, so MySQL aborted the statement
+  *after* `cb_video_image` had already gone — the item ended up half-deleted, its
+  row still listed and its images gone. Every table keyed to `cb_video` is now
+  covered, and a constraint the list does not know about rolls the deletion back
+  to an item still whole, which is a state the next run can judge.
+
+  Three guards keep it from doing damage or doing work: it refuses outright when
+  the library is entirely empty (an unmounted `/data/media` looks exactly like
+  "every film was deleted", and deleting is the one repair a re-run cannot undo);
+  the expensive half
   (a full library walk plus one ffprobe per item) runs **only** when a fingerprint
   of every file's path, size and mtime actually changed, and a source written
   within `CLIPBUCKET_SYNC_SETTLE` seconds (180) is held back from the fingerprint

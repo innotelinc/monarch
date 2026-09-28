@@ -233,14 +233,17 @@ is, on `monarch-clipbucket-sync.timer` (every two minutes, installed by
 `install-monarch.sh`), for two reasons the import cannot cover by itself: it is a
 command somebody has to remember, and it only asks one direction of drift — it
 never examines a row whose source is *gone*, so a film deleted in Jellyfin stays
-listed here and `--check` still says `in sync`. The sync also hides those rows
-(`active='no'`; never a delete) and gates the import on a fingerprint of the
-library, so a run that changed nothing costs a directory walk.
+listed here and `--check` still says `in sync`. The sync also **deletes** those
+items — rows, thumbnails and the media copy, which matters because the media is a
+hardlink and would otherwise keep a deleted film's bytes alive — and gates the
+import on a fingerprint of the library, so a run that changed nothing costs a
+directory walk.
 
 ```bash
 python3 scripts/clipbucket-sync.py --check   # drift in BOTH directions, writes nothing
 python3 scripts/clipbucket-sync.py --apply   # converge, if anything changed
 python3 scripts/clipbucket-sync.py --apply --force    # import even if unchanged
+python3 scripts/clipbucket-sync.py --apply --hide     # hide a vanished item instead
 ```
 
 Three things have to be true for a video to be visible, and each fails

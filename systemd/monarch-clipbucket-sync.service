@@ -20,9 +20,12 @@ WorkingDirectory=/opt/monarch
 #     re-implement any of that.
 #   * DELETIONS — the library tool walks the library and never asks about a row
 #     whose source is gone, so it answers `in sync` while the site still lists a
-#     film Jellyfin deleted. The sync compares the other way too and sets
-#     `active='no'` (hide, not delete — `--remove` is the destructive variant, and
-#     it is deliberately not what this unit runs).
+#     film Jellyfin deleted. The sync compares the other way too and DELETES the
+#     item: its catalogue rows (including `cb_collection_items` membership), its
+#     thumbnails, and the media copy it wrote. That last part matters — the media
+#     is a HARDLINK into the source library, so leaving it would keep a deleted
+#     film's bytes on disk for as long as the volume lives. `--hide` is the
+#     reversible variant, for a library that is only temporarily absent.
 #
 # The expensive half is gated on a fingerprint of the library, so a run that finds
 # nothing changed never walks-and-ffprobes the whole tree; and a file written

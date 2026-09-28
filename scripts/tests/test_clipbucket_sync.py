@@ -12,7 +12,9 @@ library:
     minutes forever;
   * **the settle window** is what keeps a half-written film out of the import, so
     a file touched inside it must be invisible to the fingerprint *and* become
-    visible once it is old enough.
+    visible once it is old enough;
+  * **which rows the delete covers** — the shape of the SQL, not a database. That
+    is the half that broke in production, so it is pinned here.
 
 The database half (`catalogue_rows`, `set_active`) is deliberately not faked: it
 is `clipbucket-library.py`'s own plumbing, tested there, and a second mock of it
@@ -26,6 +28,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.abspath(os.path.join(HERE, "..", "clipbucket-sync.py"))
@@ -117,6 +120,96 @@ class FingerprintTest(unittest.TestCase):
             cs.fingerprint(absent, MOVIES, TV, 0, time.time()),
             cs.fingerprint(absent, MOVIES, TV, 0, time.time()),
         )
+
+
+class VanishedTest(unittest.TestCase):
+    """Which catalogue rows count as "the source is gone".
+
+    Rows are `file_name -> (videoid, active)`. The judgement decides what gets
+    DELETED, so the two ways to get it wrong both matter: keeping a row whose film
+    is gone (the bug this script exists for) and deleting one that is merely
+    hidden already (`--hide` was used, and a converged host must not re-report it
+    as drift forever).
+    """
+
+    def test_a_listed_row_with_no_source_is_vanished(self):
+        rows = {"gone": (7, True), "here": (8, True)}
+        self.assertEqual(cs.vanished_names(rows, {"here"}), ["gone"])
+
+    def test_an_already_hidden_row_is_not_vanished(self):
+        rows = {"gone": (7, False)}
+        self.assertEqual(cs.vanished_names(rows, set()), [])
+
+    def test_a_row_whose_source_is_back_is_not_vanished(self):
+        rows = {"back": (7, True)}
+        self.assertEqual(cs.vanished_names(rows, {"back"}), [])
+
+    def test_the_answer_is_sorted_so_a_run_is_reproducible(self):
+        rows = {"b": (2, True), "a": (1, True)}
+        self.assertEqual(cs.vanished_names(rows, set()), ["a", "b"])
+
+
+class RemoveItemsTest(unittest.TestCase):
+    """The delete a vanished item gets: completeness, order, and one transaction.
+
+    None of this is visible by running the tool against the real schema, which is
+    why it is pinned here: the first version deleted `cb_video`, its images and
+    its thumbs, and looked right. It was not — `cb_videos_categories` also has a
+    RESTRICT foreign key onto `cb_video.videoid`, so MySQL aborted the statement
+    after `cb_video_image` had already gone and left the item half-deleted (row
+    present, images gone, media file still on disk). Completeness and order are
+    exactly the two properties a reader cannot check by eye against a schema they
+    cannot see from the call site.
+
+    `mysql_exec` is stubbed so the SQL is inspected rather than executed; nothing
+    else about the delete is faked.
+    """
+
+    def setUp(self):
+        self.calls: list[str] = []
+        patcher = mock.patch.object(cs.cl, "mysql_exec", lambda container, sql: self.calls.append(sql))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        files = mock.patch.object(cs, "remove_files", lambda facts, name: 0)
+        files.start()
+        self.addCleanup(files.stop)
+
+    def sql(self, named: dict[str, int] | None = None) -> str:
+        cs.remove_items("clipbucket", {}, named or {"gone": 7})
+        self.assertEqual(len(self.calls), 1, "one call, so one connection and one transaction")
+        return self.calls[0]
+
+    def test_every_child_table_of_cb_video_is_covered(self):
+        # Missing one is not a tidiness problem: the constraint aborts the delete.
+        sql = self.sql()
+        for table, column in cs.VIDEO_CHILD_TABLES:
+            self.assertIn(f"DELETE FROM {table} WHERE {column} IN (7)", sql)
+        self.assertIn(
+            "DELETE FROM cb_collection_items WHERE type='videos' AND object_id IN (7)", sql
+        )
+        self.assertIn("DELETE FROM cb_video WHERE videoid IN (7)", sql)
+
+    def test_thumbs_go_before_the_image_rows_they_hang_off(self):
+        sql = self.sql()
+        self.assertLess(
+            sql.index("DELETE t FROM cb_video_thumb t"),
+            sql.index("DELETE FROM cb_video_image "),
+            "thumbs key off cb_video_image.id_video_image, so deleting images first orphans them",
+        )
+
+    def test_it_is_one_transaction_so_a_surprise_rolls_back(self):
+        # A schema change that adds a constraint this list does not know about must
+        # leave the item whole (a state the next run can judge), not half-deleted.
+        sql = self.sql()
+        self.assertTrue(sql.startswith("START TRANSACTION;"), sql)
+        self.assertTrue(sql.endswith("COMMIT;"), sql)
+
+    def test_every_id_goes_in_the_same_pass(self):
+        self.assertIn("IN (3, 9)", self.sql({"a": 3, "b": 9}))
+
+    def test_the_files_are_removed_for_each_item_and_counted(self):
+        with mock.patch.object(cs, "remove_files", lambda facts, name: 2):
+            self.assertEqual(cs.remove_items("clipbucket", {}, {"a": 3, "b": 9}), 4)
 
 
 class StateTest(unittest.TestCase):
