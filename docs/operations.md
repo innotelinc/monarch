@@ -228,6 +228,21 @@ It is idempotent and reads the library read-only. An item's identity is its
 **path**, so a re-run converges instead of duplicating, editing a title in the
 admin area is not undone, and renaming nothing orphans a file.
 
+That command is **not** the thing that runs on its own. `scripts/clipbucket-sync.py`
+is, on `monarch-clipbucket-sync.timer` (every two minutes, installed by
+`install-monarch.sh`), for two reasons the import cannot cover by itself: it is a
+command somebody has to remember, and it only asks one direction of drift — it
+never examines a row whose source is *gone*, so a film deleted in Jellyfin stays
+listed here and `--check` still says `in sync`. The sync also hides those rows
+(`active='no'`; never a delete) and gates the import on a fingerprint of the
+library, so a run that changed nothing costs a directory walk.
+
+```bash
+python3 scripts/clipbucket-sync.py --check   # drift in BOTH directions, writes nothing
+python3 scripts/clipbucket-sync.py --apply   # converge, if anything changed
+python3 scripts/clipbucket-sync.py --apply --force    # import even if unchanged
+```
+
 Three things have to be true for a video to be visible, and each fails
 invisibly on its own — which is why one tool owns all three rather than leaving
 them to hand-editing:

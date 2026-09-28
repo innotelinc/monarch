@@ -110,14 +110,20 @@ install_service() {
   # whenever the edge holds what the listener is already serving.
   for unit in monarch-livetv-guide.service monarch-livetv-guide.timer \
               monarch-livetv-dial.service monarch-livetv-dial.timer \
-              monarch-jellyfin-tls.service monarch-jellyfin-tls.timer; do
+              monarch-jellyfin-tls.service monarch-jellyfin-tls.timer \
+              monarch-clipbucket-sync.service monarch-clipbucket-sync.timer; do
     $SUDO cp "$root$TARGET/systemd/$unit" "$root/etc/systemd/system/$unit" 2>/dev/null || \
       $SUDO cp "$ROOT/systemd/$unit" "$root/etc/systemd/system/$unit"
   done
+  # `monarch-clipbucket-sync` is the fourth oneshot: it keeps ClipBucket's
+  # catalogue in step with the Jellyfin library — additions AND deletions — so the
+  # two films that sat in /data/media invisible on 2026-09-28 cannot happen again
+  # without it. Two minutes is the interval; see systemd/monarch-clipbucket-sync.timer.
   $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" \
     "$root/etc/systemd/system/monarch-livetv-guide.service" \
     "$root/etc/systemd/system/monarch-livetv-dial.service" \
-    "$root/etc/systemd/system/monarch-jellyfin-tls.service"
+    "$root/etc/systemd/system/monarch-jellyfin-tls.service" \
+    "$root/etc/systemd/system/monarch-clipbucket-sync.service"
   # Local Nginx Proxy Manager is opt-in via the "npm" compose profile. When
   # NPM_MODE=remote (MONARCH_NPM_LOCAL=0) drop the --profile flag so the unit
   # never starts a local NPM container.
@@ -146,7 +152,7 @@ install_service() {
     # at all. The certificate timer is enabled for the same reason — an un-renewed
     # certificate is only noticed when a client refuses to connect.
     for timer in monarch-livetv-guide.timer monarch-livetv-dial.timer \
-                 monarch-jellyfin-tls.timer; do
+                 monarch-jellyfin-tls.timer monarch-clipbucket-sync.timer; do
       $SUDO systemctl --root "$sysroot" enable "$timer" 2>/dev/null || \
         $SUDO ln -sf "/etc/systemd/system/$timer" "$sysroot/etc/systemd/system/timers.target.wants/$timer"
     done
@@ -157,6 +163,7 @@ install_service() {
       $SUDO systemctl start monarch-livetv-guide.timer 2>/dev/null || true
       $SUDO systemctl start monarch-livetv-dial.timer 2>/dev/null || true
       $SUDO systemctl start monarch-jellyfin-tls.timer 2>/dev/null || true
+      $SUDO systemctl start monarch-clipbucket-sync.timer 2>/dev/null || true
     fi
   else
     $SUDO systemctl daemon-reload 2>/dev/null || true
@@ -166,9 +173,12 @@ install_service() {
       $SUDO ln -sf /etc/systemd/system/monarch-drift-check.timer /etc/systemd/system/timers.target.wants/monarch-drift-check.timer
     $SUDO systemctl enable monarch-jellyfin-tls.timer 2>/dev/null || \
       $SUDO ln -sf /etc/systemd/system/monarch-jellyfin-tls.timer /etc/systemd/system/timers.target.wants/monarch-jellyfin-tls.timer
+    $SUDO systemctl enable monarch-clipbucket-sync.timer 2>/dev/null || \
+      $SUDO ln -sf /etc/systemd/system/monarch-clipbucket-sync.timer /etc/systemd/system/timers.target.wants/monarch-clipbucket-sync.timer
     $SUDO systemctl start monarch.service 2>/dev/null || true
     $SUDO systemctl start monarch-drift-check.timer 2>/dev/null || true
     $SUDO systemctl start monarch-jellyfin-tls.timer 2>/dev/null || true
+    $SUDO systemctl start monarch-clipbucket-sync.timer 2>/dev/null || true
   fi
 }
 

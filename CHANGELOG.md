@@ -12,6 +12,32 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **ClipBucket's catalogue now follows the library by itself — additions and
+  deletions.** `clipbucket-library.py` owns the import but it is a command
+  somebody has to remember, and it only ever asks one direction: *is every item
+  on disk in the catalogue?* A row whose source is **gone** is never examined, so
+  `--check` reported `in sync` while tube.innotel.us still listed a film Jellyfin
+  had deleted — and on 2026-09-28 two films (`Runner`, `The Mongoose`) had been
+  sitting in `/data/media` invisible for days for want of someone typing the
+  command. `scripts/clipbucket-sync.py` closes both halves, and
+  `systemd/monarch-clipbucket-sync.{service,timer}` runs it every two minutes
+  (installed and enabled by `install-monarch.sh` alongside the other oneshots).
+  It **hides** a vanished row (`active='no'`, the switch the app's own browse
+  query reads) rather than deleting it: the import hardlinks the source into the
+  file volume, so "the source is gone" and "the bytes are gone" are different
+  facts, and a library unmounted for a minute must not become a catalogue that has
+  forgotten its films. Re-activating is automatic — the source coming back moves
+  the fingerprint, the import re-runs, and `active` returns to `yes`. `--remove`
+  is the destructive variant and deliberately not what the timer runs.
+
+  Two guards keep it from either doing damage or doing work: the expensive half
+  (a full library walk plus one ffprobe per item) runs **only** when a fingerprint
+  of every file's path, size and mtime actually changed, and a source written
+  within `CLIPBUCKET_SYNC_SETTLE` seconds (180) is held back from the fingerprint
+  so a half-copied film is never imported while an `*arr` app is still writing it.
+  First run on this host found and hid one such stale row
+  (`ghost-in-the-cell-2026-24a89923`) that no existing check could see.
+
 - **The renewal is scheduled, and the restart is part of it.**
   `systemd/monarch-jellyfin-tls.{service,timer}` runs `jellyfin-tls.py --renew
   --restart` weekly (Mondays 04:17, randomised) and is installed and enabled by

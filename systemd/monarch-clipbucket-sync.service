@@ -1,0 +1,47 @@
+[Unit]
+Description=Monarch ClipBucket catalogue sync (additions, deletions, incomplete items)
+Documentation=https://github.com/innotelinc/monarch
+Requires=docker.service
+After=monarch.service docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/monarch
+
+# Keeps the Jellyfin library and ClipBucket's catalogue in step WITHOUT anyone
+# remembering the command. Measured 2026-09-28: two films sat in /data/media for
+# days — Jellyfin listed them, tube.innotel.us did not — because
+# `scripts/clipbucket-library.py` is only ever run by hand.
+#
+# `scripts/clipbucket-sync.py` closes both halves of that:
+#   * additions/incomplete items — it runs `clipbucket-library.py --apply`, the
+#     tool that owns the naming, thumbnails and catalogue rows. This unit does not
+#     re-implement any of that.
+#   * DELETIONS — the library tool walks the library and never asks about a row
+#     whose source is gone, so it answers `in sync` while the site still lists a
+#     film Jellyfin deleted. The sync compares the other way too and sets
+#     `active='no'` (hide, not delete — `--remove` is the destructive variant, and
+#     it is deliberately not what this unit runs).
+#
+# The expensive half is gated on a fingerprint of the library, so a run that finds
+# nothing changed never walks-and-ffprobes the whole tree; and a file written
+# within CLIPBUCKET_SYNC_SETTLE seconds is held back, so a half-copied film is not
+# imported while an *arr app is still writing it.
+#
+# It is a POLL, not an inotify hook, on purpose: the image has no inotify-tools,
+# the media root is nested (systemd path units are not recursive), and it has to
+# catch an import that writes a file and then renames it. Two minutes of latency
+# on a media library is not a cost worth a daemon that can die unnoticed; the
+# `.timer` beside this unit is the whole scheduler.
+ExecStart=/usr/bin/python3 scripts/clipbucket-sync.py --apply
+# The script path is relative to WorkingDirectory, which install-monarch.sh
+# rewrites to the install target; only that line has to change per host.
+# The first run on a cold stack imports everything; later ones are a walk.
+TimeoutStartSec=3600s
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
