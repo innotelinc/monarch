@@ -19,6 +19,7 @@ native M3U tuner and XMLTV guide, and one-command installs — including a boota
 [![Release](https://github.com/innotelinc/monarch/actions/workflows/release.yml/badge.svg)](https://github.com/innotelinc/monarch/actions/workflows/release.yml)
 [![Fresh install check](https://github.com/innotelinc/monarch/actions/workflows/fresh-install.yml/badge.svg)](https://github.com/innotelinc/monarch/actions/workflows/fresh-install.yml)
 [![Latest release](https://img.shields.io/github/v/release/innotelinc/monarch?color=8b5cf6)](https://innotelinc.github.io/monarch/releases)
+[![Theme: Unity](https://img.shields.io/badge/theme-Unity-6366f1)](https://github.com/innotelinc/innotel-platform-stack/blob/main/standards/unity/README.md)
 
 *One script, and your library gets a brain — with wings.*
 
