@@ -75,7 +75,9 @@ RUN sed -i "s/;ffi.enable=preload/ffi.enable=true/g" /etc/php/${PHP_VERSION}/cli
 # Change the nginx and php-fpm user to the UID/GID account entrypoint creates
 RUN sed -i 's/^user www-data;/user containeruser;/g' /etc/nginx/nginx.conf \
     && sed -i "s/^user = www-data\$/user = containeruser/" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf \
-    && sed -i "s/^group = www-data\$/group = containeruser/" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    && sed -i "s/^group = www-data\$/group = containeruser/" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf \
+    && sed -i "s/^listen.owner = www-data\$/listen.owner = containeruser/" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf \
+    && sed -i "s/^listen.group = www-data\$/listen.group = containeruser/" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
 
 # Copy nginx configuration and enable it
 COPY nginx-clipbucket.conf /etc/nginx/sites-available/clipbucket
