@@ -82,7 +82,8 @@ set -uo pipefail
 # Modes:
 #   (default)            check the live stack, read-only
 #   --quiet              only print DRIFT-FAIL lines (for cron/timers)
-#   --heal               when drift is found, re-run monarch-init, then
+#   --heal               when drift is found, reconcile the stack with
+#                        `docker compose up`, re-run monarch-init, then
 #                        re-verify and report whether the stack healed.
 #                        Rate-limited: DRIFT_HEAL_MIN_INTERVAL (default 3600s)
 #                        must have passed since the last heal attempt, else
@@ -743,8 +744,19 @@ elif [ "$ldap_path_code" -eq 1 ]; then
     say "note: no authentik-ldap container on this host (skipped) - Jellyfin logins through Cerulean need it; $(printf '%s' "$ldap_path_out" | grep -m1 FAIL)"
   elif [ "$ldap_state" = "running" ] && { [ "$ldap_health" = "starting" ] || { [ -n "$ldap_age" ] && [ "$ldap_age" -lt "$ldap_grace" ]; }; }; then
     say "note: the Authentik LDAP outpost is still coming up (state=$ldap_state health=$ldap_health age=${ldap_age}s) - Jellyfin logins fail until it listens"
+  elif [ "$ldap_state" = "running" ]; then
+    fail "jellyfin: the Authentik LDAP outpost is running but not serving (health=$ldap_health age=${ldap_age}s), so every Cerulean identity gets HTTP 500 from the login form - run 'docker compose up -d --force-recreate authentik-ldap' (init pins the token; a process already running against the old one keeps failing)"
+    printf '%s\n' "$ldap_path_out" | indent >&2
   else
-    fail "jellyfin: the Authentik LDAP outpost is up but not serving (state=$ldap_state health=$ldap_health age=${ldap_age}s), so every Cerulean identity gets HTTP 500 from the login form - run 'docker compose up -d --force-recreate authentik-ldap' (init pins the token; a process already running against the old one keeps failing)"
+    # Not running is a different fault from running-and-not-serving, and the
+    # message used to call both of them "up but not serving" - so an operator
+    # read "recreate the outpost" while the container was `exited`, recreated
+    # it by hand, and the run stayed red because the stack it belongs to had
+    # never been brought back up. `exited` is the daemon-restarted or stopped
+    # case and is fixed by bringing the project up; `dead` is the daemon's own
+    # broken bookkeeping, which compose cannot operate on at all (see the
+    # Dead-state check below) and which no recreate will help.
+    fail "jellyfin: the Authentik LDAP outpost is not running (state=$ldap_state age=${ldap_age}s), so every Cerulean identity gets HTTP 500 from the login form - bring the stack up with 'docker compose up -d' (state=created/exited means the project is down, not the outpost's token)"
     printf '%s\n' "$ldap_path_out" | indent >&2
   fi
 else
@@ -1210,6 +1222,32 @@ fi
 
 rm -f /tmp/drift-body.$$
 
+# ── docker's own bookkeeping: a container stuck in the Dead state ─────────
+# This is not an app's drift, it is the daemon's. A container whose removal did
+# not finish keeps a `Dead` entry that compose still reads as part of its
+# project, and then *every* compose call for that project - `up`, `ps`, `down` -
+# fails with `Error response from daemon: No such container: <id>`. The whole
+# stack compose manages stays down with it, the LDAP outpost included, so
+# Jellyfin's login form answers 500 and the alert names the outpost while the
+# outpost was simply never started. `--heal` is a no-op here for the same
+# reason: it is a compose call, and it fails the same way (`docker start` in the
+# init re-run is swallowed by `|| true`). `docker rm` does not help either - it
+# reports the same "No such container", because the daemon's in-memory entry has
+# lost the container it names. Only a daemon restart rebuilds the state; the
+# stale directory under /var/lib/docker/containers/<id> is removed first because
+# it is what the daemon re-reads on start.
+#
+# This happened on 2026-09-30: monarch-init's one-shot container was left Dead
+# by a daemon restart, monarch.service looped 2253 times creating the *arr
+# containers without ever starting them, and the media stack was down for ten
+# hours while the alert blamed the outpost.
+if command -v docker >/dev/null 2>&1; then
+  dead_containers=$(docker ps -a --filter status=dead --format '{{.ID}} {{.Image}}' 2>/dev/null | tr '\n' ' ')
+  if [ -n "${dead_containers// /}" ]; then
+    fail "infra: a container is stuck in docker's Dead state (${dead_containers% }) - while one exists every 'docker compose' call for its project fails with 'No such container', so the services it manages (and the LDAP outpost every Cerulean login goes through) never start and --heal is a no-op; clear it with 'rm -rf /var/lib/docker/containers/<id>' then 'systemctl restart docker', then re-run this check; see docs/operations.md 'When docker compose will not bring the stack up'"
+  fi
+fi
+
 # ── --test-telegram: verify the bot without waiting for drift ─────────────
 if [ "$TEST_TG" -eq 1 ]; then
   if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -1237,8 +1275,25 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
     HEAL_SUPPRESSED=1
     echo "drift-check: heal suppressed - last attempt $((now - last))s ago (< ${DRIFT_HEAL_MIN_INTERVAL}s) - escalating to alert" >&2
   else
-    echo "drift-check: $FAILS issue(s) found - re-running monarch-init to heal..." >&2
+    echo "drift-check: $FAILS issue(s) found - reconciling the stack to heal..." >&2
     echo "$now" > "$HEAL_STATE" 2>/dev/null || true
+    # monarch-init only pins credentials; it does not bring a stopped or exited
+    # service back, and the heal used to be nothing but that re-run. So a
+    # service that was merely down - the LDAP outpost after a daemon restart,
+    # say - stayed down through every heal while the alert repeated. `docker
+    # compose up` is what the systemd unit actually runs and what reconciles
+    # the stack, so run it first. Its failure is printed rather than swallowed:
+    # when compose cannot operate on the project (a Dead container, a bad
+    # compose file) that is the answer, and an `|| true` here is what kept it
+    # invisible for ten hours.
+    if command -v docker >/dev/null 2>&1; then
+      if compose_out=$(docker compose -f docker-compose.yml up -d --remove-orphans 2>&1); then
+        echo "drift-check: docker compose up reconciled the stack" >&2
+      else
+        echo "drift-check: docker compose up FAILED during heal - the stack was not reconciled:" >&2
+        printf '%s\n' "$compose_out" | indent >&2
+      fi
+    fi
     if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx monarch-init; then
       # Re-run the existing one-shot container (created by `docker compose up`)
       # and wait for it to exit. init waits up to 15 min per service on first
