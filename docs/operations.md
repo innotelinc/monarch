@@ -658,10 +658,10 @@ creating the *arr containers without ever starting them, and the media stack was
 down for ten hours.
 
 `docker rm` cannot clear it — it reports the same `No such container`, because the
-daemon's in-memory entry has lost the container it names — and neither can
-`drift-check --heal`, which is a compose call too, which is why the alert
-repeated. Only a daemon restart rebuilds the state; the stale directory is removed
-first because that is what the daemon re-reads on start:
+daemon's in-memory entry has lost the container it names. Only a daemon restart
+rebuilds the state; the stale directory is removed first because that is what the
+daemon re-reads on start. `drift-check --heal` now does all of this itself; by hand
+it is:
 
 ```sh
 docker ps -a --filter status=dead
@@ -671,10 +671,15 @@ systemctl reset-failed monarch.service && systemctl restart monarch.service
 bash scripts/drift-check.sh                     # expect: all live-stack invariants OK
 ```
 
-`drift-check` catches this as its own `infra:` finding, and `--heal` reconciles the
-stack with `docker compose up` (printing a compose failure instead of swallowing it
-with `|| true`), so a service that is merely stopped — rather than a container that
-is `Dead` — is brought back by the heal itself.
+`drift-check` catches this as its own `infra:` finding, and `--heal` handles it: it
+removes each `Dead` container's stale directory, restarts the Docker daemon, waits for
+it to answer, and then reconciles the stack with `docker compose up` (printing a
+compose failure instead of swallowing it with `|| true`). A service that is merely
+*stopped* rather than `Dead` is brought back by the same reconcile.
+
+The daemon restart is the one heal that reaches outside Monarch's own stack, so a host
+that would rather have a person decide can set `DRIFT_HEAL_DOCKER_RESTART=0`; the
+finding then stays an alert and the commands above are the fix.
 
 ##### When a Cerulean identity cannot sign in (HTTP 500 from the login form)
 
