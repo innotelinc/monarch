@@ -1402,7 +1402,49 @@ the check skips healing and escalates straight to an alert instead of
 looping `monarch-init` on every tick.
 
 Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
-`DRIFT_MAX_RESTARTS` (default 10) and `DRIFT_HEAL_MIN_INTERVAL` in `.env`.
+`DRIFT_MAX_RESTARTS` (default 10), `DRIFT_HEAL_MIN_INTERVAL` and
+`DRIFT_GATEWAY_URL` (see below) in `.env`.
+
+#### Model gateway: a provider key that stopped being accepted
+
+The estate runs one OmniRoute for every product and it lives on the proxy host,
+not here — and nothing in this stack *needs* it. That is exactly how a refused key
+went unnoticed: the gateway went on answering on `:20128`, refused the work with a
+401, and the failure surfaced somewhere else entirely as *every model in the chain
+failed*. Nothing was watching the gateway's own idea of its credentials.
+
+Set `DRIFT_GATEWAY_URL` (e.g. `http://192.168.1.71:20128`) in `.env` and the check
+reads the gateway's connection list and reports a connection whose key it refused.
+`DRIFT_GATEWAY_TOKEN` is optional — it is sent as a bearer when set, for a gateway
+that gates its management API too — and this estate does not need it: the endpoint
+answers the same fields either way, which was checked both ways rather than
+assumed, so no credential is put on this host for the check.
+
+**What counts is the authentication classes only** — a 401 or a 403, in either
+shape the gateway reports a status (`401`, and `"401.0"`, because the column is a
+float behind the API), or by `lastErrorType`. A 429, a 402, a 404 or a 503 is a
+quota, an exhausted balance, a missing model or an upstream having a bad day: all
+of those are true of this gateway most of the time, and a check that fires on them
+is one nobody reads by the second day. **A connection somebody switched off is not
+drift** — switching a provider off is the documented answer for one that is out of
+credit, so judging it would make the fix itself raise the alarm.
+
+A gateway that cannot be read is a *note* rather than a finding, the same posture
+every other check that needs somewhere else to be reachable takes: this stack does
+not depend on the gateway, so its being down is not this stack's drift. Re-keying
+is a person's work, so **nothing in the heal touches a refused key** — the finding
+repeats, on the timer, until the connection is re-keyed or switched off:
+
+```
+DRIFT-FAIL: gateway: meta-muse/main refused its key (HTTP 401) - re-key it or switch it off
+```
+
+The classification lives in `scripts/gateway-provider-keys.py` (`--check`; and
+`--from-file` to classify a saved payload with no gateway to point at). It exits
+`0` clean, `1` for a refused key and `2` when the gateway could not be read — the
+same convention as `verify-ldap.py`, so the caller tells the cases apart rather
+than reading prose. Covered by `scripts/tests/test_gateway_provider_keys.py`,
+including that a quota error is *not* a finding.
 
 The **full-stack CI workflow** (`.github/workflows/full-stack-drift.yml`)
 boots the real stack (jellyfin, *arrs, prowlarr, qBittorrent, bazarr,

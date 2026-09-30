@@ -184,6 +184,12 @@ jobs:
           done
           grep -q '^prowlarr$' init/arr-allowlist.txt \
             || { echo "::error::init/arr-allowlist.txt no longer names prowlarr - the *arrs call it back by that name"; exit 1; }
+          # The model gateway's key check is the one whose *subject* lives on
+          # another host, so nothing local fails when it stops running - the
+          # gateway keeps answering and a refused key goes back to being seen
+          # only as "every model in the chain failed" somewhere else.
+          grep -q 'gateway-provider-keys.py --check' "$f" \
+            || { echo "::error::$f no longer runs gateway-provider-keys.py --check - a gateway key it refused goes unreported"; exit 1; }
           echo "posture: drift-check wired"
 
       # LDAP is what makes every Jellyfin account Authentik's rather than

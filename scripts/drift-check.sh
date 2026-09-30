@@ -204,6 +204,10 @@ FAIL_LINES=()
 # `npm-proxy-hosts.py` (the reconciler), NOT monarch-init — tracked here because
 # the two are fixed by different programs.
 NPM_DRIFT=0
+# There is deliberately no flag for the model-gateway check below: nothing in the
+# heal can fix a refused key (only a person with a new one can), so it is not a
+# thing for the heal to react to. It is reported, it counts as a failure, and it
+# keeps failing until somebody re-keys the connection or switches it off.
 say()  { [ "$QUIET" -eq 0 ] && echo "$@"; }
 indent() { sed 's/^/  /'; }   # prefix each line of stdin with two spaces
 fail() { echo "DRIFT-FAIL: $*" >&2; FAIL_LINES+=("$*"); FAILS=$((FAILS + 1)); }
@@ -1181,6 +1185,56 @@ if [ "$npm_container" -eq 1 ] \
   fi
 else
   say "ok: npm (skipped - no local NPM container and NPM_MODE!=remote)"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# Model gateway (OmniRoute) — a provider key that stopped being accepted
+# ───────────────────────────────────────────────────────────────────────────
+# The estate runs one OmniRoute for every product and it lives on the proxy
+# host, not here. Nothing in this media stack *needs* it, which is exactly how
+# a rejected key went unnoticed: the gateway went on answering on :20128,
+# refused the work with a 401, and the failure surfaced as "every model in the
+# chain failed" in somebody else's console. Set `DRIFT_GATEWAY_URL` (e.g.
+# http://192.168.1.71:20128) in `.env` to watch it; unset means skipped, like
+# every other check that needs somewhere else to be reachable.
+#
+# What counts is narrow on purpose, and lives in `gateway-provider-keys.py`: the
+# authentication classes only (401/403, in either shape the gateway reports a
+# status). A 429, 402, 404 or 503 is a quota, a missing model or an upstream
+# having a bad day — routine on a free-tier gateway, and reporting them would
+# make this line an alert nobody reads. Only connections the deployment has
+# switched *on* are judged: turning one off is the documented answer for a
+# provider that is out of credit, so judging it would make the fix the alarm.
+#
+# `DRIFT_GATEWAY_TOKEN` is optional and is not needed on this estate: the
+# management API answers the same projection without it (checked both ways
+# against the live gateway), so no credential is put on this host for the check.
+# Set it only for a gateway that gates `/api/*` as well. Both variables live in
+# `.env`.
+GATEWAY_URL="${DRIFT_GATEWAY_URL:-}"
+if [ -z "$GATEWAY_URL" ]; then
+  say "ok: model gateway (skipped - DRIFT_GATEWAY_URL not set)"
+else
+  gw_env=(--url "$GATEWAY_URL")
+  [ -n "${DRIFT_GATEWAY_TOKEN:-}" ] && gw_env+=(--token "$DRIFT_GATEWAY_TOKEN")
+  if gw_out=$(python3 scripts/gateway-provider-keys.py --check "${gw_env[@]}" 2>&1); then
+    say "ok: $(printf '%s\n' "$gw_out" | head -1)"
+  else
+    gw_rc=$?
+    if [ "$gw_rc" -eq 2 ]; then
+      # Unreadable is a note, not a finding - the same posture every other check
+      # that needs somewhere else to be reachable takes. The gateway is not this
+      # stack's dependency and an outage here is not this stack's drift.
+      say "note: the model gateway could not be read (skipped) - $(printf '%s\n' "$gw_out" | tail -1)"
+    else
+      while IFS= read -r gw_line; do
+        case "$gw_line" in
+          REJECTED\ *) fail "gateway: ${gw_line#REJECTED }" ;;
+          *) say "$gw_line" ;;
+        esac
+      done <<< "$gw_out"
+    fi
+  fi
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
