@@ -635,6 +635,47 @@ scripts/drift-check.sh             # "ok: authentik LDAP outpost image tracks th
 this procedure in the failure, so a bump that forgets either side surfaces on the
 next run instead of at the next Jellyfin login.
 
+##### When docker compose will not bring the stack up
+
+`monarch.service` runs `docker compose up -d --wait --remove-orphans`, so when a
+compose call fails the **whole** stack stays down and every symptom downstream of
+it is a red herring: `authentik-ldap` never starts, so Jellyfin answers `500` on
+the login form, and `drift-check` reports the LDAP outpost as though the outpost
+were the fault.
+
+The failure to look for is `docker compose` exiting `1` with
+
+```
+Error response from daemon: No such container: <id>
+```
+
+while `docker ps -a` shows a row with an empty name and the status `Dead`. A
+container whose removal did not finish — a daemon restart is the usual way — keeps
+a `Dead` entry that compose reads as part of the project, and then *every* compose
+call for that project fails: `up`, `ps`, even `down`. On 2026-09-30 the entry was
+`monarch-init`'s own one-shot container; `monarch.service` had looped 2253 times,
+creating the *arr containers without ever starting them, and the media stack was
+down for ten hours.
+
+`docker rm` cannot clear it — it reports the same `No such container`, because the
+daemon's in-memory entry has lost the container it names — and neither can
+`drift-check --heal`, which is a compose call too, which is why the alert
+repeated. Only a daemon restart rebuilds the state; the stale directory is removed
+first because that is what the daemon re-reads on start:
+
+```sh
+docker ps -a --filter status=dead
+rm -rf /var/lib/docker/containers/<id>
+systemctl restart docker
+systemctl reset-failed monarch.service && systemctl restart monarch.service
+bash scripts/drift-check.sh                     # expect: all live-stack invariants OK
+```
+
+`drift-check` catches this as its own `infra:` finding, and `--heal` reconciles the
+stack with `docker compose up` (printing a compose failure instead of swallowing it
+with `|| true`), so a service that is merely stopped — rather than a container that
+is `Dead` — is brought back by the heal itself.
+
 ##### When a Cerulean identity cannot sign in (HTTP 500 from the login form)
 
 There are three independent pieces in this chain and **all of them must match
