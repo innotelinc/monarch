@@ -89,16 +89,17 @@ APPS = {
                  "Zeus - PBX / VoIP (Asterisk + coturn)"),
     "AvantFAX": ("https://fax.zeus.innotel.us", "files",
                  "AvantFAX - fax service"),
-    "AthenIQ Learn": ("https://learn.innotel.us", "moodle",
-                      "AthenIQ - LMS / learning platform"),
-    "AthenIQ Studio": ("https://studio.innotel.us", "code",
-                       "AthenIQ Studio - course authoring"),
     "Signara": ("https://app.signara.innotel.us", "vault",
                 "Signara - trust / certificate signing portal"),
     # -- Platform -----------------------------------------------------------
     # Olympus is decommissioned (2026-09-30) and its names no longer answer, so
-    # its tiles are gone rather than left as dead links. Its replacement
-    # (Genie) gets its own entry once it is deployed.
+    # its tiles are gone rather than left as dead links. AthenIQ is in the same
+    # state now: its `.59` instance is gone and `learn`/`studio.innotel.us`
+    # answer 502, so those tiles are gone too (see DEAD).
+    # Genie is its replacement and is deployed, so it carries the tile Olympus
+    # and AthenIQ Studio used to.
+    "Genie": ("https://genie.innotel.us", "code",
+              "Genie - browser coding console (watch and gate an agent's work)"),
     "Atlas": ("https://atlas.innotel.us", "gitea", "Atlas - DevOps / coding platform"),
     "ZapIt": ("https://zapit.innotel.us", "linkwarden", "ZapIt - short links"),
     "Monarch": ("https://monarch.innotel.us", "jellyfin",
@@ -120,6 +121,8 @@ APPS = {
 # what an operator should not have to tell apart from a working one, and
 # re-adding one is a single line in APPS above.
 DEAD = (
+    "AthenIQ Learn",
+    "AthenIQ Studio",
     "Autobrr",
     "ClipBucket",
     "Deluge",
@@ -201,13 +204,10 @@ DESIGN = (
         app_tile("Capstone"),
         app_tile("Zeus PBX"),
         app_tile("AvantFAX"),
-        app_tile("AthenIQ Learn"),
-        app_tile("AthenIQ Studio"),
         app_tile("Signara"),
     )),
     ("Platform", (
-        app_tile("Olympus"),
-        app_tile("Olympus Studio"),
+        app_tile("Genie"),
         app_tile("Atlas"),
         app_tile("ZapIt"),
         app_tile("Monarch"),
