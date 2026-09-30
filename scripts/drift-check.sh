@@ -82,8 +82,10 @@ set -uo pipefail
 # Modes:
 #   (default)            check the live stack, read-only
 #   --quiet              only print DRIFT-FAIL lines (for cron/timers)
-#   --heal               when drift is found, reconcile the stack with
-#                        `docker compose up`, re-run monarch-init, then
+#   --heal               when drift is found, clear any container stuck in
+#                        Docker's Dead state (which needs a daemon restart; opt
+#                        out with DRIFT_HEAL_DOCKER_RESTART=0), reconcile the
+#                        stack with `docker compose up`, re-run monarch-init, then
 #                        re-verify and report whether the stack healed.
 #                        Rate-limited: DRIFT_HEAL_MIN_INTERVAL (default 3600s)
 #                        must have passed since the last heal attempt, else
@@ -1244,7 +1246,7 @@ rm -f /tmp/drift-body.$$
 if command -v docker >/dev/null 2>&1; then
   dead_containers=$(docker ps -a --filter status=dead --format '{{.ID}} {{.Image}}' 2>/dev/null | tr '\n' ' ')
   if [ -n "${dead_containers// /}" ]; then
-    fail "infra: a container is stuck in docker's Dead state (${dead_containers% }) - while one exists every 'docker compose' call for its project fails with 'No such container', so the services it manages (and the LDAP outpost every Cerulean login goes through) never start and --heal is a no-op; clear it with 'rm -rf /var/lib/docker/containers/<id>' then 'systemctl restart docker', then re-run this check; see docs/operations.md 'When docker compose will not bring the stack up'"
+    fail "infra: a container is stuck in docker's Dead state (${dead_containers% }) - while one exists every 'docker compose' call for its project fails with 'No such container', so the services it manages (and the LDAP outpost every Cerulean login goes through) never start; 'drift-check --heal' clears it by clearing its stale directory and restarting the Docker daemon, or clear it by hand with 'rm -rf /var/lib/docker/containers/<id>' then 'systemctl restart docker'; see docs/operations.md 'When docker compose will not bring the stack up'"
   fi
 fi
 
@@ -1277,6 +1279,35 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
   else
     echo "drift-check: $FAILS issue(s) found - reconciling the stack to heal..." >&2
     echo "$now" > "$HEAL_STATE" 2>/dev/null || true
+    # A container stuck in Docker's Dead state poisons *every* compose call for its
+    # project (see the check above), so nothing else in this heal can work until it
+    # is gone - and no CLI removes one: `docker rm` answers "No such container" for
+    # the same reason the container is Dead, and compose fails the same way. Only a
+    # restart of the daemon rebuilds the state, and the stale directory goes first
+    # because that is what the daemon re-reads on start. This is the one heal step
+    # that touches something other than this stack, so it is scoped to the Dead case
+    # (which is otherwise unrecoverable) and can be turned off on a host that would
+    # rather page a person: DRIFT_HEAL_DOCKER_RESTART=0.
+    if [ "${DRIFT_HEAL_DOCKER_RESTART:-1}" = "1" ] && command -v docker >/dev/null 2>&1; then
+      dead_ids=$(docker ps -a --no-trunc --filter status=dead --format '{{.ID}}' 2>/dev/null)
+      if [ -n "${dead_ids// /}" ]; then
+        echo "drift-check: clearing $(printf '%s' "$dead_ids" | wc -w | tr -d ' ') Dead container(s) - restarting the Docker daemon..." >&2
+        for dead_id in $dead_ids; do
+          rm -rf "/var/lib/docker/containers/$dead_id" || true
+        done
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl restart docker >/dev/null 2>&1 || true
+          # Wait for the daemon to answer again before the compose reconcile below,
+          # so that reconcile is not the thing that discovers the restart is slow.
+          for _ in $(seq 1 30); do
+            docker info >/dev/null 2>&1 && break
+            sleep 2
+          done
+        else
+          echo "drift-check: no systemctl here - a Dead container may remain and compose will keep failing; clear it by hand (see docs/operations.md)" >&2
+        fi
+      fi
+    fi
     # monarch-init only pins credentials; it does not bring a stopped or exited
     # service back, and the heal used to be nothing but that re-run. So a
     # service that was merely down - the LDAP outpost after a daemon restart,
