@@ -12,6 +12,27 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **A gateway key that stopped being accepted is now drift, not a mystery.**
+  Nothing watched OmniRoute's own idea of its credentials: the gateway on the
+  proxy host kept answering `:20128`, refused the work with a 401, and the symptom
+  landed somewhere else entirely as *every model in the chain failed*. Set
+  `DRIFT_GATEWAY_URL` in `.env` and `drift-check` reports each connection the
+  gateway refused — **the authentication classes only** (401 or 403, in either
+  shape the gateway reports a status, or by `lastErrorType`). A 429, a 402, a 404
+  or a 503 is a quota, a balance or an upstream, all of which are true of a
+  free-tier gateway most of the day, and a check that fired on those would be
+  ignored within a week. A connection somebody switched **off** is not reported
+  either: switching one off is the documented fix for a provider that is out of
+  credit, and a fix that raises the alarm is worse than no check at all.
+  `DRIFT_GATEWAY_TOKEN` exists for a gateway that also gates `/api/*` and is not
+  needed here — the endpoint answers the same fields unauthenticated, checked both
+  ways — so no credential is put on this host for it. Unlike the Dead-container
+  case, **nothing in the heal touches a refused key**: re-keying is a person's
+  work, so the finding repeats until somebody does it or switches the connection
+  off. The classification is `scripts/gateway-provider-keys.py` (exit `0` clean,
+  `1` refused, `2` unreadable — the `verify-ldap.py` convention) and it is covered
+  by `scripts/tests/test_gateway_provider_keys.py`.
+
 - **ClipBucket's catalogue now follows the library by itself — additions and
   deletions.** `clipbucket-library.py` owns the import but it is a command
   somebody has to remember, and it only ever asks one direction: *is every item
