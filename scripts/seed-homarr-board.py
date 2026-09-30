@@ -96,9 +96,9 @@ APPS = {
     "Signara": ("https://app.signara.innotel.us", "vault",
                 "Signara - trust / certificate signing portal"),
     # -- Platform -----------------------------------------------------------
-    "Olympus": ("https://olympus.innotel.us", "openai", "Olympus - AI platform"),
-    "Olympus Studio": ("https://studio.olympus.innotel.us", "code",
-                       "Olympus Studio - app builder"),
+    # Olympus is decommissioned (2026-09-30) and its names no longer answer, so
+    # its tiles are gone rather than left as dead links. Its replacement
+    # (Genie) gets its own entry once it is deployed.
     "Atlas": ("https://atlas.innotel.us", "gitea", "Atlas - DevOps / coding platform"),
     "ZapIt": ("https://zapit.innotel.us", "linkwarden", "ZapIt - short links"),
     "Monarch": ("https://monarch.innotel.us", "jellyfin",

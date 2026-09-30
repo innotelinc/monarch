@@ -176,7 +176,7 @@ LAN_ONLY_PORTS = [
 # LAN address and why a gateway pointed anywhere else exits on
 # "dial tcp 172.17.0.1:16380: connect: connection refused" rather than degrading.
 SESSION_STORE_PORT = 16380
-SESSION_STORE_HOST = "192.168.1.46"
+SESSION_STORE_HOST = "192.168.1.71"
 
 OK = "\033[32mPASS\033[0m"
 BAD = "\033[31mFAIL\033[0m"

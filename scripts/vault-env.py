@@ -27,7 +27,7 @@ Resolution rules (identical to Zeus's resolver):
     must fail fast, not boot with literal `vault://` strings.
 
 Environment contract (the Vault CLI's own order):
-  VAULT_ADDR           base URL, e.g. http://192.168.1.46:8200
+  VAULT_ADDR           base URL, e.g. http://192.168.1.71:8200
   VAULT_TOKEN          this stack's path-scoped token, or
   VAULT_TOKEN_FILE     a file holding it
   VAULT_NAMESPACE      Enterprise namespaces; unused on OSS Vault
