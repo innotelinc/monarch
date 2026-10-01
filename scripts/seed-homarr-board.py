@@ -144,7 +144,7 @@ STALE_HOSTS = {
     "recs.monarch.innotel.us": "monarch.innotel.us",
     # The old LAN tile: Requestrr's console has a gate and a name now, so a
     # private address is both wrong and unusable from off the LAN.
-    "http://192.168.1.46:4545": "https://requestrr.monarch.innotel.us",
+    "http://192.168.1.74:4545": "https://requestrr.monarch.innotel.us",
 }
 
 
