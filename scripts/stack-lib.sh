@@ -65,6 +65,72 @@ stack_lib_forward_host() { # [explicit] <override> -> prints the forward host (p
   printf 'host.docker.internal'
 }
 
+# ── agent / builder network ─────────────────────────────────────────────────
+# The network environment a builder deployment (Genie, and the app it runs)
+# needs so that both the app in its preview *and* the sandbox its commands run in
+# hold the **host's** LAN address rather than a docker bridge one.
+#
+# Why the deployment cannot answer this itself: inside a container every address
+# the process can see is its own bridge address (`172.x`), and a `172.x` address
+# is precisely the one a remote gateway or the NPM edge cannot dial. So the
+# address has to be handed *in* from the host, and this is the one place that
+# does it — nobody re-derives it (and re-derives it wrong). The rule it follows
+# is the one above: default-route source address, never loopback, never `172.x`.
+#
+# Prints `KEY=value` lines, so the caller chooses how to apply them:
+#
+#   eval "$(stack_lib_agent_net_env)"                      # into this shell
+#   stack_lib_agent_net_env | ...                          # into a .env
+#
+# With no LAN address (a laptop between networks) every value falls back to
+# loopback and publishing stays *off*: a deployment started without an address is
+# private, rather than pointed at one nothing answers on. An operator's own
+# value always wins, so naming an address by hand is never overridden.
+stack_lib_agent_net_env() { # -> prints KEY=value lines
+  local lan
+  lan="$(stack_lib_lan_ip)"
+  printf 'LAN_IP=%s\n' "$lan"
+  printf 'AGENT_LAN_IP=%s\n' "${AGENT_LAN_IP:-$lan}"
+  if [ -n "$lan" ]; then
+    printf 'AGENT_PREVIEW_HOST=%s\n' "${AGENT_PREVIEW_HOST:-all}"
+    printf 'AGENT_PREVIEW_PUBLISH=%s\n' "${AGENT_PREVIEW_PUBLISH:-true}"
+    printf 'AGENT_SANDBOX_NETWORK=%s\n' "${AGENT_SANDBOX_NETWORK:-host}"
+  else
+    printf 'AGENT_PREVIEW_HOST=%s\n' "${AGENT_PREVIEW_HOST:-loopback}"
+    printf 'AGENT_PREVIEW_PUBLISH=%s\n' "${AGENT_PREVIEW_PUBLISH:-false}"
+    printf 'AGENT_SANDBOX_NETWORK=%s\n' "${AGENT_SANDBOX_NETWORK:-none}"
+  fi
+}
+
+# ── .env editing helpers ────────────────────────────────────────────────────
+# Provisioning computes a value (a LAN IP) and has to put it into a deployment's
+# env. Two rules make that safe to run on every `up`: it is idempotent, and it
+# never clobbers a value an operator set on purpose.
+
+# The value a .env file carries for a key, or empty.
+stack_lib_env_get() { # file key -> prints the file's value or empty
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 0
+  sed -n "s/^${key}=//p" "$file" | head -1 | tr -d '\r'
+}
+
+# Set KEY=value in a .env, in place, without clobbering an operator's value.
+# An existing non-empty value is left alone unless `--force` is given.
+stack_lib_env_set() { # file key value [--force]
+  local file="$1" key="$2" value="$3" force="${4:-}"
+  [ -f "$file" ] || return 0
+  if [ "$force" != "--force" ] && [ -n "$(stack_lib_env_get "$file" "$key")" ]; then
+    return 0
+  fi
+  if grep -q "^${key}=" "$file"; then
+    # `-i.bak` works on both GNU and BSD sed; the backup only exists for the
+    # moment the rewrite takes, because a failure here must not lose the file.
+    sed -i.bak "s|^${key}=.*|${key}=${value}|" "$file" && rm -f "${file}.bak"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
 # ── NPM API helpers (stdlib curl) ───────────────────────────────────────────
 stack_lib_npm_login() { # api_url email password -> prints token or empty
   local api="$1" email="$2" password="$3"
@@ -100,4 +166,5 @@ if [ "${1:-}" = "--selftest" ]; then
   echo "lan_ip=$(stack_lib_lan_ip)"
   echo "forward_host=$(stack_lib_forward_host "$1")"
   echo "env_test=$(stack_lib_env NPM_BASE_DOMAIN '(unset)')"
+  stack_lib_agent_net_env
 fi
