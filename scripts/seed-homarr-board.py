@@ -72,8 +72,8 @@ APPS = {
     # -- Indexers & downloads ----------------------------------------------
     "Prowlarr": ("https://prowlarr.monarch.innotel.us", "prowlarr",
                  "Prowlarr - indexer manager"),
-    "qBittorrent": ("https://qbittorrent.monarch.innotel.us", "qbittorrent",
-                    "qBittorrent - torrent client"),
+    "Transmission": ("https://transmission.monarch.innotel.us", "transmission",
+                     "Transmission - torrent client"),
     "SABnzbd": ("https://sabnzbd.monarch.innotel.us", "sabnzbd",
                 "SABnzbd - usenet client"),
     # -- Business -----------------------------------------------------------
@@ -116,7 +116,7 @@ APPS = {
 #     host runs them and no name fronts them;
 #   * names that never existed in NPM/DNS (`.monarch.local` for all of them,
 #     plus platforms that publish under a different domain), which is why the
-#     `Transmission`/`Onyx`/`Oasis`/`Rizzaura` tiles 000'd on the live board.
+#     `Onyx`/`Oasis`/`Rizzaura` tiles 000'd on the live board.
 # The app row is deleted with the tile: an entry that can only fail is exactly
 # what an operator should not have to tell apart from a working one, and
 # re-adding one is a single line in APPS above.
@@ -133,7 +133,6 @@ DEAD = (
     "Oasis",
     "Rizzaura",
     "TVHeadend",
-    "Transmission",
 )
 
 # Any app still pointing at one of these names is stale by construction.
@@ -192,7 +191,7 @@ DESIGN = (
     )),
     ("Indexers & downloads", (
         app_tile("Prowlarr"),
-        app_tile("qBittorrent"),
+        app_tile("Transmission"),
         app_tile("SABnzbd"),
         widget("indexerManager", 2),
         widget("mediaRequests-requestList", 3),

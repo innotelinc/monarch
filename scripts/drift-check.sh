@@ -24,13 +24,13 @@ set -uo pipefail
 #     - authMethod = external: the Cerulean Authentik auth_request gate is the
 #       ONLY login, so the app must not also show its own Forms prompt
 #     - expected media root folder present
-#     - qBittorrent download client present
+#     - Transmission download client present
 #   Prowlarr:
-#     - qBittorrent download client present
+#     - Transmission download client present
 #     - Sonarr/Radarr/Lidarr/Whisparr apps registered
-#   qBittorrent:
-#     - WebUI login works with the shared credentials
-#     - movies/tv/music/xxx categories exist
+#   Transmission:
+#     - RPC reachable and download dir is /data/torrents
+#     - no local WebUI login (Cerulean is the only door)
 #   Jellyfin:
 #     - admin API access works: the shared credentials when they still match,
 #       otherwise the exported admin token (init writes it; a diverged local
@@ -153,11 +153,13 @@ if not isinstance(pw.get("port"), int):
 if not pw.get("download_client"):
     errors.append("prowlarr.download_client missing")
 
-qbt = m.get("qbt", {})
-if not isinstance(qbt.get("categories"), list) or not qbt["categories"]:
-    errors.append("qbt.categories missing/empty")
-if not isinstance(qbt.get("port"), int):
-    errors.append("qbt.port missing")
+tr = m.get("transmission", {})
+if not isinstance(tr.get("categories"), list) or not tr["categories"]:
+    errors.append("transmission.categories missing/empty")
+if not isinstance(tr.get("port"), int):
+    errors.append("transmission.port missing")
+if not tr.get("download_dir"):
+    errors.append("transmission.download_dir missing")
 
 jf = m.get("jellyfin", {})
 if not isinstance(jf.get("libraries"), list) or not jf["libraries"]:
@@ -314,20 +316,20 @@ except Exception:
   [ "$found" = "1" ] || fail "$svc: root folder $root missing"
 
   body=$(json_get "http://localhost:$port/api/$api/downloadclient" "${hdr[@]}")
-  has_qbt=0
+  has_tr=0
   if [ -n "$body" ]; then
-    has_qbt=$(echo "$body" | python3 -c "
+    has_tr=$(echo "$body" | python3 -c "
 import sys, json
 try:
     cs = json.load(sys.stdin)
-    print(1 if any(c.get('implementation') == 'QBittorrent' for c in cs) else 0)
+    print(1 if any(c.get('implementation') == 'Transmission' for c in cs) else 0)
 except Exception:
     print(0)
 " 2>/dev/null)
   fi
-  [ "$has_qbt" = "1" ] || fail "$svc: qBittorrent download client missing"
+  [ "$has_tr" = "1" ] || fail "$svc: Transmission download client missing"
 
-  say "ok: $svc (auth=$method, root=$([ "$found" = 1 ] && echo yes || echo no), qbt=$([ "$has_qbt" = 1 ] && echo yes || echo no))"
+  say "ok: $svc (auth=$method, root=$([ "$found" = 1 ] && echo yes || echo no), transmission=$([ "$has_tr" = 1 ] && echo yes || echo no))"
 done < <(arr_rows)
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -339,18 +341,18 @@ if [ -n "$pkey" ]; then
   phdr=(-H "X-Api-Key: $pkey")
 
   body=$(json_get "http://localhost:$PROW_PORT/api/v1/downloadclient" "${phdr[@]}")
-  has_qbt=0
+  has_tr=0
   if [ -n "$body" ]; then
-    has_qbt=$(echo "$body" | python3 -c "
+    has_tr=$(echo "$body" | python3 -c "
 import sys, json
 try:
     cs = json.load(sys.stdin)
-    print(1 if any(c.get('implementation') == 'QBittorrent' for c in cs) else 0)
+    print(1 if any(c.get('implementation') == 'Transmission' for c in cs) else 0)
 except Exception:
     print(0)
 " 2>/dev/null)
   fi
-  [ "$has_qbt" = "1" ] || fail "prowlarr: qBittorrent download client missing"
+  [ "$has_tr" = "1" ] || fail "prowlarr: Transmission download client missing"
 
   body=$(json_get "http://localhost:$PROW_PORT/api/v1/applications" "${phdr[@]}")
   apps=""
@@ -370,107 +372,78 @@ except Exception:
       *) fail "prowlarr: app $want not registered (have: '$apps')" ;;
     esac
   done < <(manifest_list "['prowlarr']['apps']")
-  say "ok: prowlarr (qbt=$([ "$has_qbt" = 1 ] && echo yes || echo no), apps='$apps')"
+  say "ok: prowlarr (transmission=$([ "$has_tr" = 1 ] && echo yes || echo no), apps='$apps')"
 else
   fail "prowlarr: API key not found"
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
-# qBittorrent (login + categories)
+# Transmission (RPC reachable + download dir + no local login)
 # ───────────────────────────────────────────────────────────────────────────
-QBT_PORT=$(manifest_val "['qbt']['port']")
-qbt_cj=/tmp/drift-qbt.$$.cookies
-rm -f "$qbt_cj"
-qbt_code=$(curl -s -o /dev/null -w "%{http_code}" -c "$qbt_cj" \
-  -d "username=$USER&password=$PASS" \
-  "http://localhost:$QBT_PORT/api/v2/auth/login")
-# qBittorrent >= 5.2 returns 204 on success; older returns 200.
-if [ "$qbt_code" != "204" ] && [ "$qbt_code" != "200" ]; then
-  fail "qbittorrent: WebUI login failed (HTTP $qbt_code)"
-  rm -f "$qbt_cj"
-else
-  cats=$(curl -s -b "$qbt_cj" "http://localhost:$QBT_PORT/api/v2/torrents/categories" | \
-    python3 -c "
-import sys, json
-try:
-    print(','.join(sorted(json.load(sys.stdin).keys())))
-except Exception:
-    print('')
-" 2>/dev/null)
-  missing=""
-  while IFS= read -r want; do
-    [ -n "$want" ] || continue
-    case ",$cats," in
-      *",$want,"*) : ;;
-      *) missing="$missing $want" ;;
-    esac
-  done < <(manifest_list "['qbt']['categories']")
-  [ -z "$missing" ] || fail "qbittorrent: categories missing:$missing (have: '$cats')"
+# Transmission has no categories to enumerate: Servarr files each download in a
+# subfolder of Transmission's download dir, so the invariants are the download
+# dir itself (must be /data/torrents, outside every library) and the local login
+# being off (the WebUI is loopback-only and transmission-sso is the only door).
+TR_PORT=$(manifest_val "['transmission']['port']")
+TR_WANT_DIR=$(manifest_val "['transmission']['download_dir']")
+tr_state=$(python3 - "$TR_PORT" <<'PY'
+import json, sys, urllib.error, urllib.request
 
-  # A category is two settings, and the NAME alone is not the interesting one:
-  # `lidarr` existed and saved to /data/media/music, which is why Lidarr warned
-  # "places downloads in the root folder" while this check passed. Compare the
-  # paths the manifest records as well.
-  curl -s -b "$qbt_cj" "http://localhost:$QBT_PORT/api/v2/torrents/categories" > "/tmp/drift-qbt-cats.$$" 2>/dev/null
-  qbt_paths=$(python3 - "$MANIFEST" "/tmp/drift-qbt-cats.$$" <<'PY'
-import json, sys
-manifest, live_path = sys.argv[1], sys.argv[2]
-qbt = (json.load(open(manifest)) or {}).get("qbt") or {}
-want = qbt.get("category_paths")
+base = f"http://localhost:{sys.argv[1]}"
+payload = json.dumps({"method": "session-get", "arguments": {}}).encode()
+
+
+def call(session_id):
+    request = urllib.request.Request(f"{base}/transmission/rpc", data=payload, method="POST",
+                                     headers={"Content-Type": "application/json"})
+    if session_id:
+        request.add_header("X-Transmission-Session-Id", session_id)
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read() or b"{}").get("arguments") or {}
+
+
 try:
-    live = json.load(open(live_path))
-except Exception:
-    live = {}
-if not want:
-    print("note: the manifest carries no category paths (predates the map)")
+    try:
+        session = call("")
+    except urllib.error.HTTPError as error:
+        if error.code != 409:
+            raise
+        session = call(error.headers.get("X-Transmission-Session-Id", ""))
+except Exception as error:  # noqa: BLE001
+    print(f"ERR|{error}")
     raise SystemExit(0)
-for name, path in sorted(want.items()):
-    got = (live.get(name) or {}).get("savePath")
-    if got != path:
-        print(f"FAIL {name}: saves to {got!r}, expected {path!r}")
-for name in sorted(set(live) - set(want)):
-    print(f"FAIL stray category {name!r} (not in the manifest)")
+print(f"OK|{session.get('download-dir')}|{session.get('rpc-authentication-required')}")
 PY
 )
-  rm -f "/tmp/drift-qbt-cats.$$"
-  if printf '%s' "$qbt_paths" | grep -q '^FAIL'; then
-    fail "qbittorrent: a category saves somewhere other than the manifest says - a path inside /data/media/<type> is what each *arr reports as 'Download client qBittorrent places downloads in the root folder'; run scripts/arr-download-categories.py"
-    printf '%s\n' "$qbt_paths" | indent >&2
-  fi
-
-  # Cerulean is the only door. qBittorrent keeps a password of its own, so a
-  # user who reaches the WebUI through qbittorrent-sso meets a SECOND login
-  # unless the app trusts the subnet the gateway calls from. An emptied
-  # whitelist is silent: the app simply asks again.
-  qbt_prefs=$(curl -s -b "$qbt_cj" "http://localhost:$QBT_PORT/api/v2/app/preferences" | python3 -c "
-import sys, json
-prefs = json.load(sys.stdin)
-enabled = prefs.get('bypass_auth_subnet_whitelist_enabled')
-whitelist = (prefs.get('bypass_auth_subnet_whitelist') or '').strip()
-print('ok' if (enabled and whitelist) else f'not-trusted (enabled={enabled}, whitelist={whitelist!r})')" 2>/dev/null)
-  if [ "$qbt_prefs" = "ok" ]; then
-    say "ok: qBittorrent trusts the SSO gateway's subnet, so Cerulean is the only login"
+if [[ "$tr_state" == ERR\|* ]]; then
+  fail "transmission: RPC unreachable (${tr_state#ERR|})"
+else
+  IFS='|' read -r _ tr_dir tr_auth <<< "$tr_state"
+  if [ "$tr_dir" = "$TR_WANT_DIR" ]; then
+    say "ok: transmission files downloads under $tr_dir"
   else
-    fail "qbittorrent: the WebUI does not trust the SSO gateway's subnet ($qbt_prefs) - every user meets qBittorrent's own login AFTER Cerulean; re-run monarch-init (configure_qbittorrent sets it)"
+    fail "transmission: download dir is '$tr_dir', expected '$TR_WANT_DIR' - downloads land outside the tree the *arrs import from; re-run monarch-init (configure_transmission pins it)"
   fi
-  say "ok: qbittorrent (login ok, categories='$cats')"
-  rm -f "$qbt_cj"
+  if [ "$tr_auth" = "True" ]; then
+    fail "transmission: the WebUI still requires its own login - every user meets a SECOND login after Cerulean; unset USER/PASS on the transmission service and recreate it, then re-run monarch-init"
+  else
+    say "ok: transmission keeps no local login - Cerulean is the only door"
+  fi
 fi
 
-# The same question asked the other way round: does each *arr tell qBittorrent the
-# category the manifest names? Servarr spells it `tvCategory`/`movieCategory`/
-# `musicCategory`, so a client created with a plain `category` has no category at
-# all - and the download falls back to the default save path, or into a hand-set
-# category that points at a library root. The apps report this only as a warning
-# on their own Health page, which is why it is checked here.
+# The same question asked the other way round: does each *arr tell Transmission
+# the category the manifest names? Servarr sends `category` as a subfolder of the
+# download dir, so a client with no category (or the wrong one) drops the download
+# somewhere the imports do not expect. The apps report this only as a warning on
+# their own Health page, which is why it is checked here.
 dload_cats_out=$(python3 scripts/arr-download-categories.py --check 2>&1)
 dload_cats_code=$?
 if [ "$dload_cats_code" -eq 0 ]; then
-  say "ok: every *arr files its downloads under the manifest's qBittorrent categories"
+  say "ok: every *arr files its downloads under the manifest's Transmission categories"
 elif [ "$dload_cats_code" -eq 1 ]; then
-  say "note: qBittorrent or an *arr is not reachable from here (download categories skipped) - $(printf '%s' "$dload_cats_out" | grep -m1 FAIL)"
+  say "note: Transmission or an *arr is not reachable from here (download categories skipped) - $(printf '%s' "$dload_cats_out" | grep -m1 FAIL)"
 else
-  fail "downloads: an *arr sends a qBittorrent category the manifest does not name, or qBittorrent's paths drifted (arr-download-categories.py exit $dload_cats_code) - downloads land in the default path or in a library root; run scripts/arr-download-categories.py (it restarts nothing)"
+  fail "downloads: an *arr sends a category the manifest does not name, or Transmission's download dir drifted (arr-download-categories.py exit $dload_cats_code) - downloads land in a library root; run scripts/arr-download-categories.py (it restarts nothing)"
   printf '%s\n' "$dload_cats_out" | indent >&2
 fi
 
@@ -1273,7 +1246,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       fi
     fi
     say "ok: infra container $cname (restarts=$rc)"
-  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo qbittorrent; echo jellyfin; echo jellyseerr; echo bazarr; echo homarr; echo nginx-proxy-manager; echo authentik-ldap; } | sort -u)
+  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo transmission; echo jellyfin; echo jellyseerr; echo bazarr; echo homarr; echo nginx-proxy-manager; echo authentik-ldap; } | sort -u)
 fi
 
 rm -f /tmp/drift-body.$$

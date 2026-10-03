@@ -151,7 +151,27 @@ class PinFileTests(unittest.TestCase):
         for entry in pins:
             self.assertEqual(len(entry["asset_sha256"]), 64, entry["name"])
             self.assertEqual(len(entry["assembly_sha256"]), 64, entry["name"])
-            self.assertTrue(entry["release_url"].endswith(entry["asset"]), entry["name"])
+            # Every pin has to name where its zip comes from: an upstream release
+            # URL, or an artifact committed beside the pin file itself.
+            source = entry.get("release_url") or entry.get("asset_path")
+            self.assertTrue(source, entry["name"])
+            if entry.get("release_url"):
+                self.assertTrue(entry["release_url"].endswith(entry["asset"]), entry["name"])
+
+    def test_the_oidc_pin_is_a_bundled_build_of_upstream(self):
+        # Jellyfin 12 does not load 10.11 plugins and upstream never shipped a
+        # 12.0 build, so this pin is the rebuilt zip committed with the pins - not
+        # a release URL, and its hashes have to match the committed bytes.
+        entry = pin.pin_named(pin.load_pins(REPO_ROOT / "init" / "jellyfin-plugins.json"), "oidc")
+        self.assertNotIn("release_url", entry)
+        self.assertEqual(entry["version"], "1.0.10.1")
+        artifact = REPO_ROOT / "init" / entry["asset_path"]
+        self.assertTrue(artifact.is_file(), artifact)
+        blob = artifact.read_bytes()
+        self.assertEqual(len(blob), entry["asset_bytes"], entry["name"])
+        self.assertEqual(sha(blob), entry["asset_sha256"], entry["name"])
+        with zipfile.ZipFile(artifact) as bundle:
+            self.assertEqual(sha(bundle.read(entry["assembly"])), entry["assembly_sha256"])
 
     def test_the_ldap_pin_is_the_build_the_deployment_runs(self):
         # The v24 assembly, not the v23 that was installed beside it and made
@@ -361,6 +381,30 @@ class InstallTests(unittest.TestCase):
                             "--source-url", (site.root / "missing.zip").as_uri()])
         self.assertEqual(code, 1)
         self.assertIn("cannot reach", err)
+
+    def test_install_reads_the_bundled_artifact_without_a_source_url(self):
+        # The OIDC pin's shape: the zip sits beside the pin file, and --install
+        # has to find it there (no release URL, no --source-url).
+        site = Pins()
+        self.addCleanup(site.cleanup)
+        site.repin("oidc", "asset_path", "artifacts/oidc.zip")
+        (site.root / "artifacts").mkdir()
+        (site.root / "artifacts" / "oidc.zip").write_bytes(site.blobs["oidc"])
+        code, out, _ = run(["--install", "--manifest", str(site.manifest),
+                            "--plugins-dir", str(site.plugins), "--plugin", "oidc"])
+        self.assertEqual(code, 0, out)
+        entry = pin.pin_named(site.pins(), "oidc")
+        installed = site.plugins / entry["plugin_dir"] / entry["assembly"]
+        self.assertEqual(installed.read_bytes(), GOOD_OIDC)
+
+    def test_a_missing_bundled_artifact_is_refused_not_crashed(self):
+        site = Pins()
+        self.addCleanup(site.cleanup)
+        site.repin("oidc", "asset_path", "artifacts/not-there.zip")
+        code, _, err = run(["--install", "--manifest", str(site.manifest),
+                            "--plugins-dir", str(site.plugins), "--plugin", "oidc"])
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read the bundled", err)
 
     def test_install_repairs_every_missing_plugin(self):
         site = Pins()

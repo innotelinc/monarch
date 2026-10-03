@@ -56,7 +56,7 @@ release artifacts on every tagged release.
 | 🤖 **AI recommendations** | `monarch-recs`: content-based picks + smart search over your library — fully local, no external AI required | 
 | 🩺 **Library health** | `monarch-health`: missing/duplicate/orphan detection, per-library stats, disk usage, recently-added & most-played | 
 | 🔐 **Cerulean Authentik SSO** | Users & passwords live in Cerulean Authentik; Jellyfin logins resolve via the LDAP outpost — disable a user and their login dies instantly | 
-| 🎯 **Media automation** | Sonarr / Radarr / Lidarr / Whisparr / Prowlarr / qBittorrent / Bazarr, all configured and cross-wired by `monarch-init` | 
+| 🎯 **Media automation** | Sonarr / Radarr / Lidarr / Whisparr / Prowlarr / Transmission / Bazarr, all configured and cross-wired by `monarch-init` | 
 | 📡 **Live TV** | Native M3U tuner + XMLTV guide (iptv-org) — zero TVHeadend setup; bring your own playlist via `LIVETV_M3U_URL` | 
 | 🌐 **Proxy & SSL** | Nginx Proxy Manager auto-configured via API with a wildcard Let's Encrypt cert (DNS challenge) | 
 | 🛡️ **Self-healing** | `monarch-drift-check` verifies the running stack hourly (systemd timer) and auto-repairs drift by re-running init | 
@@ -97,7 +97,7 @@ new subdomains get an A record, and a name that already resolves is left as is. 
 
 Everything after boot is **wired for you**: one-shot `monarch-seed` and `monarch-init`
 containers complete the Jellyfin first-run wizard, install the LDAP-Auth plugin, add media
-libraries, configure every *arr app with the qBittorrent client, register Prowlarr apps,
+libraries, configure every *arr app with the Transmission client, register Prowlarr apps,
 connect Bazarr, and initialize Jellyseerr — all idempotent, all with your shared credentials.
 
 ```bash
@@ -121,7 +121,7 @@ Main entry points (full table in [docs/operations.md](docs/operations.md)):
 | localhost:8002 / 8003 | monarch-recs / monarch-health | AI recommendations + health analytics (internal APIs) |
 
 Credentials are shared: `MONARCH_USERNAME` / `MONARCH_PASSWORD` from `.env` are applied to
-every service that requires a login (Jellyfin, Jellyseerr, all *arr apps, qBittorrent, the
+every service that requires a login (Jellyfin, Jellyseerr, all *arr apps, Transmission, the
 Authentik bootstrap admin…). Subscriber access flows through **Magnate** billing:
 checkout → `paid_users` group → LDAP bind succeeds → Jellyfin login works; cancel → user
 inactive → login blocked.

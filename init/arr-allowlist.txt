@@ -37,7 +37,7 @@ bazarr
 jellyfin
 jellyseerr
 homarr
-qbittorrent
+transmission
 sabnzbd
 flaresolverr
 requestrr

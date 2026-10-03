@@ -2,7 +2,7 @@
 """verify-sso.py — prove Monarch's sign-in posture still holds on a live box.
 
 The media apps are the hard case: Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
-Prowlarr, qBittorrent, SABnzbd and Jellyseerr ship nothing but a local username
+Prowlarr, Transmission, SABnzbd and Jellyseerr ship nothing but a local username
 and password form, and every one of them is switched to trust-the-proxy. So the
 whole posture rests on two things holding at once, and both are asserted here:
 
@@ -98,7 +98,7 @@ SUBDOMAINS = [
     ("whisparr", "whisparr.{base}"),
     ("bazarr", "bazarr.{base}"),
     ("prowlarr", "prowlarr.{base}"),
-    ("qbittorrent", "qbittorrent.{base}"),
+    ("transmission", "transmission.{base}"),
     ("sabnzbd", "sabnzbd.{base}"),
     ("requestrr", "requestrr.{base}"),
     ("clipbucket", "tube.innotel.us"),
@@ -145,8 +145,8 @@ SSO_PROVIDERS = [
 
 # (label, port) — bound to 127.0.0.1 only. Every one of these apps is configured
 # to trust the reverse proxy for identity, so a LAN answer here is precisely the
-# hole this test exists to catch. qBittorrent's 6881 is deliberately not listed:
-# that is the BitTorrent peer port, which has to stay reachable.
+# hole this test exists to catch. Transmission's 51413 is deliberately not
+# listed: that is the BitTorrent peer port, which has to stay reachable.
 LAN_ONLY_PORTS = [
     ("radarr", 7878),
     ("sonarr", 8989),
@@ -154,7 +154,7 @@ LAN_ONLY_PORTS = [
     ("whisparr", 6969),
     ("bazarr", 6767),
     ("prowlarr", 9696),
-    ("qbittorrent", 8080),
+    ("transmission", 9091),
     ("sabnzbd", 8082),
     ("jellyseerr", 5055),
     # Added with their gateways: these four answered on the LAN address until

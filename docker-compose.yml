@@ -217,8 +217,9 @@ services:
     <<: *common-keys
     container_name: whisparr
     # v2-develop (not latest): hotio's `latest` is frozen at v2.2.0-release.231,
-    # which predates Whisparr's qBittorrent 5.2.x support (empty 204 login body
-    # is treated as a failed auth). v2-develop includes that fix.
+    # which predates current Whisparr. (The original reason was qBittorrent
+    # 5.2.x support; qBittorrent was replaced by Transmission on 2026-10-01,
+    # but a frozen image is still a reason to stay on v2-develop.)
     image: ghcr.io/hotio/whisparr:v2-develop
     ports:
       - 127.0.0.1:6969:6969
@@ -230,7 +231,7 @@ services:
   ###############################################
   # PROWLARR - Indexer Manager
   # Radarr/Sonarr/Lidarr/Whisparr are registered as
-  # "Apps" here and qBittorrent as the download client
+  # "Apps" here and Transmission as the download client
   # automatically by monarch-init.
   ###############################################
   prowlarr:
@@ -291,37 +292,59 @@ services:
       - /docker/appdata/homarr/appdata:/appdata
 
   ###############################################
-  # QBITTORRENT - Main Downloader (WebUI on :8080)
+  # TRANSMISSION - Main Downloader (WebUI on :9091)
   #
-  # WebUI credentials (MONARCH_USERNAME / MONARCH_PASSWORD)
-  # are pre-seeded into its config by monarch-seed BEFORE
-  # first start so there is no temporary-password dance.
+  # Replaced qBittorrent on 2026-10-01: qBittorrent 5.2.x leaked memory
+  # (~10 GB/day, qBittorrent/qBittorrent#24618) and OOM-restart-looped the
+  # whole stack. The per-app folders qBittorrent kept as CATEGORIES are
+  # Servarr's category subfolders under Transmission's download dir, so the
+  # layout is unchanged (/data/torrents/<type>).
+  #
+  # No USER/PASS: the WebUI is published on loopback only and transmission-sso
+  # is the sole route to it, so the app keeps no local login and Cerulean
+  # (Authentik) is the only door — the same posture as Bazarr and Seerr. The
+  # linuxserver entrypoint turns rpc-authentication-required OFF whenever USER
+  # and PASS are unset, and turns both RPC whitelists OFF when WHITELIST and
+  # HOST_WHITELIST are empty (so the *arrs reach it by container name).
   ###############################################
-  qbittorrent:
+  transmission:
     <<: *common-keys
-    container_name: qbittorrent
-    image: ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
+    container_name: transmission
+    image: lscr.io/linuxserver/transmission:latest
     stop_grace_period: 30m
     depends_on:
       monarch-seed:
         condition: service_completed_successfully
     ports:
-      # WebUI is loopback only (the qbittorrent-sso gateway fronts it); the
+      # WebUI is loopback only (the transmission-sso gateway fronts it); the
       # torrenting port must stay reachable, so it is deliberately not bound.
-      - 127.0.0.1:8080:8080
-      - 6881:6881
-      - 6881:6881/udp
+      - 127.0.0.1:9091:9091
+      - 51413:51413
+      - 51413:51413/udp
     environment:
       PUID: 1000
       PGID: 1000
       TZ: ${TZ:-America/New_York}
-      QBT_LEGAL_NOTICE: confirm
-      WEBUI_PORT: 8080
-      TORRENTING_PORT: 6881
+      # Fills peer-port. WHITELIST/HOST_WHITELIST are deliberately left unset:
+      # the linuxserver init then disables both RPC whitelists, so the *arrs
+      # are not refused when they connect by container name.
+      PEERPORT: 51413
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/qbittorrent:/config
+      - /docker/appdata/transmission:/config
+      # Same mount as every *arr: download-dir is /data/torrents, so the
+      # category subfolders (/data/torrents/<type>) are the same path in every
+      # container and the *arrs import from a tree outside their libraries.
       - /data:/data
+    healthcheck:
+      # The daemon can die while the s6 supervisor stays up, leaving the
+      # container "Up" with a dead RPC. Probe it so that state shows as
+      # `unhealthy` (and the drift check can act on it).
+      test: ["CMD-SHELL", "transmission-remote -l >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   ###############################################
   # SABNZBD - Usenet Downloader
@@ -341,30 +364,6 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/sabnzbd:/config
       - /data:/data
-
-  ###############################################
-  # TRANSMISSION - BitTorrent
-  ###############################################
-  transmission:
-    <<: *common-keys
-    container_name: transmission
-    image: lscr.io/linuxserver/transmission:latest
-    profiles: ["legacy"]
-    ports:
-      - 9091:9091
-      - 51413:51413
-      - 51413:51413/udp
-    environment:
-      PUID: 1000
-      PGID: 1000
-      TZ: ${TZ:-America/New_York}
-      USER: ${MONARCH_USERNAME:-admin}
-      PASS: ${MONARCH_PASSWORD:-monarch8}
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /docker/appdata/transmission:/config
-      - /data/downloads:/downloads
-      - /data/watch:/watch
 
   ###############################################
   # DELUGE - BitTorrent (WebUI password is set
@@ -659,22 +658,20 @@ services:
       - /docker/appdata/monarch-health:/app/data
 
   ###############################################
-  # MONARCH-SEED - Pre-seed qBittorrent WebUI credentials
-  # Runs once BEFORE qBittorrent first starts so the
-  # WebUI login is MONARCH_USERNAME / MONARCH_PASSWORD from
-  # the very first boot (no temporary password).
+  # MONARCH-SEED - Pre-seed Transmission session settings
+  # Runs once BEFORE Transmission first starts so its download dir
+  # (/data/torrents), disabled RPC whitelists and local-login-off posture
+  # hold from the very first boot — Transmission has no categories to
+  # pre-create, those are Servarr's per-app subfolders.
   ###############################################
   monarch-seed:
     container_name: monarch-seed
     image: python:3.12-slim
     restart: "no"
-    environment:
-      MONARCH_USERNAME: ${MONARCH_USERNAME:-admin}
-      MONARCH_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
-    command: ["python", "/init/seed_qbt.py"]
+    command: ["python", "/init/seed_transmission.py"]
     volumes:
       - ./init:/init:ro
-      - /docker/appdata/qbittorrent:/config
+      - /docker/appdata/transmission:/config
 
   ###############################################
   # MONARCH-INIT - Auto Wire the Whole Stack
@@ -683,10 +680,10 @@ services:
   #     MONARCH_PASSWORD), logs in and exports the admin
   #     token to /docker/appdata/init/jellyfin-api-key.txt
   #   * sets forms-auth + shared credentials on every
-  #     *arr app, root folders and qBittorrent client
+  #     *arr app, root folders and Transmission client
   #   * registers Radarr/Sonarr/Lidarr/Whisparr as
-  #     Prowlarr Apps + qBittorrent download client
-  #   * creates qBittorrent categories + save paths
+  #     Prowlarr Apps + Transmission download client
+  #   * sets Transmission's download dir (/data/torrents)
   #   * connects Bazarr to Radarr/Sonarr
   #   * wires Jellyseerr to Jellyfin/Radarr/Sonarr
   ###############################################
@@ -703,7 +700,7 @@ services:
       - lidarr
       - whisparr
       - bazarr
-      - qbittorrent
+      - transmission
       - sabnzbd
       - iptv
     environment:
@@ -870,14 +867,14 @@ services:
     ports:
       - "${PROWLARR_SSO_PORT:-14006}:4180"
 
-  qbittorrent-sso:
+  transmission-sso:
     <<: *sso-gateway
-    container_name: qbittorrent-sso
+    container_name: transmission-sso
     environment:
       <<: *sso-env
-      OAUTH2_PROXY_UPSTREAMS: http://qbittorrent:8080
+      OAUTH2_PROXY_UPSTREAMS: http://transmission:9091
     ports:
-      - "${QBITTORRENT_SSO_PORT:-14007}:4180"
+      - "${TRANSMISSION_SSO_PORT:-14007}:4180"
 
   sabnzbd-sso:
     <<: *sso-gateway

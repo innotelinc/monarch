@@ -200,7 +200,7 @@ create_data_dirs() {
   # blanket chown -R over the whole appdata tree: authentik's postgresql dir
   # must stay owned by UID 999 and is handled separately below.)
   local appdata_svcs=(jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr \
-                      qbittorrent bazarr sabnzbd transmission deluge requestrr \
+                      transmission bazarr sabnzbd deluge requestrr \
                       autobrr dispatcharr tvheadend nextpvr homarr monarch-health \
                       monarch-recs nginx-proxy-manager)
   local d
