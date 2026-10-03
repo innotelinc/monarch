@@ -18,6 +18,15 @@ back with a login form and no SSO button, and a *second* copy of the LDAP plugin
 login form answering HTTP 500 for a correct password exactly as it did for a
 wrong one, which reads as "the password is wrong" to whoever is typing it.
 
+A PIN CAN NAME A BUNDLED ARTIFACT INSTEAD OF A RELEASE. Jellyfin 12.0 moved the
+server to .NET 10 and 10.11 plugins do not load on it, but the OIDC plugin's
+upstream release still targets 10.11 and has no 12.0 build. That one is therefore
+rebuilt from its tag and committed under `init/artifacts/` (recipe:
+`scripts/jellyfin-plugin-oidc-rebuild.sh`), and its pin carries `asset_path` —
+resolved relative to the pin file's own directory — instead of `release_url`.
+Both are read the same way: bytes in, both hashes checked, nothing written
+unless they match. A pin with neither is fetched from `repo`/`tag`/`asset`.
+
 So `init/jellyfin-plugins.json` records, per plugin, the release **and the sha256
 of both the zip and the assembly inside it**, and this script is the one place
 that decides whether what is on disk is that build. `monarch-init` installs from
@@ -210,12 +219,25 @@ def fetch(url: str, timeout: int = 120) -> bytes:
         raise Refused(f"cannot reach {url} ({error})") from None
 
 
-def install(pin: dict, plugins_dir: Path, source_url: str = "", log=print) -> None:
-    """Fetch one pinned zip, verify it, and extract it."""
-    url = source_url or pin.get("release_url") or (
-        f"https://github.com/{pin['repo']}/releases/download/{pin['tag']}/{pin['asset']}")
-    log(f"  fetching    {url}")
-    blob = fetch(url)
+def install(pin: dict, plugins_dir: Path, source_url: str = "",
+            base_dir: Path | None = None, log=print) -> None:
+    """Read one pinned zip (a release URL, or the bundled artifact), verify it, extract it.
+
+    `base_dir` is the directory `asset_path` is resolved against — the pin file's
+    own directory, so a bundled artifact travels with the pins that describe it.
+    """
+    if not source_url and pin.get("asset_path"):
+        path = ((base_dir or DEFAULT_MANIFEST.parent) / pin["asset_path"]).resolve()
+        log(f"  reading     {path}")
+        try:
+            blob = path.read_bytes()
+        except OSError as error:
+            raise Refused(f"cannot read the bundled {pin['asset']} at {path} ({error})") from None
+    else:
+        url = source_url or pin.get("release_url") or (
+            f"https://github.com/{pin['repo']}/releases/download/{pin['tag']}/{pin['asset']}")
+        log(f"  fetching    {url}")
+        blob = fetch(url)
 
     if pin.get("asset_bytes") and len(blob) != int(pin["asset_bytes"]):
         raise Refused(f"{pin['asset']} is {len(blob)} bytes, the pin says {pin['asset_bytes']}")
@@ -325,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     for pin, detail in to_install:
         print(f"  {pin['name']:<10} {detail}")
         try:
-            install(pin, args.plugins_dir, args.source_url)
+            install(pin, args.plugins_dir, args.source_url, base_dir=args.manifest.parent)
         except Refused as error:
             print(f"jellyfin-plugin-pin: {error}", file=sys.stderr)
             print(f"nothing was written for {pin['name']}; the pin in "

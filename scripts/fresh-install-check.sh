@@ -28,7 +28,7 @@ set -euo pipefail
 #     it, and probes http://127.0.0.1:7575 for HTTP 200. The container is shut
 #     down afterwards (keep it running with MONARCH_CHECK_KEEP=1).
 #   Stage 3 (--full-stack, DISPOSABLE host/VM with Docker + sudo): boots the
-#     probe-able stack (jellyfin, *arrs, prowlarr, qBittorrent, bazarr,
+#     probe-able stack (jellyfin, *arrs, prowlarr, Transmission, bazarr,
 #     jellyseerr, nginx-proxy-manager) + monarch-init, waits for init to
 #     wire everything, provisions the NPM proxy hosts for the test domain
 #     (--hosts-only --skip-ssl), then runs the REAL drift check
@@ -286,7 +286,7 @@ for a in m["arr_apps"]:
     root = a["root_folder"]
     assert root == f"/data/media/{media}", f"{a['svc']}: root {root} != /data/media/{media}"
     assert isinstance(port, int) and 1024 <= port <= 65535, f"{a['svc']}: bad port {port}"
-print(f"ok: {len(m['arr_apps'])} *arr apps, {len(m['qbt']['categories'])} qbt categories, {len(m['jellyfin']['libraries'])} jellyfin libraries")
+print(f"ok: {len(m['arr_apps'])} *arr apps, {len(m['transmission']['categories'])} transmission categories, {len(m['jellyfin']['libraries'])} jellyfin libraries")
 PYEOF
 then
   ok "manifest content is internally consistent"
@@ -376,11 +376,11 @@ fi
 
 # ── Stage 3 (--full-stack): boot the real stack + run the real drift check ─
 # Boots the probe-able services (the ones scripts/drift-check.sh checks:
-# jellyfin, the *arrs, prowlarr, qBittorrent, bazarr, jellyseerr) plus
+# jellyfin, the *arrs, prowlarr, Transmission, bazarr, jellyseerr) plus
 # monarch-init, then runs the ACTUAL drift check against them. This is the
 # closest CI gets to a live deployment: it exercises init.py end-to-end
-# (Jellyfin wizard + admin, forms auth, root folders, qBittorrent client +
-# categories, Prowlarr apps, Bazarr, Jellyseerr) and then verifies every
+# (Jellyfin wizard + admin, forms auth, root folders, Transmission client,
+# Prowlarr apps, Bazarr, Jellyseerr) and then verifies every
 # invariant the drift check asserts.
 #
 # Authentik is intentionally NOT booted: its images are heavy and it needs
@@ -413,7 +413,7 @@ if [ "$FULL_STACK" = "1" ]; then
                 /data/torrents/{tv,movies,music,xxx} \
                 /docker/appdata /opt/epg
   for svc in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr \
-             qbittorrent bazarr homarr; do
+             transmission bazarr homarr; do
     $SUDO mkdir -p "/docker/appdata/$svc"
     $SUDO chown -R 1000:1000 "/docker/appdata/$svc" 2>/dev/null || true
   done
@@ -441,7 +441,7 @@ services:
 EOF
 
   echo "  Starting the probe-able stack (image pulls may take a while)..."
-  # Start ONLY the services the drift check probes (qbittorrent pulls in
+  # Start ONLY the services the drift check probes (transmission pulls in
   # monarch-seed via depends_on), plus the local NPM reverse proxy so the
   # drift check's proxy-host verification has something to verify against.
   # sabnzbd + iptv are monarch-init's deps but are NOT probed and iptv's
@@ -450,13 +450,13 @@ EOF
   if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
        --profile npm \
        --env-file "$SCRATCH/.env" up -d nginx-proxy-manager jellyfin sonarr \
-       radarr lidarr whisparr prowlarr qbittorrent bazarr jellyseerr \
+       radarr lidarr whisparr prowlarr transmission bazarr jellyseerr \
        > "$SCRATCH/up.log" 2>&1; then
     bad "docker compose up -d (probe-able services) failed:"
     tail -20 "$SCRATCH/up.log" | sed 's/^/    /'
     exit 1
   fi
-  ok "stack started (jellyfin, *arrs, prowlarr, qBittorrent, bazarr, jellyseerr, NPM)"
+  ok "stack started (jellyfin, *arrs, prowlarr, Transmission, bazarr, jellyseerr, NPM)"
 
   echo "  Running monarch-init to wire the stack..."
   if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
@@ -506,7 +506,7 @@ EOF
   else
     bad "real drift check FAILED against the booted stack"
     echo "  Diagnosing the failing services (logs below):"
-    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr qbittorrent bazarr nginx-proxy-manager; do
+    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr transmission bazarr nginx-proxy-manager; do
       st="$(docker inspect -f '{{.State.Status}} (restarts={{.RestartCount}})' "$c" 2>/dev/null || echo down)"
       echo "    $c: $st"
     done

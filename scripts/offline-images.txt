@@ -15,7 +15,6 @@ ghcr.io/hotio/whisparr:v2-develop
 ghcr.io/hotio/prowlarr:latest
 ghcr.io/hotio/bazarr:latest
 ghcr.io/homarr-labs/homarr:latest
-ghcr.io/qbittorrent/docker-qbittorrent-nox:latest
 ghcr.io/hotio/sabnzbd:latest
 lscr.io/linuxserver/transmission:latest
 lscr.io/linuxserver/deluge:latest

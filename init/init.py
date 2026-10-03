@@ -15,14 +15,15 @@ python:3.12-slim, stdlib only - no pip packages needed). It configures:
                     Authentik
   * Sonarr/Radarr/
     Lidarr/Whisparr - external auth (the Cerulean Authentik gate in front of
-                    each app is the only login), root folder, qBittorrent
+                    each app is the only login), root folder, Transmission
                     download client, hardlink settings
-  * Prowlarr      - external auth, qBittorrent download client,
+  * Prowlarr      - external auth, Transmission download client,
                     registers the four *arr apps (full sync), and adds a
                     FlareSolverr indexer proxy (tag indexers 'cloudflare'
                     to route them through it)
-  * qBittorrent   - verifies the pre-seeded WebUI login, creates the
-                    movies/tv/music/xxx categories with save paths
+  * Transmission  - verifies the RPC keeps no local login and pins the
+                    download dir to /data/torrents (the per-app folders are
+                    Servarr category subfolders there: movies/tv/music/xxx)
   * Bazarr        - sets auth + connects Sonarr and Radarr (best effort)
   * Jellyseerr    - initializes against Jellyfin, connects Radarr/Sonarr and
                     enables Jellyfin sign-in (best effort)
@@ -44,14 +45,11 @@ Secrets/state written under /docker/appdata/init/:
 """
 
 import base64
-import fcntl
-import ipaddress
 import json
 import os
 import re
 import socket
 import sqlite3
-import struct
 import sys
 import time
 import urllib.error
@@ -91,7 +89,7 @@ JELLYFIN_BASE = "http://jellyfin:8096"
 # request, which is what "I cannot sign in from the app" was.
 JELLYFIN_SSO_GATEWAY = os.environ.get("JELLYFIN_SSO_GATEWAY", "jellyfin-sso")
 JELLYSEERR_BASE = "http://jellyseerr:5055"
-QBT_BASE = "http://qbittorrent:8080"
+TRANSMISSION_BASE = "http://transmission:9091"
 PROWLARR_BASE = "http://prowlarr:9696"
 BAZARR_BASE = "http://bazarr:6767"
 
@@ -116,30 +114,32 @@ JELLYFIN_LIBRARIES = [
     {"name": "Other", "type": "mixed", "path": "/data/media/xxx"},
 ]
 
-# qBittorrent categories, one per *arr: named by the category that app's
-# download client sends, saving INSIDE the downloads tree. Both halves matter,
+# Per-app download folders, one per *arr: named by the category that app's
+# download client sends, landing INSIDE the downloads tree. Both halves matter,
 # and each one is a different failure when it is wrong:
 #
-#   * the NAME has to be the string the app sends (`tvCategory` in Sonarr and
-#     Whisparr, `movieCategory` in Radarr, `musicCategory` in Lidarr). A download
-#     tagged with a category qBittorrent does not know is saved to the DEFAULT
-#     path, so the name is what decides whether the per-category path is used;
-#   * the PATH has to sit outside every library root. A category pointing at
-#     /data/media/<type> is exactly what makes each app warn "Download client
-#     qBittorrent places downloads in the root folder /data/media/<type>", and it
-#     drops an unfinished album into the music library for Jellyfin to scan.
+#   * the NAME has to be the string the app sends (Transmission's `category`, or
+#     `tvCategory`/`movieCategory`/`musicCategory` on the qBittorrent schemas).
+#     Servarr sends it to Transmission as a subfolder of Transmission's
+#     download dir, so the name is what decides the folder the download lands in;
+#   * the PATH has to sit outside every library root. A folder under
+#     /data/media/<type> is exactly what makes each app warn "places downloads in
+#     the root folder /data/media/<type>", and it drops an unfinished album into
+#     the music library for Jellyfin to scan.
 #
-# Derived from MONARCH_APPS so the name an app is told and the name that exists
-# here cannot be two different strings. Shared with configure_qbittorrent(),
+# Derived from MONARCH_APPS so the name an app is told and the folder it lands
+# in cannot be two different strings. Shared with configure_transmission(),
 # scripts/arr-download-categories.py and the invariants manifest, so the drift
-# check asserts the same map init applies.
-QBT_CATEGORIES = {app["category"]: f"/data/torrents/{app['media']}" for app in MONARCH_APPS}
+# check asserts the same map init applies. Transmission itself has no category
+# objects to create — the folders are made on demand under download-dir.
+TRANSMISSION_CATEGORIES = {app["category"]: f"/data/torrents/{app['media']}" for app in MONARCH_APPS}
 
-# How a Servarr app spells "the category this download client files under". There
-# is no plain `category` field in any of these schemas - that name matches
-# nothing, which is how every app went without one: the client was created from
-# the schema with `category` set, no field matched, and the value was dropped
-# silently while the client was reported as configured.
+# How a Servarr app spells "the category this download client files under".
+# Transmission's schema has a plain `category`; the qBittorrent schemas use the
+# media-type spellings, where a bare `category` matches nothing - a client built
+# from that schema with `category` set was created with no category at all and
+# the value was dropped silently while the client was reported as configured.
+# Looking the field up by all four names keeps either client honest.
 CATEGORY_FIELDS = ("tvCategory", "movieCategory", "musicCategory", "category")
 
 # Every hostname the *arr apps answer to (init/arr-allowlist.txt, mounted at
@@ -155,7 +155,7 @@ ARR_ALLOWLIST_FILE = os.environ.get("MONARCH_ARR_ALLOWLIST", "/init/arr-allowlis
 # invariants manifest the drift check probes on localhost.
 PORTS = {
     "sonarr": 8989, "radarr": 7878, "lidarr": 8686, "whisparr": 6969,
-    "prowlarr": 9696, "qbt": 8080, "jellyfin": 8097,
+    "prowlarr": 9696, "transmission": 9091, "jellyfin": 8097,
     "jellyseerr": 5055, "bazarr": 6767,
 }
 
@@ -1243,24 +1243,40 @@ def pinned_plugin_state(pin: dict) -> str:
 
 
 def install_pinned_plugin(pin: dict) -> bool:
-    """Fetch one pinned release, verify BOTH hashes, then extract it.
+    """Read one pinned zip (a release URL, or the bundled artifact), verify BOTH hashes, extract it.
 
     The zip's hash is checked and so is the assembly inside it: the assembly is
     what Jellyfin loads, and a zip that hashes correctly but carries a different
     build is exactly the swap nobody writes down.
+
+    A pin with `asset_path` names a zip committed beside the pin file (the OIDC
+    plugin, rebuilt for Jellyfin 12 because upstream has no 12.0 release); the
+    path is resolved against the pin file's own directory.
     """
     import hashlib
     url = os.environ.get("JELLYFIN_PLUGIN_URL") or pin.get("release_url")
-    if not url:
-        url = (f"https://github.com/{pin['repo']}/releases/download/{pin['tag']}/"
-               f"{pin['asset']}")
-    _log(f"Fetching the {pin['name']} plugin {pin.get('tag', '')} from {url}")
-    try:
-        with urllib.request.urlopen(url, timeout=120) as resp:
-            blob = resp.read()
-    except Exception as exc:  # noqa: BLE001
-        _log(f"WARNING: could not download the {pin['name']} plugin: {exc}")
-        return False
+    blob = None
+    if not url and pin.get("asset_path"):
+        local = os.path.join(os.path.dirname(PLUGIN_PINS_FILE), pin["asset_path"])
+        _log(f"Reading the bundled {pin['name']} plugin {pin.get('tag', '')} from {local}")
+        try:
+            with open(local, "rb") as fh:
+                blob = fh.read()
+        except OSError as exc:
+            _log(f"WARNING: could not read the bundled {pin['name']} plugin at "
+                 f"{local}: {exc}")
+            return False
+    if blob is None:
+        if not url:
+            url = (f"https://github.com/{pin['repo']}/releases/download/{pin['tag']}/"
+                   f"{pin['asset']}")
+        _log(f"Fetching the {pin['name']} plugin {pin.get('tag', '')} from {url}")
+        try:
+            with urllib.request.urlopen(url, timeout=120) as resp:
+                blob = resp.read()
+        except Exception as exc:  # noqa: BLE001
+            _log(f"WARNING: could not download the {pin['name']} plugin: {exc}")
+            return False
     if pin.get("asset_bytes") and len(blob) != int(pin["asset_bytes"]):
         _log(f"WARNING: {pin['asset']} is {len(blob)} bytes, the pin says "
              f"{pin['asset_bytes']} - not installing it.")
@@ -1861,22 +1877,22 @@ def category_field(resource: dict):
     return None
 
 
-def ensure_qbt_client(base, api, key, category):
-    """Add the qBittorrent download client, or correct the one that exists.
+def ensure_transmission_client(base, api, key, category):
+    """Add the Transmission download client, or correct the one that exists.
 
-    A client that is present with the WRONG category is the failure this used to
-    miss. It returned "exists" on the implementation name alone, so a hand-set
-    category survived every run of monarch-init: the app then asks qBittorrent
-    for a category init never created, and either the download falls back to the
-    default save path or - when the hand-set name exists too, as a stray
-    `lidarr` -> /data/media/music did - it lands in the library root. That is the
-    health warning "Download client qBittorrent places downloads in the root
-    folder /data/media/music", and restarting init never cleared it.
+    Transmission has no categories of its own: Servarr sends `category` to it as
+    a subfolder of Transmission's download dir, so the category is what decides
+    where a download lands (/data/torrents/<category>). A client present with the
+    WRONG category is the failure this used to miss - it returned "exists" on the
+    implementation name alone, so a hand-set category survived every run of
+    monarch-init and the download landed wherever that name pointed (a library
+    root, once). Correcting it is a whole-resource PUT; Servarr has no per-field
+    endpoint.
     """
     status, _, j = _http(base, f"/api/{api}/downloadclient", headers={"X-Api-Key": key})
     clients = j if status == 200 and isinstance(j, list) else []
     existing = [c for c in clients
-                if isinstance(c, dict) and c.get("implementation") == "QBittorrent"]
+                if isinstance(c, dict) and c.get("implementation") == "Transmission"]
     if existing:
         client = existing[0]
         field = category_field(client)
@@ -1897,18 +1913,21 @@ def ensure_qbt_client(base, api, key, category):
         return False, "schema unreachable"
     payload = None
     for entry in schema:
-        if entry.get("implementation") == "QBittorrent":
+        if entry.get("implementation") == "Transmission":
             payload = entry
             break
     if not payload:
-        return False, "no QBittorrent schema"
+        return False, "no Transmission schema"
 
+    # No username/password: the daemon keeps no local login (docker-compose.yml),
+    # so the apps reach it unauthenticated on the compose network. `category` is
+    # Servarr's name for the download subfolder under Transmission's download dir.
     values = {
-        "host": "qbittorrent",
-        "port": 8080,
+        "host": "transmission",
+        "port": 9091,
         "useSsl": False,
-        "username": USER,
-        "password": PASS,
+        "username": "",
+        "password": "",
         "urlBase": "",
     }
     for field in payload.get("fields", []):
@@ -1917,9 +1936,9 @@ def ensure_qbt_client(base, api, key, category):
             field["value"] = values[name]
     field = category_field(payload)
     if field is None:
-        return False, "this build's QBittorrent schema has no category field"
+        return False, "this build's Transmission schema has no category field"
     field["value"] = category
-    payload["name"] = "qBittorrent"
+    payload["name"] = "Transmission"
     payload["enable"] = True
     status, _, _ = _http(base, f"/api/{api}/downloadclient", method="POST",
                          body=payload, headers={"X-Api-Key": key})
@@ -1983,10 +2002,10 @@ def configure_monarch_apps():
         if not ok and "exists" not in msg:
             _issues.append(f"{svc}: root folder {media_root} {msg}")
 
-        ok, msg = ensure_qbt_client(base, api, key, app["category"])
-        _log(f"{svc}: qBittorrent client -> {msg}")
+        ok, msg = ensure_transmission_client(base, api, key, app["category"])
+        _log(f"{svc}: Transmission client -> {msg}")
         if not ok and "exists" not in msg:
-            _issues.append(f"{svc}: qBittorrent client {msg}")
+            _issues.append(f"{svc}: Transmission client {msg}")
 
         ok, msg = ensure_media_mgmt(base, api, key)
         _log(f"{svc}: media management -> {msg}")
@@ -2054,33 +2073,36 @@ def configure_prowlarr():
     if not ok:
         _issues.append(f"prowlarr: {msg}")
 
-    # qBittorrent download client (skip if one already exists).
+    # Transmission download client (skip if one already exists).
     status, _, clients = _http(PROWLARR_BASE, "/api/v1/downloadclient",
                                headers={"X-Api-Key": key})
     if status == 200 and isinstance(clients, list) and any(
-            c.get("implementation") == "QBittorrent" for c in clients):
-        _log("Prowlarr: qBittorrent download client already exists - skipping.")
+            c.get("implementation") == "Transmission" for c in clients):
+        _log("Prowlarr: Transmission download client already exists - skipping.")
     else:
         status, _, schema = _http(PROWLARR_BASE, "/api/v1/downloadclient/schema",
                                   headers={"X-Api-Key": key})
         if status == 200 and isinstance(schema, list):
             payload = None
             for entry in schema:
-                if entry.get("implementation") == "QBittorrent":
+                if entry.get("implementation") == "Transmission":
                     payload = entry
                     break
             if payload:
-                values = {"host": "qbittorrent", "port": 8080, "useSsl": False,
-                          "username": USER, "password": PASS, "category": "", "urlBase": ""}
+                # No credentials: the daemon keeps no local login. Prowlarr
+                # itself only searches, but the client must exist here so every
+                # indexer can hand Prowlarr's download URLs to it.
+                values = {"host": "transmission", "port": 9091, "useSsl": False,
+                          "username": "", "password": "", "category": "", "urlBase": ""}
                 for field in payload.get("fields", []):
                     if field.get("name") in values:
                         field["value"] = values[field["name"]]
-                payload["name"] = "qBittorrent"
+                payload["name"] = "Transmission"
                 payload["enable"] = True
                 st = prowlarr_post("/api/v1/downloadclient", payload, key)
-                _log(f"Prowlarr: qBittorrent download client -> HTTP {st}")
+                _log(f"Prowlarr: Transmission download client -> HTTP {st}")
             else:
-                _issues.append("prowlarr: no QBittorrent schema found")
+                _issues.append("prowlarr: no Transmission schema found")
         else:
             _issues.append(f"prowlarr: downloadclient schema unreachable (HTTP {status})")
 
@@ -2196,160 +2218,95 @@ def configure_prowlarr():
 
 
 # ---------------------------------------------------------------------------
-# qBittorrent
+# Transmission
 # ---------------------------------------------------------------------------
 
-def _interface_ipv4(name: str):
-    """(address, netmask) of one IPv4 interface — asked of the kernel, no tools."""
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        packed = struct.pack("256s", name[:15].encode())
-        # SIOCGIFADDR / SIOCGIFNETMASK; the IPv4 address sits at byte 20.
-        address = socket.inet_ntoa(fcntl.ioctl(sock.fileno(), 0x8915, packed)[20:24])
-        netmask = socket.inet_ntoa(fcntl.ioctl(sock.fileno(), 0x891b, packed)[20:24])
-    return address, netmask
+def _transmission_rpc(base, method, arguments=None, opener=None):
+    """One Transmission RPC call, doing the session-id handshake when asked.
 
-
-def network_shared_with(peer: str) -> str:
-    """The CIDR of the network that reaches `peer`, or '' if it cannot be told.
-
-    Used to tell qBittorrent which subnet to trust, so the SSO gateway's calls
-    arrive without a second login. Discovered rather than configured: Docker
-    allocates the subnet (`172.18.0.0/16` on the current host) and init already
-    resolves `peer` by name on that same network, so the answer is read off the
-    interface that contains the peer's address - a literal would silently stop
-    matching on the next host to build this stack.
+    Transmission guards its RPC with an `X-Transmission-Session-Id` header: the
+    first request answers HTTP 409 carrying the current id, and the caller must
+    repeat the request with it. Returns (status, arguments_or_None, detail). The
+    daemon keeps no local login (docker-compose.yml), so no credential travels.
     """
-    try:
-        peer_ip = socket.gethostbyname(peer)
-    except OSError:
-        return ""
-    target = ipaddress.ip_address(peer_ip)
-    for _index, name in socket.if_nameindex():
+    opener = opener or urllib.request.build_opener()
+    body = json.dumps({"method": method, "arguments": arguments or {}}).encode("utf-8")
+    session_id = ""
+    for attempt in (1, 2):
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/transmission/rpc", data=body, method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json"})
+        if session_id:
+            req.add_header("X-Transmission-Session-Id", session_id)
         try:
-            address, netmask = _interface_ipv4(name)
-        except OSError:
-            continue
+            with opener.open(req, timeout=30) as resp:
+                text = resp.read().decode("utf-8", "replace")
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409 and attempt == 1:
+                session_id = exc.headers.get("X-Transmission-Session-Id", "")
+                continue
+            return exc.code, None, exc.read()[:400].decode("utf-8", "replace")
+        except Exception as exc:  # noqa: BLE001 - best effort by design
+            return 0, None, str(exc)
         try:
-            network = ipaddress.ip_network(f"{address}/{netmask}", strict=False)
+            parsed = json.loads(text or "{}")
         except ValueError:
-            continue
-        if target in network:
-            return str(network)
-    return ""
+            return status, None, text[:400]
+        if parsed.get("result") not in (None, "success"):
+            return status, None, str(parsed.get("result"))
+        return status, parsed.get("arguments") or {}, ""
+    return 0, None, "session handshake failed"
 
 
-@arrived("qBittorrent setup")
-def configure_qbittorrent():
-    _log("--- qBittorrent ---")
-    if not wait_for(QBT_BASE, "/api/v2/app/version", "qBittorrent WebUI"):
+@arrived("Transmission setup")
+def configure_transmission():
+    _log("--- Transmission ---")
+    if not wait_for(TRANSMISSION_BASE, "/transmission/web/", "Transmission WebUI"):
         return False
 
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
-    status, text, _ = _http(QBT_BASE, "/api/v2/auth/login", method="POST",
-                            body={"username": USER, "password": PASS},
-                            opener=opener, raw_form=True)
-    # qBittorrent >= 5.2 returns 204 with an empty body on success (older
-    # versions returned 200 with "Ok."). Either means the cookie is valid.
-    if (status in (200, 204) and text.strip() in ("", "Ok.")):
-        _log("qBittorrent WebUI login with the shared credentials: OK")
-    else:
-        _issues.append("qBittorrent WebUI login failed with the shared credentials. "
-                       "The PBKDF2 hash may not match this qBittorrent version - grab the "
-                       "temporary password from `docker logs qbittorrent` and change it in "
-                       "the WebUI (Tools > Options > Web UI), then re-run monarch-init.")
-        _log("WARNING: qBittorrent login failed - categories NOT created.")
+    status, session, detail = _transmission_rpc(TRANSMISSION_BASE, "session-get")
+    if status != 200 or not session:
+        _issues.append("Transmission RPC session-get failed "
+                       f"(HTTP {status}{': ' + detail if detail else ''})")
+        _log("WARNING: Transmission RPC unreachable - download dir NOT verified.")
         return False
 
-    # ── Categories: create what is missing, correct what has drifted ────────
-    # Reconciled rather than create-only. A category is not "done" because the
-    # name exists: `lidarr` existed and pointed at /data/media/music, which is
-    # how the downloads-in-the-library-root warning survived every run. A name
-    # the manifest does not carry is pruned for the same reason - it is either a
-    # duplicate of one it does (`radarr` alongside `movies`) or a stray whose
-    # path sits inside a library, and either way the apps are told the
-    # manifest's names, so a stray can only mislead.
-    status, _, existing = _http(QBT_BASE, "/api/v2/torrents/categories", opener=opener)
-    live = existing if status == 200 and isinstance(existing, dict) else {}
-    for cat, save_path in QBT_CATEGORIES.items():
-        current = (live.get(cat) or {}).get("savePath")
-        if current == save_path:
-            continue
-        if cat in live:
-            verb, path = "editCategory", f"'{cat}' {current!r} -> {save_path!r}"
-        else:
-            verb, path = "createCategory", f"'{cat}' -> {save_path!r}"
-        # The WebUI API takes form-encoded params, not a JSON body.
-        st, _, _ = _http(QBT_BASE, f"/api/v2/torrents/{verb}", method="POST",
-                         body={"category": cat, "savePath": save_path},
-                         opener=opener, raw_form=True)
-        if st in (200, 201):
-            _log(f"qBittorrent category {path}")
-        else:
-            _issues.append(f"qBittorrent: category '{cat}' could not be set (HTTP {st})")
-    # A stray that still files torrents is reported, never removed: qBittorrent
-    # strips the category from every torrent under it, so removing one first
-    # leaves those downloads unlabelled and invisible to the app that queued
-    # them - still seeding, gone from its queue. Moving them is a decision (the
-    # app that queued them is what says where they belong), and it is the host
-    # side's job: scripts/arr-download-categories.py knows which app sent what.
-    strays = sorted(set(live) - set(QBT_CATEGORIES))
-    if strays:
-        st, _, torrents = _http(QBT_BASE, "/api/v2/torrents/info", opener=opener)
-        filing: dict[str, int] = {}
-        if st == 200 and isinstance(torrents, list):
-            for torrent in torrents:
-                cat = torrent.get("category") or ""
-                if cat in strays:
-                    filing[cat] = filing.get(cat, 0) + 1
-        removable = [cat for cat in strays if cat not in filing]
-        kept = [cat for cat in strays if cat in filing]
-        if removable:
-            st, _, _ = _http(QBT_BASE, "/api/v2/torrents/removeCategories", method="POST",
-                             body={"categories": "\n".join(removable)},
-                             opener=opener, raw_form=True)
-            if st in (200, 201, 204):
-                _log(f"qBittorrent categories removed (not in the manifest): "
-                     f"{', '.join(removable)}")
-            else:
-                _issues.append("qBittorrent: stray categories could not be removed "
-                               f"({', '.join(removable)}) - HTTP {st}")
-        if kept:
-            _log(f"qBittorrent categories kept, still filing torrents: {', '.join(kept)}")
-            _issues.append(
-                f"qBittorrent: {', '.join(kept)} are not in the manifest but still file "
-                f"torrents; run scripts/arr-download-categories.py to move those downloads "
-                f"to the categories the apps send (removing the category first would strip "
-                f"them from the apps' queues)")
-
-    # Default save path + no temp dir so category paths are used as-is.
-    # setPreferences takes its settings as a `json` form field.
-    prefs = {"save_path": "/data/torrents", "temp_path_enabled": False}
-    # ── Cerulean SSO is the only door ───────────────────────────────────────
-    # qBittorrent keeps a password of its own (monarch-seed writes it, and
-    # drift-check logs in with it), so a user who reaches the WebUI through
-    # qbittorrent-sso still meets a SECOND login: the one the app asks for. The
-    # WebUI is published on loopback only and the gateway is the sole route to
-    # it, so the app can be told to trust the subnet the gateway calls from and
-    # never ask. The subnet is discovered, not configured: Docker picks it, and a
-    # literal here would stop matching on the next host to build the stack.
-    trust = network_shared_with("qbittorrent")
-    if trust:
-        prefs["bypass_auth_subnet_whitelist_enabled"] = True
-        prefs["bypass_auth_subnet_whitelist"] = trust
+    # ── Cerulean is the only door ───────────────────────────────────────────
+    # Transmission, unlike qBittorrent, has no per-subnet auth bypass: a local
+    # login is either required for everyone or for no one. The WebUI is
+    # published on loopback only and transmission-sso is the sole route to it,
+    # so the correct posture is NO local login (the same as Bazarr and Seerr).
+    # The linuxserver entrypoint forces this whenever USER/PASS are unset;
+    # assert it here so a stray USER/PASS is reported rather than quietly
+    # putting a second login behind Cerulean.
+    if session.get("rpc-authentication-required"):
+        _issues.append("Transmission still requires its own WebUI login - every user "
+                       "meets a SECOND login after Cerulean. Unset USER/PASS on the "
+                       "transmission service and recreate it, then re-run monarch-init.")
+        _log("WARNING: Transmission still has rpc-authentication-required=true.")
     else:
-        _issues.append("qBittorrent: could not discover the subnet the SSO gateway "
-                       "shares with it, so the WebUI still asks for its own "
-                       "password behind Cerulean")
-    st, _, _ = _http(QBT_BASE, "/api/v2/app/setPreferences", method="POST",
-                     body={"json": json.dumps(prefs)}, opener=opener, raw_form=True)
-    if st in (200, 204):
-        _log(f"qBittorrent default save path set to /data/torrents"
-             + (f", WebUI auth bypassed for {trust} (the SSO gateway's subnet)"
-                if trust else ""))
-    else:
-        _issues.append(f"qBittorrent: setPreferences failed (HTTP {st})")
+        _log("Transmission WebUI keeps no local login - Cerulean is the only door.")
 
-    _results["qbittorrent"] = "configured"
+    # ── Download dir: the per-app folders are category subfolders here ─────
+    # Servarr sends its category to Transmission, which files the torrent in a
+    # subfolder of the download dir, so this one setting is what puts every
+    # download under /data/torrents/<type> instead of a library root.
+    want_dir = "/data/torrents"
+    current = session.get("download-dir")
+    if current == want_dir:
+        _log(f"Transmission download dir already {want_dir}.")
+    else:
+        st, _, set_detail = _transmission_rpc(
+            TRANSMISSION_BASE, "session-set",
+            {"download-dir": want_dir, "incomplete-dir-enabled": False})
+        if st in (200, 204):
+            _log(f"Transmission download dir {current!r} -> {want_dir!r}")
+        else:
+            _issues.append(f"Transmission: could not set download dir to {want_dir} "
+                           f"(HTTP {st}{': ' + set_detail if set_detail else ''})")
+
+    _results["transmission"] = "configured"
     return True
 
 
@@ -2633,23 +2590,22 @@ def build_invariants() -> dict:
         "prowlarr": {
             "port": PORTS["prowlarr"],
             "apps": [PROWLARR_APP_IMPLS[app["svc"]] for app in MONARCH_APPS],
-            "download_client": "QBittorrent",
+            "download_client": "Transmission",
         },
-        "qbt": {
-            "port": PORTS["qbt"],
-            "categories": sorted(QBT_CATEGORIES.keys()),
-            # name -> save path, so the host side (scripts/arr-download-
+        "transmission": {
+            "port": PORTS["transmission"],
+            "categories": sorted(TRANSMISSION_CATEGORIES.keys()),
+            # name -> folder, so the host side (scripts/arr-download-
             # categories.py) reconciles the same map init just applied instead
             # of carrying a second copy of it. A category whose NAME is right
-            # and whose PATH is a library root is the failure that went
-            # unnoticed - both halves have to be checkable.
-            "category_paths": QBT_CATEGORIES,
-            "save_path": "/data/torrents",
-            # The WebUI's own password is never the door: qbittorrent-sso is, and
-            # the app trusts the subnet the gateway calls from. Asserted live by
-            # drift-check (a whitelist that got emptied puts the second login
-            # back in front of every user).
-            "sso_bypass": True,
+            # and whose folder sits inside a library root is the failure that
+            # went unnoticed - both halves have to be checkable.
+            "category_paths": TRANSMISSION_CATEGORIES,
+            "download_dir": "/data/torrents",
+            # The WebUI keeps no local login: it is loopback-only and
+            # transmission-sso is the sole route, so Cerulean is the only door.
+            # Asserted live by drift-check.
+            "auth_required": False,
         },
         "jellyfin": {
             "port": PORTS["jellyfin"],
@@ -2686,7 +2642,7 @@ def main() -> int:
     configure_livetv()
     configure_monarch_apps()
     configure_prowlarr()
-    configure_qbittorrent()
+    configure_transmission()
     configure_bazarr()
     configure_jellyseerr()
 

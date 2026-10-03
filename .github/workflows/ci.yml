@@ -159,8 +159,8 @@ jobs:
           grep -q 'arr-sync.py --check' "$f" \
             || { echo "::error::$f no longer runs arr-sync.py --check - 'Prowlarr is full and the apps received nothing' goes unreported"; exit 1; }
           # Where a download lands is two settings that fail silently: the
-          # category name each app sends and the path qBittorrent maps it to.
-          # The app only hints at a wrong path on its own Health page.
+          # category name each app sends and the download dir Transmission files
+          # it under. The app only hints at a wrong path on its own Health page.
           grep -q 'arr-download-categories.py --check' "$f" \
             || { echo "::error::$f no longer runs arr-download-categories.py --check - 'downloads land in the library root' goes unreported"; exit 1; }
           # ClipBucket's unfinished install presents as "a site with no
@@ -335,13 +335,13 @@ jobs:
               || { echo "::error::docs/operations.md no longer documents $checker"; exit 1; }
           done
 
-      # The download client's category is spelled after the media type in every
-      # Servarr app (tvCategory/movieCategory/musicCategory) - there is no plain
-      # `category` field. The client used to be created with `category` set, so
-      # no field matched, no app was ever given one, and the value was dropped
-      # while the client was reported as configured. That is silent: the app just
-      # keeps whatever name it had, and qBittorrent falls back to the default
-      # save path. Pin both halves.
+      # Transmission has no category objects: Servarr sends `category` as a
+      # subfolder of Transmission's download dir, so the name decides the folder
+      # and the download dir decides whether that folder sits in a library. The
+      # old qBittorrent schema spelled the field after the media type
+      # (tvCategory/movieCategory/musicCategory) and a bare `category` matched
+      # nothing - a client built that way was reported configured with no category
+      # at all. Pin both halves: the field lookup and the name -> folder map.
       - name: init reconciles the download category under the app's own field name
         run: |
           set -euo pipefail
@@ -349,19 +349,26 @@ jobs:
           import pathlib
 
           source = pathlib.Path("init/init.py").read_text(encoding="utf-8")
-          for spelling in ("tvCategory", "movieCategory", "musicCategory"):
+          # The field lookup has to cover Transmission's plain `category` and the
+          # media-type spellings a qBittorrent schema would carry.
+          for spelling in ("tvCategory", "movieCategory", "musicCategory", "category"):
               assert spelling in source, \
-                  f"init.py no longer knows that Servarr spells the category {spelling}"
+                  f"init.py no longer knows the download-category field {spelling}"
           assert 'field = category_field(payload)' in source, \
               "init.py no longer sets the category through the field the app has"
           assert 'def category_field(' in source, \
               "the field-name lookup is gone - a plain `category` matches nothing"
-          # The paths have to sit outside every library root, and the names have
-          # to be the ones MONARCH_APPS tells the apps, or the two drift apart.
-          assert 'QBT_CATEGORIES = {app["category"]: f"/data/torrents/{app[\'media\']}"' in source, \
-              "QBT_CATEGORIES no longer derives from MONARCH_APPS"
-          assert '"category_paths": QBT_CATEGORIES' in source, \
-              "the invariants manifest no longer carries the name -> path map"
+          # Transmission is the download client now, and the folders have to sit
+          # outside every library root, named by the ones MONARCH_APPS tells the
+          # apps, or the two drift apart.
+          assert 'def ensure_transmission_client(' in source, \
+              "init.py no longer wires the Transmission download client"
+          assert 'TRANSMISSION_CATEGORIES = {app["category"]: f"/data/torrents/{app[\'media\']}"' in source, \
+              "TRANSMISSION_CATEGORIES no longer derives from MONARCH_APPS"
+          assert '"category_paths": TRANSMISSION_CATEGORIES' in source, \
+              "the invariants manifest no longer carries the name -> folder map"
+          assert 'TRANSMISSION_BASE = "http://transmission:9091"' in source, \
+              "init.py no longer talks to Transmission"
           print("posture: download categories are named by the apps and emitted with their paths")
           PY
           # The page is published rather than gated, and that decision belongs

@@ -114,6 +114,25 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Changed
 
+- **qBittorrent is gone; Transmission is the downloader.** qBittorrent 5.2.x
+  leaked memory (~10 GB/day, upstream qBittorrent/qBittorrent#24618) and
+  OOM-restart-looped against the monarch cgroup until the container had to be
+  replaced. The `qbittorrent` and `qbittorrent-sso` services are removed and
+  `transmission` (behind `transmission-sso`) is the only torrent client. The
+  per-app folders are unchanged: Servarr sends its category to Transmission as a
+  subfolder of the download dir, which `monarch-seed` pins to `/data/torrents`,
+  so `movies`/`tv`/`music`/`xxx` still land under `/data/torrents/<type>` and are
+  the same path in every container. `monarch-init`'s `configure_qbittorrent` is
+  now `configure_transmission` (RPC session, download dir, no local login),
+  `scripts/arr-download-categories.py` reconciles each *arr's Transmission client
+  instead of qBittorrent's category objects, and `scripts/drift-check.sh` asserts
+  the download dir and the absent local login. The WebUI keeps **no login at all**
+  (Transmission has no per-subnet bypass): it is published on loopback only and
+  `transmission-sso` is the sole door, so Cerulean stays the only credential. The
+  NPM host and the registered redirect URI move from `qbittorrent.<domain>` to
+  `transmission.<domain>`; re-register the redirect in Authentik if the provider
+  was provisioned before this change.
+
 - **Seerr is on 3.5.0.** The `jellyseerr` container was recreated onto
   `ghcr.io/seerr-team/seerr:latest` at v3.5.0 (commit `e2f24cb`), up from
   v3.4.1 (`69f73a6`). 3.5.0 carries one breaking change — `GET

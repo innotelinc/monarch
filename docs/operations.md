@@ -12,7 +12,7 @@ MONARCH_PASSWORD=monarch8     # your password
 
 Those same credentials are applied automatically to **every service that
 requires a login**: Jellyfin, Jellyseerr, Sonarr, Radarr, Lidarr, Whisparr,
-Prowlarr, Bazarr, qBittorrent, Transmission, the Authentik bootstrap admin
+Prowlarr, Bazarr, Transmission, the Authentik bootstrap admin
 (email `admin@innotel.us`) and the subscription platform's `/admin` panel.
 Anything you change in `.env` later is picked up by the automation on the
 next `docker compose up -d` (the init containers re-run and only touch
@@ -26,7 +26,7 @@ the manual setup:
 
 | Container    | When            | What it does |
 |--------------|-----------------|--------------|
-| `monarch-seed` | before qBittorrent starts | writes qBittorrent's WebUI login (`MONARCH_USERNAME`/`MONARCH_PASSWORD`) into its config - no temporary-password dance |
+| `monarch-seed` | before Transmission starts | writes Transmission's `settings.json` (download dir `/data/torrents`, RPC whitelists off, no local login) so the first boot is already correct |
 | `monarch-init` | after the stack is up | wires the whole stack (below) |
 
 `monarch-init` automatically:
@@ -42,11 +42,11 @@ the manual setup:
   the iptv EPG container's guide as the XMLTV provider, and writes the EPG
   channel list to `/opt/epg/channels.xml` (see the Live TV section below)
 * **Sonarr / Radarr / Lidarr / Whisparr** - sets Forms authentication with
-  your credentials, adds the correct root folder, adds the **qBittorrent**
+  your credentials, adds the correct root folder, adds the **Transmission**
   download client (category `tv` / `movies` / `music` / `xxx`), enables
   hardlinks + extra-file import, and writes the shared `AllowedHosts` list
   (`init/arr-allowlist.txt`) so Prowlarr can reach it over the compose network
-* **Prowlarr** - sets Forms authentication, adds **qBittorrent** as the
+* **Prowlarr** - sets Forms authentication, adds **Transmission** as the
   download client, registers Radarr, Sonarr, Lidarr and Whisparr as
   **Apps** (full sync) - so indexers added in Prowlarr flow to all *arr apps -
   writes the same `AllowedHosts` list for itself (the *arrs call it back at
@@ -54,8 +54,10 @@ the manual setup:
   `cloudflare` to route it through the proxy). **Adding the indexers themselves
   is a separate, explicit step** - `scripts/prowlarr-indexers.py`, below - and
   it is the only part of this wiring that talks to public trackers.
-* **qBittorrent** - verifies the WebUI login and creates the `movies`, `tv`,
-  `music` and `xxx` categories with their save paths under `/data/torrents`
+* **Transmission** - verifies the RPC keeps no local login and pins the
+  download dir to `/data/torrents`; the `movies`, `tv`, `music` and `xxx`
+  folders are Servarr's category subfolders there (Transmission has no
+  categories of its own)
 * **Bazarr** - sets basic authentication with your credentials and connects
   Sonarr + Radarr so subtitle syncing works
 * **Jellyseerr** - initializes the request manager against **Jellyfin**,
@@ -86,9 +88,8 @@ only touches services that are still unconfigured.
 | Lidarr     | http://localhost:8686 | music |
 | Whisparr   | http://localhost:6969 | xxx |
 | Bazarr     | http://localhost:6767 | subtitles; connected to Sonarr/Radarr |
-| qBittorrent | http://localhost:8080 | WebUI (enabled), login = your credentials, torrent port 6881 |
+| Transmission | http://localhost:9091 | main downloader; no local login (Cerulean is the only door), torrent port 51413 |
 | SABnzbd    | http://localhost:8082 | Usenet (optional); host port = `SABNZBD_PORT` (compose default 8082) |
-| Transmission | http://localhost:9091 | optional extra downloader |
 | Deluge     | http://localhost:8112 | optional; default WebUI password is `deluge` on first login |
 | autobrr    | http://localhost:7474 | optional; manual setup |
 | Authentik  | http://localhost:9000 | `auth.monarch.innotel.us`; SSO + `paid_users` group = user management |
@@ -155,12 +156,12 @@ The old host is still an active `arr` Compose project. The following services
 are duplicated on `.46` and should not be cut over or removed until their
 individual configs and queues are compared:
 
-- Jellyfin, Seerr, Sonarr, Radarr, Lidarr, Whisparr, Prowlarr, qBittorrent,
+- Jellyfin, Seerr, Sonarr, Radarr, Lidarr, Whisparr, Prowlarr,
   Bazarr, and IPTV.
 
 The following remain unique or have not yet been verified on `.46`:
 
-- Dispatcharr, TVHeadend, NextPVR, jfa-go, Requestarr, Transmission, Deluge,
+- Dispatcharr, TVHeadend, NextPVR, jfa-go, Requestarr, Deluge,
   SABnzbd, and autobrr.
 
 Clipbucket is staged at host port `8098` and its public route is
@@ -757,7 +758,7 @@ The stack's `SSO_SESSION_REDIS_HOST` must be the store's **routable** address
 host's own empty docker0 and every sign-in 500s on `/oauth2/callback`.
 
 The media management apps (**Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
-Prowlarr, qBittorrent, Sabnzbd**), the `req.` Jellyseerr alias, **Jellyfin**
+Prowlarr, Transmission, Sabnzbd**), the `req.` Jellyseerr alias, **Jellyfin**
 (`media.*` — its sign-in page, not its API), **Clipbucket** (`tube.innotel.us`),
 the **IPTV guide** (`tv.<domain>`) and the **requestrr console**, plus the **NPM
 admin UI** itself, do not speak OIDC - they only ship a local username/password
@@ -776,10 +777,10 @@ cookie, so there is exactly **one** prompt across every host.
 Because those apps trust the proxy for identity, the gateway has to be the *only*
 path in. Each app's host port is therefore bound to `127.0.0.1`
 (`radarr` `7878`, `sonarr` `8989`, `lidarr` `8686`, `whisparr` `6969`, `bazarr`
-`6767`, `prowlarr` `9696`, `qbittorrent` `8080`, `sabnzbd` `8082`, `jellyseerr`
+`6767`, `prowlarr` `9696`, `transmission` `9091`, `sabnzbd` `8082`, `jellyseerr`
 `5055`, `jellyfin` `8097`, `clipbucket` `8098`, `iptv` `3011`, `requestrr`
 `4545`): the LAN address answers nothing, and the gateway reaches the app over the
-compose network by container name. qBittorrent's peer port (`6881`) is the one
+compose network by container name. Transmission's peer port (`51413`) is the one
 deliberate exception — it has to stay reachable.
 
 The four most recent additions were the apps that had a public name and no gate
@@ -1333,9 +1334,9 @@ against the services:
 
 | Checked service | Invariants verified |
 |-----------------|---------------------|
-| Sonarr / Radarr / Lidarr / Whisparr | API reachable, `authenticationMethod=external` (the Cerulean SSO gate is the only login), expected media root folder, qBittorrent download client |
-| Prowlarr | qBittorrent download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
-| qBittorrent | WebUI login with the shared credentials, `movies`/`tv`/`music`/`xxx` categories |
+| Sonarr / Radarr / Lidarr / Whisparr | API reachable, `authenticationMethod=external` (the Cerulean SSO gate is the only login), expected media root folder, Transmission download client |
+| Prowlarr | Transmission download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
+| Transmission | RPC reachable, download dir `/data/torrents`, and no local WebUI login (Cerulean is the only door) |
 | Jellyfin | admin API access — the shared credentials when they still match, otherwise the durable admin API key (`/docker/appdata/init/jellyfin-api-key.txt`; when the local admin password has diverged the check says so and names the repair, `scripts/jellyfin-admin-password.py --set`) — plus media libraries (Movies / TV Shows / Music / Other) |
 | Jellyfin API keys held by the apps | Jellyseerr's copy in `settings.json` and Homarr's encrypted copy in its database still authenticate — the state a half-finished rotation leaves behind, which nothing else catches since the container and its own UI stay up (`jellyfin-admin-password.py --check-apps`) |
 | Jellyseerr | initialized, Jellyfin sign-in enabled, owned by the account the manifest names (`seerr-owner.py --check`) |
@@ -1447,7 +1448,7 @@ than reading prose. Covered by `scripts/tests/test_gateway_provider_keys.py`,
 including that a quota error is *not* a finding.
 
 The **full-stack CI workflow** (`.github/workflows/full-stack-drift.yml`)
-boots the real stack (jellyfin, *arrs, prowlarr, qBittorrent, bazarr,
+boots the real stack (jellyfin, *arrs, prowlarr, Transmission, bazarr,
 jellyseerr, Nginx Proxy Manager) + `monarch-init` on a disposable runner,
 provisions the NPM proxy hosts for the test domain, and runs the actual
 drift check against it — so the proxy-host verification is exercised for
@@ -1720,11 +1721,14 @@ result and any "MANUAL ACTIONS NEEDED" list is in
 run, just re-run: `sudo docker start monarch-init`
 (or `sudo docker compose up -d` — it is idempotent).
 
-#### qBittorrent WebUI login fails with the configured password
-Grab the temporary password from `sudo docker logs qbittorrent` (search for
-"A temporary password is provided for this session"), log in at
-http://localhost:8080, set your password in **Tools > Options > Web UI**, then
-re-run `sudo docker start monarch-init` to recreate the categories.
+#### Transmission's RPC is unreachable, or downloads land in the wrong place
+`transmission-remote -l` inside the container is the quickest probe. If the RPC
+is down, `sudo docker logs transmission` says why. The download dir and the RPC
+whitelists are pinned two ways — `monarch-seed` writes them into
+`/docker/appdata/transmission/settings.json` before the daemon first starts, and
+`monarch-init` re-asserts the download dir over the RPC. If a hand-edit drifted
+it, re-run `sudo docker start monarch-init` (or `sudo docker compose up -d`) to
+put it back; `scripts/drift-check.sh` reports the mismatch until you do.
 
 #### An *arr has no indexers, and Prowlarr says "Prowlarr URL is invalid, Sonarr cannot connect to Prowlarr"
 That message is about the **Host header**, not the URL. Every *arr answers HTTP
@@ -1802,27 +1806,27 @@ results in that app's categories (its FAQ: "Prowlarr will not sync X Indexer to
 App"), so an app holding a subset of Prowlarr's list is correct while holding none
 is not. Only the zero is a finding, and `scripts/drift-check.sh` fails on it.
 
-#### An *arr warns "Download client qBittorrent places downloads in the root folder /data/media/<type>"
+#### An *arr warns "Download client Transmission places downloads in the root folder /data/media/<type>"
 A download's destination is two settings, and each one fails on its own without
 looking like the other:
 
-* **the category name each *arr sends.** Servarr spells it after the media type —
-  `tvCategory` (Sonarr, Whisparr), `movieCategory` (Radarr), `musicCategory`
-  (Lidarr). There is no plain `category` field, so a client created with
-  `category` set is created with no category at all and the value is dropped
-  silently. A download with a category qBittorrent does not know is saved to the
-  **default** save path, not to a per-category one;
-* **the save path qBittorrent maps that name to.** A category pointing at
-  `/data/media/<type>` puts an unfinished album straight into the music library
-  for Jellyfin to scan — and that is the warning above.
+* **the category name each *arr sends.** Transmission has a single `category`
+  field, and Servarr sends it as a **subfolder of Transmission's download dir**
+  (the old qBittorrent schemas spelled it after the media type — `tvCategory`,
+  `movieCategory`, `musicCategory` — and a client created with a plain `category`
+  had no category at all). A client with no category drops the download straight
+  into the download dir;
+* **Transmission's download dir.** If it points at `/data/media/<type>`, the
+  category subfolder lands inside a library and Jellyfin scans half-finished
+  files — that is the warning above.
 
 The manifest is one source of truth for both: each *arr's category comes from
-`MONARCH_APPS`, and `qbt.category_paths` maps those names into the downloads tree
+`MONARCH_APPS`, and `transmission.category_paths` names the folder each lands in
 (`/data/torrents/<type>`, hardlink-friendly and outside every library root).
-`monarch-init` reconciles both — it corrects a drifted path, creates a missing
-category, removes one the manifest does not name, and PUTs the *arr's corrected
-download client — but only while it runs, so a deployment that was configured by
-hand before that survives until one of these does the same on a live host:
+`monarch-init` reconciles both — it pins the download dir and PUTs the *arr's
+corrected download client — but only while it runs, so a deployment that was
+configured by hand before that survives until one of these does the same on a
+live host:
 
 ```bash
 python3 scripts/arr-download-categories.py --check   # exit 2 = drift, 1 = not reachable
@@ -1831,25 +1835,22 @@ python3 scripts/arr-download-categories.py           # correct it (restarts noth
 
 Run it after changing a category in the WebUI by hand, and after a host was
 brought up from an older checkout. `scripts/drift-check.sh` runs the `--check`,
-compares the category **paths** (not just the names - a right name at a wrong path
-is exactly the case above), and rejects a category the manifest does not carry.
+compares each app's category and Transmission's **download dir** (a right name
+under the wrong dir is exactly the case above), and fails when the dir has drifted
+into a library.
 
-#### qBittorrent still asks for a password after signing in through Cerulean
-qBittorrent keeps a WebUI password of its own (`monarch-seed` writes
-`MONARCH_USERNAME`/`MONARCH_PASSWORD` into it, and the drift check logs in with
-it), so arriving through `qbittorrent-sso` used to meet a **second** login: the
-one the app itself shows. The WebUI is published on loopback only and
-`qbittorrent-sso` is the sole route to it, so `monarch-init` tells the app to
-trust the subnet the gateway calls from (`bypass_auth_subnet_whitelist`) and it
-stops asking — Cerulean is then the only credential either way.
+#### Transmission still asks for a password after signing in through Cerulean
+Transmission, unlike qBittorrent, has **no per-subnet auth bypass**: its local
+login is either required for everyone or for no one. The WebUI is published on
+loopback only and `transmission-sso` is the sole route to it, so the correct
+posture is no local login at all — the same as Bazarr and Seerr. The linuxserver
+entrypoint turns `rpc-authentication-required` off whenever `USER`/`PASS` are
+unset, and `monarch-seed` writes it off in `settings.json` too.
 
-The subnet is **discovered, not configured**: Docker allocates it
-(`172.18.0.0/16` on this host) and init reads it off the interface that contains
-`qbittorrent`'s address, so a host that builds the stack with a different pool is
-not left with a whitelist that matches nothing. If `drift-check` reports
-`the WebUI does not trust the SSO gateway's subnet`, re-run `monarch-init`
-(`configure_qbittorrent` sets it) — an emptied whitelist is otherwise silent, and
-the app simply starts asking again.
+If `drift-check` reports `transmission: the WebUI still requires its own login`,
+something set `USER`/`PASS` on the `transmission` service; unset them, recreate
+the container, and re-run `monarch-init` (`configure_transmission` asserts the
+posture). A second login behind Cerulean is the exact failure this avoids.
 
 #### The dashboard (Homarr) shows a dead link, a duplicate, or the wrong layout
 Homarr v1 keeps boards in SQLite (`/docker/appdata/homarr/appdata/db/db.sqlite`),
@@ -1962,8 +1963,8 @@ Add to the `jellyfin` service:
 ```
 
 #### SABnzbd Usenet client
-The `sabnzbd` service is already in the stack on host port 8082 (so it does
-not clash with qBittorrent on 8080), published from `SABNZBD_PORT` — the same
+The `sabnzbd` service is already in the stack on host port 8082, published from
+`SABNZBD_PORT` — the same
 variable `scripts/npm-hosts.conf` forwards to, so moving the port moves both.
 Use the TRASH-guide folder structure and
 
@@ -1976,3 +1977,96 @@ Use the TRASH-guide folder structure and
 unreferenced images, containers exited for more than a day, and container logs
 over 50 MB (trimmed to 10 MB). Volumes are never touched. Run it manually with
 `DRY_RUN=1 scripts/docker-cleanup.sh` to preview.
+
+## qBittorrent memory leak → replaced by Transmission (2026-10-01)
+
+`qbittorrent` restart-looped 28+ times and the live-stack drift check failed
+(`infra: qbittorrent restarted N times (>= 10)`). The container has no `mem_limit`
+of its own, so it was OOM-killed against the **monarch Incus cgroup** (then 6 GiB),
+whose `memory.peak` sat exactly at its cap (`memory.events: oom_kill 15`):
+**qBittorrent 5.2.x leaks memory** (upstream qBittorrent/qBittorrent#24618,
+~10 GB/day). A memory cap and a healthcheck kept it limping, but the leak never
+stopped, so qBittorrent was **removed and replaced with Transmission**.
+
+What changed:
+
+- `docker-compose.yml`: the `qbittorrent` and `qbittorrent-sso` services are gone;
+  `transmission` (and `transmission-sso`) is the downloader, with a healthcheck
+  that probes the RPC so a dead-but-running container reports `unhealthy`. The
+  WebUI stays loopback-only; only the peer port (`51413`) is published.
+- The per-app folders are unchanged: Servarr sends its category to Transmission as
+  a subfolder of the download dir, which is pinned to `/data/torrents`, so
+  `movies`/`tv`/`music`/`xxx` still land under `/data/torrents/<type>` and are the
+  same path in every container.
+- `monarch-seed` now writes Transmission's `settings.json` (download dir, RPC
+  whitelists off, no local login) instead of qBittorrent's config.
+- `monarch-init` (`configure_transmission`) and `scripts/arr-download-categories.py`
+  reconcile the download dir and each *arr's Transmission client;
+  `scripts/drift-check.sh` asserts both.
+
+The `monarch` Incus limit stayed at `8GiB` as a guard so one misbehaving service
+cannot starve the whole stack. Operational note: clearing a kernel-stuck wedged
+task once needed a reboot of the `i1` host — the healthcheck exists so that state
+is visible before it gets there.
+
+### Deploying the swap (order of operations)
+
+The swap is a change to `docker-compose.yml` and `init/`, so it only reaches the
+stack when the **live checkout** does. The media host is the `monarch` Incus
+container on `i1` (LAN `192.168.1.56`); its checkout is
+`/usr/src/projects/complete/3-media/monarch` **inside that container**, and
+`systemd/monarch.service` runs `docker compose … up -d --wait --remove-orphans`
+from it. That checkout is *not* a shared mount with the dev box, and it carries
+its own uncommitted work — reconcile it deliberately (shared remote, merge, pull)
+rather than copying one tree over the other (see
+`ips/docs/checkout-drift-2026-10-01.md`).
+
+`docker start monarch-init` on its own changes **nothing** about the downloader:
+it re-runs the one-shot init container *as the host last defined it*, so on a host
+still on the old compose it just re-seeds qBittorrent and reports success. The
+order that matters is:
+
+```bash
+# 1. On the media host, in the checkout: get the new compose + init/ onto disk.
+#    (git pull after the shared-remote merge, or the reconciled files.)
+sudo docker compose up -d --remove-orphans     # creates transmission + transmission-sso
+sudo docker start monarch-init                  # then let init re-wire the *arrs
+# or, if the stack is managed by the unit:  sudo systemctl restart monarch
+```
+
+`--remove-orphans` is the flag that matters. Compose `up` leaves running any
+container whose service is no longer in the file, so without it `qbittorrent` and
+`qbittorrent-sso` keep running beside `transmission` — the state that looks like
+"the swap did not work". `monarch.service` already passes it, so a
+`systemctl restart monarch` on a host whose files are current is enough.
+
+Three things are **not** in the repo and have to be done on the host/provider:
+
+- **`.env`** (live, git-ignored) must carry the new callback:
+  `MONARCH_SSO_REDIRECT_URIS` gains `https://transmission.<domain>/oauth2/callback`.
+- **Authentik** must have that same callback registered on the media client;
+  `scripts/verify-sso.py` fails until it is.
+- **Nginx Proxy Manager** must swap the host. `scripts/npm-hosts.conf` already
+  lists `transmission` at `14007` and no longer lists `qbittorrent`, so
+  `python3 scripts/npm-proxy-hosts.py --prune` adds the new name and deletes the
+  retired one (its `--check` reports the drift first; `--dry-run` shows the plan).
+
+### Retiring qBittorrent's leftovers
+
+Nothing in the stack reads these once `transmission` is verified, but keep them
+until it is — an appdata directory is the *only* copy of a session's resume data
+and its `settings.json`:
+
+1. Confirm the replacement first: `scripts/drift-check.sh` clean, and
+   `python3 scripts/arr-download-categories.py --check` reporting every *arr on
+   the Transmission client with download dir `/data/torrents`.
+2. Remove the proxy host: `python3 scripts/npm-proxy-hosts.py --prune` (drop the
+   `qbittorrent.<domain>` row and its certificate assignment; the conf no longer
+   lists the name, so `--check` fails until it is pruned).
+3. Retire the appdata last: `sudo rm -rf /docker/appdata/qbittorrent`. Its
+   `torrents/` and session state are superseded by
+   `/docker/appdata/transmission`, and the media itself lives under
+   `/data/torrents` (untouched). `scripts/docker-cleanup.sh` never removes
+   volumes or appdata, so this one is a hand step and stays documented here.
+4. Authentik: drop the `qbittorrent` application/provider if the media client
+   was one client with a redirect list — the callback above is the whole change.

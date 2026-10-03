@@ -99,9 +99,10 @@ These were gaps; they are now done and verified live:
 - **The public door is one address.** `media.magnate.innotel.us` terminates at
   the Cerulean edge and hands off to Authentik first — a true SSO flow rather
   than an unprotected direct login.
-- **Live TV and qBittorrent complete their init.** The M3U tuner + XMLTV
-  provider are configured (previously a 503 during restart), and qBittorrent's
-  WebUI credentials survive a restart (persistent login verified, HTTP 204).
+- **Live TV completes its init.** The M3U tuner + XMLTV provider are
+  configured (previously a 503 during restart). Downloads run through
+  Transmission, whose session settings (download dir, RPC whitelists, no local
+  login) survive a restart.
 - **Authentik per-user LDAP search grant** works on 2026.8: the role-based
   `rbac/roles/{uuid}/add_user/` fallback replaced the removed per-user endpoint,
   still scoped to `search_full_directory` on the LDAP provider only.

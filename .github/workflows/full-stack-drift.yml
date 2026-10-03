@@ -5,7 +5,7 @@
 #
 # Runs scripts/fresh-install-check.sh --full-stack on a clean ubuntu-latest
 # runner: stages 1 (offline rehearsal incl. the drift-check <-> monarch-init
-# lockstep) + 3 (boots jellyfin, the *arrs, prowlarr, qBittorrent, bazarr,
+# lockstep) + 3 (boots jellyfin, the *arrs, prowlarr, Transmission, bazarr,
 # jellyseerr + monarch-init; waits for init to wire everything; then runs
 # scripts/drift-check.sh --quiet against the booted stack and requires exit
 # 0). Authentik is not booted (both init.py and the drift check skip it when

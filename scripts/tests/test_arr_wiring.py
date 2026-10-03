@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import sys
 import tempfile
@@ -523,82 +524,47 @@ class SyncingTheApps(unittest.TestCase):
 
 
 class WhereADownloadLands(unittest.TestCase):
-    """The category name the app sends and the path qBittorrent maps it to.
+    """The category name each app sends, and the dir Transmission files it under.
 
-    Both halves fail invisibly: a client created with `category` set has no such
-    field, so no app is ever told anything, and a category whose path is a
-    library root drops an unfinished album into the music library. The app only
-    hints at the second one, on its own Health page.
+    Transmission has no categories of its own: Servarr sends `category` as a
+    subfolder of Transmission's download dir, so the name decides the folder and
+    the download dir decides whether that folder is inside the library. Both
+    halves fail invisibly - the app only hints at the second one, on its own
+    Health page.
     """
 
     WANT = {"tv": "/data/torrents/tv", "movies": "/data/torrents/movies",
             "music": "/data/torrents/music", "xxx": "/data/torrents/xxx"}
+    MANIFEST = {
+        "version": 1,
+        "arr_apps": [{"svc": "lidarr", "port": 8686, "api": "v1",
+                      "category": "music", "media": "music"}],
+        "transmission": {"download_dir": "/data/torrents", "auth_required": False},
+    }
 
     def test_the_apps_own_spelling_is_the_field_that_matters(self) -> None:
         sonarr = {"fields": [{"name": "tvCategory", "value": "tv-sonarr"},
                              {"name": "failedDownloadHandling", "value": True}]}
         lidarr = {"fields": [{"name": "musicCategory", "value": "lidarr"}]}
+        trans = {"fields": [{"name": "category", "value": "tv"}]}
         self.assertEqual(categories.category_field(sonarr)["name"], "tvCategory")
         self.assertEqual(categories.category_field(lidarr)["name"], "musicCategory")
-        # There is no plain `category` in these schemas - that is the bug.
+        # Transmission's schema has a plain `category`; the qBittorrent ones do not.
+        self.assertEqual(categories.category_field(trans)["name"], "category")
         self.assertIsNone(categories.category_field({"fields": [{"name": "host"}]}))
 
-    def test_a_category_pointing_at_a_library_root_is_drift(self) -> None:
-        live = {"lidarr": {"savePath": "/data/media/music"}}
-        self.assertEqual(categories.path_drift(live, {"lidarr": "/data/torrents/music"}),
-                         [("lidarr", "/data/media/music", "/data/torrents/music")])
+    def test_an_app_with_no_transmission_client_is_named(self) -> None:
+        with mock.patch.object(categories, "api_key", return_value="k"), \
+                mock.patch.object(categories, "call", return_value=(200, [])), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            findings, reachable = categories.check_arrs(self.MANIFEST, Path("/appdata"),
+                                                         True, False)
+        self.assertTrue(reachable)
+        self.assertEqual(findings, ["lidarr: no Transmission download client"])
 
-    def test_a_category_at_its_path_is_not_drift(self) -> None:
-        live = {"movies": {"savePath": "/data/torrents/movies"}}
-        self.assertEqual(categories.path_drift(live, {"movies": "/data/torrents/movies"}), [])
-
-    def test_a_missing_category_is_drift_with_no_live_path(self) -> None:
-        self.assertEqual(categories.path_drift({}, {"tv": "/data/torrents/tv"}),
-                         [("tv", None, "/data/torrents/tv")])
-
-    def test_a_name_the_manifest_does_not_carry_is_a_stray(self) -> None:
-        live = {name: {} for name in (*self.WANT, "radarr", "downloads", "whisparr")}
-        self.assertEqual(categories.strays(live, self.WANT),
-                         ["downloads", "radarr", "whisparr"])
-
-    def test_a_stray_still_filing_torrents_is_counted_not_removed(self) -> None:
-        # qBittorrent strips the category from every torrent under it, so
-        # removing `lidarr` first leaves those three seeding and invisible to
-        # Lidarr, which finds its downloads by name.
-        torrents = [{"category": "lidarr"}, {"category": "lidarr"}, {"category": "lidarr"},
-                    {"category": "music"}, {"category": ""}, {}]
-        self.assertEqual(categories.held(["lidarr", "radarr"], torrents), {"lidarr": 3})
-
-    def test_a_manifest_that_predates_the_map_reports_unknown_paths(self) -> None:
-        # Not "every category saves to the default": guessing that would rewrite
-        # four correct /data/torrents/<type> paths and call it a fix.
-        old = {"qbt": {"categories": ["tv", "movies"], "save_path": "/data/torrents"}}
-        self.assertEqual(categories.manifest_categories(old),
-                         ({"tv": None, "movies": None}, False))
-        new = {"qbt": {"categories": ["tv"],
-                        "category_paths": {"tv": "/data/torrents/tv"}}}
-        self.assertEqual(categories.manifest_categories(new),
-                         ({"tv": "/data/torrents/tv"}, True))
-
-    def test_an_unknown_path_is_never_called_drift_but_a_missing_name_is(self) -> None:
-        self.assertEqual(categories.path_drift({"tv": {"savePath": "/elsewhere"}},
-                                               {"tv": None}), [])
-        self.assertEqual(categories.path_drift({}, {"tv": None}), [("tv", None, None)])
-
-    def test_the_credentials_come_from_dot_env_when_the_environment_is_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / ".env").write_text(
-                "# monarch\nMONARCH_USERNAME=someone\nMONARCH_PASSWORD='secret value'\n",
-                encoding="utf-8")
-            with mock.patch.dict(os.environ, {}, clear=True):
-                self.assertEqual(categories.credentials(Path(tmp)),
-                                 ("someone", "secret value"))
-
-    def test_an_app_that_sends_the_wrong_category_is_corrected(self) -> None:
-        manifest = {"arr_apps": [{"svc": "lidarr", "port": 8686, "api": "v1",
-                                  "category": "music"}]}
-        client = {"id": 1, "implementation": "QBittorrent",
-                  "fields": [{"name": "musicCategory", "value": "lidarr"}]}
+    def test_a_wrong_category_is_corrected_and_reachable(self) -> None:
+        client = {"id": 1, "implementation": "Transmission",
+                  "fields": [{"name": "category", "value": "lidarr"}]}
         calls = []
 
         def fake_call(url, method="GET", body=None, **kwargs):
@@ -608,8 +574,8 @@ class WhereADownloadLands(unittest.TestCase):
         with mock.patch.object(categories, "api_key", return_value="k"), \
                 mock.patch.object(categories, "call", side_effect=fake_call), \
                 redirect_stdout(io.StringIO()):
-            findings, reachable, renames = categories.check_arrs(manifest, Path("/appdata"),
-                                                                 True, False)
+            findings, reachable = categories.check_arrs(self.MANIFEST, Path("/appdata"),
+                                                         True, False)
 
         self.assertEqual(findings, [])
         self.assertTrue(reachable)
@@ -617,15 +583,10 @@ class WhereADownloadLands(unittest.TestCase):
         self.assertEqual(method, "PUT")
         self.assertTrue(url.endswith("/downloadclient/1"))
         self.assertEqual(categories.category_field(body)["value"], "music")
-        # The rename is handed back so the torrents already filed under it move
-        # too - otherwise pruning `lidarr` leaves them invisible to Lidarr.
-        self.assertEqual(renames, [("lidarr", "lidarr", "music")])
 
     def test_a_check_reports_the_wrong_category_and_changes_nothing(self) -> None:
-        manifest = {"arr_apps": [{"svc": "radarr", "port": 7878, "api": "v3",
-                                  "category": "movies"}]}
-        client = {"id": 1, "implementation": "QBittorrent",
-                  "fields": [{"name": "movieCategory", "value": "radarr"}]}
+        client = {"id": 1, "implementation": "Transmission",
+                  "fields": [{"name": "category", "value": "lidarr"}]}
         seen = []
         out = io.StringIO()
         with mock.patch.object(categories, "api_key", return_value="k"), \
@@ -633,50 +594,68 @@ class WhereADownloadLands(unittest.TestCase):
                                   side_effect=lambda url, method="GET", **k:
                                   (seen.append(method) or (200, [client]))), \
                 redirect_stdout(out), redirect_stderr(out):
-            findings, _, renames = categories.check_arrs(manifest, Path("/appdata"), False, False)
+            findings, _ = categories.check_arrs(self.MANIFEST, Path("/appdata"), False, False)
         self.assertEqual(len(findings), 1)
-        self.assertIn("'radarr'", findings[0])
-        self.assertEqual(renames, [], "a check must not plan a change")
+        self.assertIn("'lidarr'", findings[0])
         self.assertEqual(seen, ["GET"], "a check must not PUT")
 
-    def test_a_missing_qbittorrent_client_is_named(self) -> None:
-        manifest = {"arr_apps": [{"svc": "sonarr", "port": 8989, "api": "v3",
-                                  "category": "tv"}]}
-        with mock.patch.object(categories, "api_key", return_value="k"), \
-                mock.patch.object(categories, "call", return_value=(200, [])), \
-                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            findings, _, _ = categories.check_arrs(manifest, Path("/appdata"), True, False)
-        self.assertEqual(findings, ["sonarr: no qBittorrent download client"])
-
-    def test_torrents_filed_under_the_old_name_move_with_it(self) -> None:
-        # Pruning `lidarr` while three torrents are filed under it leaves them
-        # seeding and invisible to Lidarr, which finds its downloads by name.
-        torrents = [{"hash": "a" * 40}, {"hash": "b" * 40}]
-        seen = []
-
-        def fake_call(url, method="GET", body=None, **kwargs):
-            seen.append((method, url, body))
-            return (200, torrents) if method == "GET" else (200, None)
-
-        with mock.patch.object(categories, "call", side_effect=fake_call), \
+    def test_a_download_dir_at_the_manifest_path_is_not_drift(self) -> None:
+        with mock.patch.object(categories, "transmission_rpc",
+                               return_value={"download-dir": "/data/torrents",
+                                             "rpc-authentication-required": False}), \
                 redirect_stdout(io.StringIO()):
-            findings = categories.migrate_torrents("http://qbt", None,
-                                                   [("lidarr", "lidarr", "music")], False)
-
+            findings, ok = categories.check_transmission(self.MANIFEST, "http://transmission:9091")
+        self.assertTrue(ok)
         self.assertEqual(findings, [])
-        method, url, body = seen[-1]
-        self.assertEqual(method, "POST")
-        self.assertIn("setCategory", url)
-        self.assertEqual(body["category"], "music")
-        self.assertEqual(body["hashes"], "|".join(["a" * 40, "b" * 40]))
 
-    def test_a_dry_run_does_not_move_torrents(self) -> None:
+    def test_a_download_dir_inside_a_library_is_drift(self) -> None:
+        with mock.patch.object(categories, "transmission_rpc",
+                               return_value={"download-dir": "/data/media/tv",
+                                             "rpc-authentication-required": False}):
+            findings, ok = categories.check_transmission(self.MANIFEST, "http://transmission:9091")
+        self.assertTrue(ok)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("/data/media/tv", findings[0])
+
+    def test_a_local_login_behind_cerulean_is_drift(self) -> None:
+        with mock.patch.object(categories, "transmission_rpc",
+                               return_value={"download-dir": "/data/torrents",
+                                             "rpc-authentication-required": True}):
+            findings, _ = categories.check_transmission(self.MANIFEST, "http://transmission:9091")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("SECOND login", findings[0])
+
+    def test_the_rpc_handshake_repeats_with_the_session_id(self) -> None:
         seen = []
-        with mock.patch.object(categories, "call",
-                               side_effect=lambda *a, **k: (seen.append(a[0]) or (200, [{"hash": "c" * 40}]))), \
-                redirect_stdout(io.StringIO()):
-            categories.migrate_torrents("http://qbt", None, [("lidarr", "lidarr", "music")], True)
-        self.assertEqual(seen, ["http://qbt/api/v2/torrents/info?category=lidarr"])
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server's spelling
+                seen.append(self.headers.get("X-Transmission-Session-Id", ""))
+                if len(seen) == 1:
+                    self.send_response(409)
+                    self.send_header("X-Transmission-Session-Id", "abc123")
+                    self.end_headers()
+                    return
+                body = json.dumps({"result": "success",
+                                   "arguments": {"download-dir": "/data/torrents"}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            session = categories.transmission_rpc(base, "session-get")
+        finally:
+            server.shutdown()
+        self.assertEqual(session.get("download-dir"), "/data/torrents")
+        self.assertEqual(seen, ["", "abc123"])
 
 
 if __name__ == "__main__":
