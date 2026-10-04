@@ -395,7 +395,12 @@ services:
   requestrr:
     <<: *common-keys
     container_name: requestrr
-    image: thomst08/requestrr:latest
+    # Served from this repo's own GHCR mirror (published by
+    # .github/workflows/publish-image-mirrors.yml) rather than Docker Hub: an
+    # anonymous Docker Hub pull shares its small per-address budget with every
+    # image digest check, which is what made Ontrak Sync's updates fail with
+    # `429`. The image is unchanged - it is a mirror.
+    image: ${REQUESTRR_IMAGE:-ghcr.io/innotelinc/monarch/requestrr:latest}
     ports:
       - 127.0.0.1:4545:4545
     volumes:
@@ -473,7 +478,12 @@ services:
     # nextpvr_arm64) - there is no multi-arch manifest. install-monarch.sh
     # pins NEXTPVR_IMAGE into .env from `uname -m`; override it manually if
     # you run this stack on the non-native arch.
-    image: ${NEXTPVR_IMAGE:-nextpvr/nextpvr_amd64:latest}
+    #
+    # Both variants are served from this repo's own GHCR mirror (published by
+    # .github/workflows/publish-image-mirrors.yml), for the same reason as
+    # requestrr above: an anonymous Docker Hub pull shares its small per-address
+    # budget with every digest check, which made Ontrak Sync's updates `429`.
+    image: ${NEXTPVR_IMAGE:-ghcr.io/innotelinc/monarch/nextpvr_amd64:latest}
     profiles: ["legacy"]
     ports:
       - 8866:8866
@@ -769,7 +779,12 @@ services:
   nginx-proxy-manager:
     <<: *common-keys
     container_name: nginx-proxy-manager
-    image: jc21/nginx-proxy-manager:latest
+    # Served from this repo's own GHCR mirror (published by
+    # .github/workflows/publish-image-mirrors.yml) rather than Docker Hub, for the
+    # same reason as requestrr: an anonymous Docker Hub pull shares its small
+    # per-address budget with every image digest check, which made Ontrak Sync's
+    # updates fail with `429`. The image is unchanged - it is a mirror.
+    image: ${NPM_IMAGE:-ghcr.io/innotelinc/monarch/nginx-proxy-manager:latest}
     # Optional local reverse proxy: only started when the "npm" compose
     # profile is enabled. Set NPM_MODE=remote in .env to reuse an existing
     # NPM server (NPM_BASE_URL) and keep NPM out of this stack entirely.
@@ -798,7 +813,16 @@ services:
     container_name: watchtower
     # containrrr/watchtower is archived (Dec 2025) and its images predate
     # Docker Engine 29's minimum API (1.44) - use the maintained fork.
-    image: nickfedor/watchtower:latest
+    #
+    # Served from this repo's own GHCR mirror
+    # (`ghcr.io/innotelinc/monarch/watchtower`, published by
+    # .github/workflows/publish-watchtower-mirror.yml) rather than pulled from
+    # Docker Hub as `nickfedor/watchtower`. The image is identical - it is a
+    # mirror - but Docker Hub answers an anonymous pull out of a small
+    # per-address budget that is SHARED with every digest check, and pulling
+    # watchtower from the Hub exhausted it and made Ontrak Sync's other image
+    # updates fail with `429 Too Many Requests`. GHCR has no such limit.
+    image: ${WATCHTOWER_IMAGE:-ghcr.io/innotelinc/monarch/watchtower:latest}
     restart: unless-stopped
     command: --cleanup --interval 21600
     volumes:

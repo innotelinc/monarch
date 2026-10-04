@@ -158,9 +158,19 @@ manual steps but are worth knowing about:
 - **NextPVR** publishes a *separate* image per CPU architecture
   (`nextpvr_amd64` / `nextpvr_arm64`); `scripts/install-monarch.sh` pins
   the right one into `.env` (`NEXTPVR_IMAGE`) from `uname -m` automatically.
+  Both variants are mirrored to GHCR like the rest (below).
 - **ClipBucket** has no arm64 upstream image, so Monarch builds its own
   bundled runtime (nginx + PHP-FPM + MariaDB, `clipbucket/`) and the
   application source is git-cloned on first boot.
+
+**Docker Hub images are mirrored to GHCR.** Watchtower, Requestrr, Nginx Proxy
+Manager and both NextPVR variants are pulled from `ghcr.io/innotelinc/monarch/*`
+(built by `.github/workflows/publish-image-mirrors.yml`) rather than from the Hub:
+an anonymous Docker Hub pull shares a small per-address budget with every image
+digest check, and pulling these from the Hub was making the Network's update
+tooling fail with `429 Too Many Requests`. The images are unchanged — they are
+mirrors. Set `WATCHTOWER_IMAGE`, `REQUESTRR_IMAGE`, `NPM_IMAGE` or
+`NEXTPVR_IMAGE` to move back to upstream.
 
 The **live/install ISO** (`monarch-live-amd64.iso`) is amd64-only — on an
 arm64 host, install via the normal `./setup.sh` path instead.
