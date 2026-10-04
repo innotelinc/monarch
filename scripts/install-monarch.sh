@@ -257,8 +257,8 @@ install_in_place() {
       aarch64|arm64) __np_arch="arm64" ;;
       *) __np_arch="amd64" ;;
     esac
-    printf '\n# NextPVR per-architecture image (auto-detected from uname -m)\nNEXTPVR_IMAGE=nextpvr/nextpvr_%s:latest\n' "$__np_arch" >> "$TARGET/.env"
-    echo "Pinned NEXTPVR_IMAGE=nextpvr/nextpvr_$__np_arch:latest into $TARGET/.env"
+    printf '\n# NextPVR per-architecture image (auto-detected from uname -m)\nNEXTPVR_IMAGE=ghcr.io/innotelinc/monarch/nextpvr_%s:latest\n' "$__np_arch" >> "$TARGET/.env"
+    echo "Pinned NEXTPVR_IMAGE=ghcr.io/innotelinc/monarch/nextpvr_$__np_arch:latest into $TARGET/.env"
     unset __np_arch
   fi
   load_docker_images "$TARGET/dist/docker-images"

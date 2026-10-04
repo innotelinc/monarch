@@ -5,7 +5,7 @@
 # build-offline-bundle.sh pulls with `docker pull` on the build host, so a
 # multi-arch image lands in the bundle for the host's architecture. NextPVR
 # publishes a SEPARATE image per arch (no multi-arch manifest) - the script
-# rewrites the nextpvr/nextpvr_* line to the host's arch automatically.
+# rewrites the ghcr.io/innotelinc/monarch/nextpvr_* line to the host's arch.
 ghcr.io/hotio/jellyfin:latest
 ghcr.io/seerr-team/seerr:latest
 ghcr.io/hotio/sonarr:latest
@@ -18,16 +18,16 @@ ghcr.io/homarr-labs/homarr:latest
 ghcr.io/hotio/sabnzbd:latest
 lscr.io/linuxserver/transmission:latest
 lscr.io/linuxserver/deluge:latest
-thomst08/requestrr:latest
+ghcr.io/innotelinc/monarch/requestrr:latest
 ghcr.io/flaresolverr/flaresolverr:latest
 ghcr.io/autobrr/autobrr:latest
 ghcr.io/dispatcharr/dispatcharr:latest
 lscr.io/linuxserver/tvheadend:latest
-nextpvr/nextpvr_amd64:latest
+ghcr.io/innotelinc/monarch/nextpvr_amd64:latest
 ghcr.io/iptv-org/epg:master
 python:3.12-slim
-nickfedor/watchtower:latest
-jc21/nginx-proxy-manager:latest
+ghcr.io/innotelinc/monarch/watchtower:latest
+ghcr.io/innotelinc/monarch/nginx-proxy-manager:latest
 
 # The first-party Monarch images are published by the release workflow
 # (build-images job) to GHCR as multi-arch (amd64 + arm64) manifests - they

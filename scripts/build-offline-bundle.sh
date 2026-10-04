@@ -75,7 +75,8 @@ esac
 {
   for img in "${IMAGES[@]}"; do
     case "$img" in
-      nextpvr/nextpvr_*) img="nextpvr/nextpvr_${__bundle_arch}:${img##*:}" ;;
+      ghcr.io/innotelinc/monarch/nextpvr_*)
+        img="ghcr.io/innotelinc/monarch/nextpvr_${__bundle_arch}:${img##*:}" ;;
     esac
     echo "-- Pulling $img"
     docker pull "$img"
