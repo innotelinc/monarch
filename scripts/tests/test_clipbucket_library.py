@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import os
 import re
 import sys
@@ -879,6 +880,38 @@ class Sql(unittest.TestCase):
 
     def test_backslashes_are_escaped(self):
         self.assertEqual(cl.sql_quote("a\\b"), "a\\\\b")
+
+
+class NothingEatsTheCallersStdin(unittest.TestCase):
+    """ffmpeg - and so ffprobe - reads its own stdin for interactive keys (`q` to
+    quit), so a child that inherits the caller's stdin consumes it. Measured on
+    monarch 2026-10-06: a `drift-check` run started from a script on stdin
+    swallowed every line after the library check, so the caller's script silently
+    ended there. Nothing in this module wants input, and the two spawn points (the
+    ffprobe in `probe()`, and `run()` for docker, mysql and the two ffmpeg
+    builders) therefore hand the child a closed stdin."""
+
+    def test_probe_gives_ffprobe_no_stdin(self):
+        with mock.patch.object(cl.subprocess, "run") as spawn:
+            spawn.return_value = mock.Mock(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps(
+                    {"streams": [], "format": {"duration": "1.0", "format_name": "mov,mp4"}}
+                ),
+            )
+            cl.probe("/tmp/x.mp4")
+        args, kwargs = spawn.call_args
+        self.assertIn("-nostdin", args[0])
+        self.assertIs(kwargs.get("stdin"), cl.subprocess.DEVNULL)
+
+    def test_run_gives_a_child_no_stdin_unless_this_call_has_something(self):
+        with mock.patch.object(cl.subprocess, "run") as spawn:
+            spawn.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            cl.run(["docker", "inspect", "-f", "{{.State.Running}}", "clipbucket"])
+            self.assertIs(spawn.call_args.kwargs.get("stdin"), cl.subprocess.DEVNULL)
+            cl.run(["mysql", "-e", "SELECT 1"], stdin="SELECT 1;")
+            self.assertEqual(spawn.call_args.kwargs.get("input"), "SELECT 1;")
 
 
 if __name__ == "__main__":

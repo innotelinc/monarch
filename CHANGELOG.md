@@ -170,6 +170,17 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **The library check no longer eats its caller's stdin.** `ffmpeg` — and so
+  `ffprobe` — reads its own stdin for interactive keys (`q` to quit), so an
+  `ffprobe` that inherits the caller's stdin consumes it. Measured on monarch
+  2026-10-06: a `drift-check` run started from a script on stdin swallowed every
+  line of that script after the library check, so the caller's script silently
+  ended there — which is what made a remote verification look like it had hung.
+  `scripts/clipbucket-library.py` now passes `-nostdin` and `stdin=DEVNULL` at the
+  `ffprobe` spawn and `stdin=DEVNULL` for every other child (`run()` covers the
+  docker, mysql and ffmpeg calls), so nothing in it reads a stream it does not
+  own. Both spawn points are pinned by tests.
+
 - **The drift alert says which failure it is.** A repair that did not take and a
   run that only looked both arrived as the same nine words, `⚠️ Monarch drift check
   failed on <host>`, and they were told apart by remembering that the timer runs
