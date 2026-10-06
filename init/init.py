@@ -55,6 +55,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 import zipfile
 from http.cookiejar import CookieJar
 
@@ -1191,12 +1192,43 @@ def ldap_plugin_config_path() -> str:
                         f"{LDAP_PLUGIN_NAME}.xml")
 
 
+# The one element of this file the plugin owns rather than init: the Jellyfin
+# accounts it has linked to LDAP identities.
+LDAP_USERS_RE = re.compile(r"<LdapUsers\s*/>|<LdapUsers>.*?</LdapUsers>", re.S)
+
+
+def ldap_config_values(xml: str) -> dict:
+    """The `<Tag>value</Tag>` map of a plugin config, or `{}` if it will not parse.
+
+    Compare this instead of the file's bytes, because the file is shared with the
+    plugin: it owns `<LdapUsers>` and rewrites the whole file in its own shape
+    (including an `encoding="utf-8"` XML declaration) as soon as it has linked an
+    account. A byte comparison therefore reported a change on **every** run - so
+    `needs_restart` was always true and `monarch-init` restarted Jellyfin, ~40s of
+    outage and the 503 window `drift-check` used to read, whether or not anything
+    init manages had moved. Measured on monarch: every managed value identical,
+    and the run restarted Jellyfin anyway.
+    """
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return {}
+    return {child.tag: (child.text or "").strip() for child in root}
+
+
+def ldap_config_changed(previous: str | None, xml: str) -> bool:
+    """Whether a value init MANAGES moved - not whether the file differs."""
+    if previous is None:
+        return True
+    return ldap_config_values(previous) != ldap_config_values(xml)
+
+
 def write_ldap_plugin_config() -> tuple[str, str]:
     """Write the LDAP-Auth plugin config file. Returns (path, xml)."""
     bind_dn = f"cn={LDAP_BIND_USER},ou=users,{LDAP_BASE_DN}"
     search_filter = f"(memberOf=cn={LDAP_BIND_GROUP},ou=groups,{LDAP_BASE_DN})"
     admin_filter = f"(memberOf=cn={LDAP_ADMIN_GROUP},ou=groups,{LDAP_BASE_DN})"
-    xml = f"""<?xml version="1.0"?>
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <PluginConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <LdapUsers />
   <LdapServer>{LDAP_SERVER}</LdapServer>
@@ -1230,6 +1262,18 @@ def write_ldap_plugin_config() -> tuple[str, str]:
 </PluginConfiguration>
 """
     path = ldap_plugin_config_path()
+    # Carry the plugin's own `<LdapUsers>` across rather than writing the empty
+    # element the template holds: it is the list of Jellyfin accounts the plugin
+    # has linked to LDAP identities, and writing over it drops those links. It is
+    # also what makes the file stop matching the template after the plugin edits
+    # it, so carrying it over is the other half of `ldap_config_changed` settling.
+    try:
+        with open(path, encoding="utf-8") as fh:
+            carried = LDAP_USERS_RE.search(fh.read())
+    except OSError:
+        carried = None
+    if carried:
+        xml = LDAP_USERS_RE.sub(lambda _match: carried.group(0), xml, count=1)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(xml)
@@ -1572,7 +1616,9 @@ def configure_jellyfin_ldap():
     path, xml = write_ldap_plugin_config()
     _log(f"LDAP-Auth plugin config written -> {path}")
 
-    needs_restart = previous != xml
+    # What moved, not what the bytes are: the file is shared with the plugin, so
+    # comparing it whole is true on every run (see `ldap_config_values`).
+    needs_restart = ldap_config_changed(previous, xml)
     state = pinned_plugin_state(pin_for("ldap"))
     if state == "ok" and jellyfin_plugin_installed(token):
         _log("LDAP-Auth plugin already installed, and it is the pinned build.")

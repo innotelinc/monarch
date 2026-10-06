@@ -187,6 +187,22 @@ are written by hand and describe the behaviour change, not the commits.
   never judges a credential it has not been asked about yet. Pinned by
   `scripts/tests/test_init_jellyfin_restart_wait.py`.
 
+- **`monarch-init` restarted Jellyfin on every single run, for nothing.** It
+  writes the LDAP-Auth plugin config and restarts Jellyfin only when a value it
+  manages has moved — the plugin reads that config at startup, so a rotated bind
+  token has to be noticed — but it decided that by comparing the file whole. That
+  file is shared: the plugin owns `<LdapUsers>`, the Jellyfin accounts it has
+  linked to LDAP identities, and rewrites the file in its own shape (including an
+  `encoding="utf-8"` XML declaration) as soon as it has linked one. The comparison
+  was therefore true on **every** run and init restarted Jellyfin — ~40s of
+  downtime, and the 503 window this changelog's other Jellyfin entries are about —
+  whether or not anything had changed. Measured on monarch 2026-10-06: every
+  managed value byte-identical, and the run restarted Jellyfin anyway. It now
+  compares the values it manages (`ldap_config_changed()`) rather than the bytes,
+  and carries the plugin's `<LdapUsers>` across when it does rewrite — so those
+  links are no longer dropped, and the file converges instead of alternating.
+  Pinned by `scripts/tests/test_init_ldap_config_idempotence.py`.
+
 - **A six-hourly run that lands inside a Jellyfin restart no longer pages.**
   Something other than the heal can restart Jellyfin — its own dashboard, a
   plugin install — and this build answers `503` from its setup host for the whole
