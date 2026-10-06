@@ -99,11 +99,21 @@ set -uo pipefail
 #   --check-manifest     validate a manifest file's schema only (no network) -
 #                        used by fresh-install-check.sh in CI; pass the file
 #                        with MONARCH_INVARIANTS=<path>
+#   --status             print the last recorded verdict (drift-last) and exit
+#                        with it: 0 clean, 1 drift, 2 nothing recorded. The
+#                        answer to "is the stack drifted right now" without the
+#                        journal and without knowing when the timer last ran.
 #
 # MONARCH_INVARIANTS also marks a run as staged: it reads a manifest other than
-# this host's own, so it reports and exits non-zero but does NOT send the Telegram
-# alert - a rehearsal is not an alarm.
+# the one under this check's state directory, so it reports and exits non-zero but
+# does NOT send the Telegram alert - a rehearsal is not an alarm.
 #   --test-telegram      send a test Telegram message (needs .env vars)
+#
+# State is one directory, $MONARCH_STATE_DIR (default /docker/appdata/init): the
+# invariants manifest this run judges, the heal clock and streak, and the verdict
+# it records for --status. Pointing it at another directory is how the whole check
+# runs somewhere that is not a host's own state - scripts/tests/test_drift_check_alerts.py
+# and the `drift-alerts` CI job both do exactly that. Leave it unset on a host.
 #
 # Alerting is deliberately narrow: a staged run (a manifest other than this
 # host's) never notifies, and a notification says whether the stack had just been
@@ -123,28 +133,58 @@ QUIET=0
 HEAL=0
 CHECK_MANIFEST=0
 TEST_TG=0
+STATUS=0
 for arg in "$@"; do
   case "$arg" in
     --quiet) QUIET=1 ;;
     --heal) HEAL=1 ;;
     --check-manifest) CHECK_MANIFEST=1 ;;
     --test-telegram) TEST_TG=1 ;;
+    --status) STATUS=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 
 ENV_FILE="${MONARCH_ENV:-.env}"
-DEFAULT_MANIFEST="/docker/appdata/init/invariants.json"
+# Everything this check reads and records lives in one directory (see the header):
+# the manifest monarch-init emits, the heal clock, and the verdict below. Naming it
+# once is also what makes the staged rule precise - a run is staged when its
+# manifest is not the one in here.
+STATE_DIR="${MONARCH_STATE_DIR:-/docker/appdata/init}"
+DEFAULT_MANIFEST="$STATE_DIR/invariants.json"
 MANIFEST="${MONARCH_INVARIANTS:-$DEFAULT_MANIFEST}"
+HEAL_STATE="$STATE_DIR/drift-heal-last"
+STATUS_FILE="$STATE_DIR/drift-last"
 # A run pointed at another manifest is staged, not this host's own check: CI
 # (`fresh-install-check.sh --full-stack`, `drift-check --check-manifest`) and an
 # operator rehearsing a change both pass their own. Its findings are the point of
 # it, so it must not push an alert - the runs that verified this check's own
 # failure paths notified an operator about a fabricated library name and a port
 # nothing listens on, which is a page about a stack that was fine. It still
-# reports and still exits non-zero; only the notification is withheld.
+# reports and still exits non-zero; only the notification is withheld. A staged
+# run does not record a verdict either - the verdict is this host's, and a
+# rehearsal of someone else's manifest would make the file lie.
 STAGED=0
 [ "$MANIFEST" = "$DEFAULT_MANIFEST" ] || STAGED=1
+
+# ── --status: the last verdict, without the journal ───────────────────────
+# A timer's run is otherwise only readable in `journalctl -u monarch-drift-check`,
+# which needs a shell on the host and the right time window; a fresh install, a
+# reboot and a suspicious service all start with "is anything drifted?". Every
+# completed run records that answer in drift-last, and this prints it. Exit codes
+# follow the house rule for a read-only check: 0 clean, 1 finding, 2 cannot judge.
+if [ "$STATUS" -eq 1 ]; then
+  if [ ! -f "$STATUS_FILE" ]; then
+    echo "DRIFT-FAIL: no verdict recorded at $STATUS_FILE - the check has not completed a run against this state directory" >&2
+    exit 2
+  fi
+  cat "$STATUS_FILE"
+  case "$(sed -n 's/^verdict=//p' "$STATUS_FILE" | head -1)" in
+    ok) exit 0 ;;
+    drift) exit 1 ;;
+    *) exit 2 ;;
+  esac
+fi
 
 # ── --check-manifest: validate schema only (no .env, no network) ──────────
 if [ "$CHECK_MANIFEST" -eq 1 ]; then
@@ -487,7 +527,7 @@ fi
 # Jellyfin (admin API access + libraries)
 # ───────────────────────────────────────────────────────────────────────────
 JF_PORT=$(manifest_val "['jellyfin']['port']")
-JELLYFIN_KEY_FILE=/docker/appdata/init/jellyfin-api-key.txt
+JELLYFIN_KEY_FILE="${JELLYFIN_KEY_FILE:-$STATE_DIR/jellyfin-api-key.txt}"
 # This build (the pinned v12 image) reads the MediaBrowser header from
 # `Authorization`, NOT `X-Emby-Authorization`: the X-Emby-* spellings are
 # rejected with HTTP 400 ("Value cannot be null. (Parameter 'request.App')")
@@ -1357,18 +1397,36 @@ fi
 # Rate limit: remember the last heal attempt so a persistently drifted stack
 # escalates to an alert instead of looping init every timer tick.
 DRIFT_HEAL_MIN_INTERVAL="${DRIFT_HEAL_MIN_INTERVAL:-3600}"
-HEAL_STATE="/docker/appdata/init/drift-heal-last"
+# The state file is the heal clock and the streak together, one line
+# "<epoch> <count>": when the timer last tried to heal, and how many attempts in
+# a row have not cleared the drift. Two facts because a rate limiter alone cannot
+# say whether the situation is moving - "suppressed, persistent drift" and "the
+# 4th heal in a row failed" are the same stack told at different volumes, and the
+# second is the one that says stop waiting for the timer. The count goes back to
+# zero on a clean run. A file from before this holds only the epoch, which reads
+# as a streak of 0 - it is a hint, not a contract.
+heal_last=0
+HEAL_COUNT=0
+if [ -f "$HEAL_STATE" ]; then
+  read -r heal_last HEAL_COUNT < "$HEAL_STATE" 2>/dev/null || true
+fi
+case "${heal_last:-}" in ''|*[!0-9]*) heal_last=0 ;; esac
+case "${HEAL_COUNT:-}" in ''|*[!0-9]*) HEAL_COUNT=0 ;; esac
 HEAL_SUPPRESSED=0
 if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
   now=$(date +%s)
-  last=0
-  [ -f "$HEAL_STATE" ] && last=$(cat "$HEAL_STATE" 2>/dev/null || echo 0)
+  last="$heal_last"
   if [ $((now - last)) -lt "$DRIFT_HEAL_MIN_INTERVAL" ]; then
     HEAL_SUPPRESSED=1
     echo "drift-check: heal suppressed - last attempt $((now - last))s ago (< ${DRIFT_HEAL_MIN_INTERVAL}s) - escalating to alert" >&2
   else
     echo "drift-check: $FAILS issue(s) found - reconciling the stack to heal..." >&2
-    echo "$now" > "$HEAL_STATE" 2>/dev/null || true
+    # Counted here, on the attempt, because this is the run that knows a heal is
+    # about to happen; the re-check it execs reads the file back. (The count is
+    # attempts that have not cleared the drift, so it is reset by a clean run
+    # rather than incremented by a clean one.)
+    HEAL_COUNT=$((HEAL_COUNT + 1))
+    echo "$now $HEAL_COUNT" > "$HEAL_STATE" 2>/dev/null || true
     # A container stuck in Docker's Dead state poisons *every* compose call for its
     # project (see the check above), so nothing else in this heal can work until it
     # is gone - and no CLI removes one: `docker rm` answers "No such container" for
@@ -1491,6 +1549,33 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
   fi
 fi
 
+# ── The verdict, readable without the journal ─────────────────────────────
+# A timer's run is only visible in the journal, which needs a shell on the host and
+# the right time window. Every completed run records what it found where an
+# operator can just look at it, and `--status` prints it with the rule for a
+# read-only check: 0 clean, 1 drift, 2 nothing recorded. Written to a temp file and
+# renamed so a reader never sees half of it. A staged run records nothing (see the
+# staged rule above), and a state directory that is not there is not an error -
+# this is bookkeeping, not a finding.
+write_status() {  # write_status <ok|drift>
+  [ "$STAGED" -eq 1 ] && return 0
+  [ -d "$STATE_DIR" ] || return 0
+  local tmp="$STATUS_FILE.$$"
+  {
+    printf 'verdict=%s\n' "$1"
+    printf 'at=%s\n' "$(date -Is)"
+    printf 'epoch=%s\n' "$(date +%s)"
+    printf 'host=%s\n' "$(hostname)"
+    printf 'manifest=%s\n' "$MANIFEST"
+    printf 'issues=%s\n' "$FAILS"
+    printf 'heal_streak=%s\n' "${HEAL_COUNT:-0}"
+    if [ "${#FAIL_LINES[@]}" -gt 0 ]; then
+      for line in "${FAIL_LINES[@]}"; do printf 'finding=%s\n' "$line"; done
+    fi
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  mv -f "$tmp" "$STATUS_FILE" 2>/dev/null || rm -f "$tmp"
+}
+
 if [ "$FAILS" -gt 0 ]; then
   echo "drift-check: $FAILS issue(s) found" >&2
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -1510,13 +1595,31 @@ if [ "$FAILS" -gt 0 ]; then
       else
         FAIL_LINES=("this run only checked - nothing was repaired; 'scripts/drift-check.sh --heal' reconciles the stack" "${FAIL_LINES[@]}")
       fi
+      # How long this has been going on, which is what makes it persistent rather
+      # than a blip: the heal state counts the attempts in a row that have not
+      # cleared the drift, and a clean run puts that count back to zero.
+      if [ "${HEAL_COUNT:-0}" -gt 0 ]; then
+        if [ "${DRIFT_REVERIFY_FROM_HEAL:-0}" = "1" ]; then
+          FAIL_LINES+=("this is heal attempt ${HEAL_COUNT} in a row that has not cleared it")
+        else
+          FAIL_LINES+=("this has survived ${HEAL_COUNT} heal attempt(s) in a row - another heal is unlikely to help, so this one is for a person")
+        fi
+      fi
       if [ "$HEAL_SUPPRESSED" -eq 1 ]; then
         FAIL_LINES+=("heal suppressed by rate limit (DRIFT_HEAL_MIN_INTERVAL=${DRIFT_HEAL_MIN_INTERVAL}s) - persistent drift")
       fi
       notify_telegram "$subject" "${FAIL_LINES[@]}" || true
     fi
   fi
+  write_status drift
   exit 1
 fi
 echo "drift-check: all live-stack invariants OK"
+
+# A clean run ends the streak. The clock keeps the last attempt's epoch (the rate
+# limiter still needs it) and the count goes back to zero.
+if [ "$STAGED" -eq 0 ] && [ "${HEAL_COUNT:-0}" -gt 0 ] && [ -d "$STATE_DIR" ]; then
+  echo "$heal_last 0" > "$HEAL_STATE" 2>/dev/null || true
+fi
+write_status ok
 exit 0

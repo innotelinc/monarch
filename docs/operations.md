@@ -1383,6 +1383,9 @@ non-zero**, so it can be run from cron or a systemd timer to alert on drift:
 
 ## when drift is found, re-run monarch-init automatically, then re-verify
 ./scripts/drift-check.sh --quiet --heal
+
+## the last recorded verdict - 0 clean, 1 drift, 2 nothing recorded yet
+./scripts/drift-check.sh --status
 ```
 
 `install-monarch.sh` also installs a **systemd timer** that runs the check
@@ -1394,13 +1397,28 @@ drifted stack repairs itself by re-running `monarch-init` and only alerts
 ```
 sudo systemctl status monarch-drift-check.timer
 journalctl -u monarch-drift-check.service      # last run + any DRIFT-FAIL lines
+./scripts/drift-check.sh --status              # the verdict, without the journal
 ```
 
-**Heal rate limit:** a heal attempt is recorded in
-`/docker/appdata/init/drift-heal-last`; if drift is still present and the
-last attempt was less than `DRIFT_HEAL_MIN_INTERVAL` (default 3600s) ago,
-the check skips healing and escalates straight to an alert instead of
-looping `monarch-init` on every tick.
+**The verdict is a file.** A timer's run is only readable in the journal, which
+needs a shell on the host and the right time window, so every completed run also
+records what it found in `/docker/appdata/init/drift-last` — `verdict=`, `at=`,
+`host=`, `manifest=`, `issues=`, `heal_streak=` and one `finding=` line per
+finding — and `--status` prints it, exiting `0` if that verdict was clean, `1` if
+drift and `2` if no run has recorded one. A staged run records nothing: the
+verdict is this host's, and a rehearsal of someone else's manifest would make the
+file lie.
+
+**Heal rate limit and streak:** a heal attempt is recorded in
+`/docker/appdata/init/drift-heal-last` as one line, `<epoch> <count>`; if drift is
+still present and the last attempt was less than `DRIFT_HEAL_MIN_INTERVAL`
+(default 3600s) ago, the check skips healing and escalates straight to an alert
+instead of looping `monarch-init` on every tick. The count is how many attempts in
+a row have **not** cleared the drift — it goes up on each attempt and back to zero
+on a clean run — and the alert says it (`this has survived 3 heal attempt(s) in a
+row`, or `this is heal attempt 4 in a row that has not cleared it` after a
+re-check), because "the timer heals this" is only reassurance the first time.
+A file from before this holds just the epoch and reads as a streak of zero.
 
 **The heal waits for Jellyfin before it re-verifies.** `monarch-init` restarts
 Jellyfin through its own `POST /System/Restart`, which is asynchronous: the old
@@ -1445,6 +1463,14 @@ Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
 `DRIFT_READY_TIMEOUT_SEC` / `DRIFT_READY_WAIT` (the post-heal readiness wait),
 `DRIFT_JELLYFIN_GRACE_SEC` (how long a run waits for a restarting Jellyfin to
 answer) and `DRIFT_GATEWAY_URL` (see below) in `.env`.
+
+**State lives in one directory**, `MONARCH_STATE_DIR` (default
+`/docker/appdata/init`): the manifest the run judges, the heal clock and streak,
+and the verdict. Leave it unset on a host — pointing it elsewhere is how the check
+runs against a host's state that is not this one, which is what
+`scripts/tests/test_drift_check_alerts.py` and the `drift-alerts` CI job do (and
+it is what "staged" means: a run whose manifest is not the one under that
+directory does not alert and records no verdict).
 
 #### Model gateway: a provider key that stopped being accepted
 
@@ -1542,7 +1568,10 @@ The timer's own runs are never staged, so real drift always reaches you.
 `DRIFT_TELEGRAM_SUBJECT` / `DRIFT_TELEGRAM_BODY`. The `drift-alerts` CI job uses it
 to assert both rules — a staged run reports and stays silent, an un-staged failure
 notifies with the right subject — so no request reaches `api.telegram.org` from
-there.
+there, and `scripts/tests/test_drift_check_alerts.py` exercises the same ground in
+the unit suite (`MONARCH_STATE_DIR` pointed at a temp directory, every probed port
+a closed one), so a wording change that crossed the two rules fails a normal test
+run rather than a review.
 
 Drift happens when a container is recreated without the seed (e.g. an app
 reset its own config, or a volume was restored from a stale backup). Re-run

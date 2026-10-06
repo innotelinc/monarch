@@ -464,9 +464,13 @@ jobs:
   #     had just been healed and re-checked (a repair that did not take, so it
   #     needs a person) or was only read (which `--heal` is the repair for). Both
   #     used to arrive as the same nine words.
+  #   * the run records that verdict where an operator can read it without the
+  #     journal (`--status`), and a staged run records nothing.
   #
   # No stack is needed: absent services are findings here, which is what the alert
-  # paths react to.
+  # paths react to. MONARCH_STATE_DIR is the directory the check judges (manifest,
+  # heal clock, verdict), so a temp one is a whole host's state - no sudo and no
+  # /docker on the runner.
   drift-alerts:
     name: Drift-check alert paths
     runs-on: ubuntu-latest
@@ -476,7 +480,9 @@ jobs:
       - name: A staged run reports, and does not notify
         run: |
           set -euo pipefail
-          # A manifest at any other path is what marks a run staged.
+          # A manifest at any path other than the state directory's own is what
+          # marks a run staged.
+          mkdir -p /tmp/drift-state
           python3 - /tmp/staged-invariants.json <<'PY'
           import json, os, sys
           sys.path.insert(0, os.path.join(os.getcwd(), "init"))
@@ -496,7 +502,8 @@ jobs:
           rm -f /tmp/alerted
           # Bounded: this job asserts an exit code, not a duration, and a check
           # that hangs would wedge the runner rather than fail the test.
-          if MONARCH_ENV=/tmp/check.env MONARCH_INVARIANTS=/tmp/staged-invariants.json \
+          if MONARCH_ENV=/tmp/check.env MONARCH_STATE_DIR=/tmp/drift-state \
+               MONARCH_INVARIANTS=/tmp/staged-invariants.json \
                timeout 240 bash scripts/drift-check.sh > /tmp/staged.log 2>&1; then
             echo "::error::the staged run found nothing - this asserts the alert path, so it needs a finding"; exit 1
           fi
@@ -507,15 +514,20 @@ jobs:
           if [ -e /tmp/alerted ]; then
             echo "::error::a staged run notified the operator:"; cat /tmp/alerted; exit 1
           fi
-          echo "staged run: reported, silent"
+          if [ -e /tmp/drift-state/drift-last ]; then
+            echo "::error::a staged run recorded a verdict for this host:"; cat /tmp/drift-state/drift-last; exit 1
+          fi
+          echo "staged run: reported, silent, recorded nothing"
 
       - name: An un-staged failure notifies, and says which failure it is
         run: |
           set -euo pipefail
-          # A manifest at the host's own path is what makes a run un-staged.
-          # Under sudo because the directory is root's, and the check only reads it.
-          sudo mkdir -p /docker/appdata/init
-          sudo python3 - /docker/appdata/init/invariants.json <<'PY'
+          # A manifest at the state directory's own path is what makes a run
+          # un-staged, and MONARCH_STATE_DIR is the directory the check judges - so
+          # a temp one is a whole host's state, no sudo and no /docker needed.
+          export MONARCH_STATE_DIR=/tmp/drift-state
+          mkdir -p "$MONARCH_STATE_DIR"
+          python3 - "$MONARCH_STATE_DIR/invariants.json" <<'PY'
           import json, os, sys
           sys.path.insert(0, os.path.join(os.getcwd(), "init"))
           import init as monarch_init
@@ -551,4 +563,14 @@ jobs:
           if grep -q 'nothing was repaired' /tmp/alerted; then
             echo "::error::the post-heal alert also claims nothing was repaired"; exit 1
           fi
-          echo "un-staged run: notified, both subjects distinct"
+
+          # And the verdict the operator can read without the journal agrees with
+          # what was just sent, and answers like a read-only check.
+          grep -q '^verdict=drift$' "$MONARCH_STATE_DIR/drift-last" \
+            || { echo "::error::the run recorded no drift verdict"; cat "$MONARCH_STATE_DIR/drift-last"; exit 1; }
+          grep -q '^finding=' "$MONARCH_STATE_DIR/drift-last" \
+            || { echo "::error::the recorded verdict does not say what was found"; exit 1; }
+          if MONARCH_STATE_DIR="$MONARCH_STATE_DIR" bash scripts/drift-check.sh --status; then
+            echo "::error::--status called a drifted stack clean"; exit 1
+          fi
+          echo "un-staged run: notified, both subjects distinct, verdict readable"
