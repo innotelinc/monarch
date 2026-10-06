@@ -12,6 +12,18 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **The drift verdict is in the file an operator already reads.** `drift-check`
+  records its verdict in `drift-last` and nothing else looked at it unless you knew
+  to ask, so `monarch-init` now folds that file into the `status.json` it writes
+  under `drift` - `sudo cat /docker/appdata/init/status.json`, the file that already
+  says what init did, also says whether the live stack is drifted (`verdict`, `at`,
+  `issues`, `heal`, `heal_streak`, the findings) - and its SUMMARY log gains a
+  `drift` line. init only *reads* the check's file: "init says everything is
+  configured" and "the live stack is healthy" are different claims, and only the
+  check probes the services. Parsing a verdict is forgiving by design (an
+  unrecognised line, or a host whose timer has not run yet, is not fatal), which
+  `scripts/tests/test_init_status_drift.py` pins.
+
 - **A gateway key that stopped being accepted is now drift, not a mystery.**
   Nothing watched OmniRoute's own idea of its credentials: the gateway on the
   proxy host kept answering `:20128`, refused the work with a 401, and the symptom
@@ -114,6 +126,22 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Changed
 
+- **A heal that keeps failing stops trying.** Five attempts in a row (tunable:
+  `DRIFT_HEAL_MAX_STREAK`) that do not clear the drift is not a plan, so the check
+  now stands the heal down instead of reconciling the stack every tick forever:
+  nothing is healed (`heal standing down - 5 attempt(s) in a row have not cleared
+  this`), the alert says the repair it will not make again and names the one a
+  person runs after looking (`sudo /opt/monarch/scripts/drift-check.sh
+  --reset-streak`), and it repeats at most once per
+  `DRIFT_STANDDOWN_ALERT_REPEAT_SEC` (default 86400s) so a stack already known to be
+  in that state stops paging. The runs in between print why they stayed silent
+  (`no alert - the heal stood down … ago and already said so`) on stderr, so a quiet
+  timer is distinguishable from a timer that found nothing. `--reset-streak` keeps
+  the heal clock - the rate limiter still needs it - and zeroes the count and the
+  stand-down clock, which is the whole escape hatch. The verdict also gained
+  `heal=` (`none`, `healed`, `recheck`, `suppressed`, `stood_down`), because "the
+  stack is drifted" and "nothing was tried about it" are different answers.
+
 - **The drift check keeps a scoreboard, and can be asked for it.** A timer's run
   was only readable in the journal, and its state was one number (when it last
   tried to heal), so both "is the stack drifted right now?" and "has anything been
@@ -169,6 +197,18 @@ are written by hand and describe the behaviour change, not the commits.
   after the recreate.
 
 ### Fixed
+
+- **`docker exec -i` no longer drains the caller's stdin.** This is the consumer
+  the previous note was looking for: `clipbucket-install.py` invokes
+  `docker exec -i` for every in-container read, and `-i` attaches the *host's*
+  stdin and streams it into the container, so `read_app_file()` - the first thing
+  the check does that touches ClipBucket - consumed whatever the caller had on
+  stdin. Measured on monarch 2026-10-06 under a PATH shim that logs whichever
+  child advances the script's own file offset: `docker exec -i clipbucket cat
+  /srv/http/clipbucket/upload/includes/config.php`, and the caller's script ended
+  there. A call with nothing to send now gets `stdin=DEVNULL`; the two that carry
+  their own input (a file write, a mysql statement) still pass it. Pinned by
+  tests in `test_clipbucket_install.py`.
 
 - **The library check no longer eats its caller's stdin.** `ffmpeg` — and so
   `ffprobe` — reads its own stdin for interactive keys (`q` to quit), so a child

@@ -18,6 +18,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -207,6 +208,29 @@ class Verdict(unittest.TestCase):
     def test_an_unreadable_schema_cannot_be_judged(self):
         with self.assertRaises(ci.CantTell):
             ci.evaluate(installed(table_count=None))
+
+
+class NothingEatsTheCallersStdin(unittest.TestCase):
+    """`in_container()` runs `docker exec -i`, and `-i` attaches the host's stdin
+    and streams it into the container - so a call with nothing to send still drains
+    whatever the caller had. Measured on monarch 2026-10-06: a `drift-check` run
+    lost the rest of the script that started it, at the first
+    `docker exec -i ... cat <file>` (`read_app_file`), and the caller's script
+    silently ended there. Only the calls that carry their own input may attach it.
+    """
+
+    def test_a_call_with_nothing_to_send_gets_a_closed_stdin(self):
+        with mock.patch.object(ci.subprocess, "run") as spawn:
+            spawn.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            ci.read_app_file("clipbucket", "/srv/http/clipbucket/upload/includes/config.php")
+            self.assertIn("-i", spawn.call_args.args[0])
+            self.assertIs(spawn.call_args.kwargs.get("stdin"), ci.subprocess.DEVNULL)
+
+    def test_a_call_with_its_own_input_still_gets_it(self):
+        with mock.patch.object(ci.subprocess, "run") as spawn:
+            spawn.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            ci.write_app_file("clipbucket", "/tmp/x.php", "<?php\n")
+            self.assertEqual(spawn.call_args.kwargs.get("input"), "<?php\n")
 
 
 if __name__ == "__main__":

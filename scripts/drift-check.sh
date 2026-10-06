@@ -95,7 +95,13 @@ set -uo pipefail
 #                        default 300s; DRIFT_READY_WAIT=0 skips the wait).
 #                        Rate-limited: DRIFT_HEAL_MIN_INTERVAL (default 3600s)
 #                        must have passed since the last heal attempt, else
-#                        it escalates straight to an alert instead of looping.
+#                        it escalates to an alert instead of looping. And it
+#                        STANDS DOWN after DRIFT_HEAL_MAX_STREAK attempts in a
+#                        row (default 5) have not cleared the drift: repeating a
+#                        repair that has failed five times is not a plan, so the
+#                        check stops healing, says so, and alerts at most once
+#                        per DRIFT_STANDDOWN_ALERT_REPEAT_SEC (default 86400s)
+#                        until it is reset with --reset-streak.
 #   --check-manifest     validate a manifest file's schema only (no network) -
 #                        used by fresh-install-check.sh in CI; pass the file
 #                        with MONARCH_INVARIANTS=<path>
@@ -103,6 +109,9 @@ set -uo pipefail
 #                        with it: 0 clean, 1 drift, 2 nothing recorded. The
 #                        answer to "is the stack drifted right now" without the
 #                        journal and without knowing when the timer last ran.
+#   --reset-streak       let the heal try again after it has stood down (below).
+#                        Run it on the host once the reason is understood; it
+#                        keeps the heal clock and zeroes the count.
 #
 # MONARCH_INVARIANTS also marks a run as staged: it reads a manifest other than
 # the one under this check's state directory, so it reports and exits non-zero but
@@ -134,6 +143,7 @@ HEAL=0
 CHECK_MANIFEST=0
 TEST_TG=0
 STATUS=0
+RESET_STREAK=0
 for arg in "$@"; do
   case "$arg" in
     --quiet) QUIET=1 ;;
@@ -141,6 +151,7 @@ for arg in "$@"; do
     --check-manifest) CHECK_MANIFEST=1 ;;
     --test-telegram) TEST_TG=1 ;;
     --status) STATUS=1 ;;
+    --reset-streak) RESET_STREAK=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -184,6 +195,30 @@ if [ "$STATUS" -eq 1 ]; then
     drift) exit 1 ;;
     *) exit 2 ;;
   esac
+fi
+
+# ── --reset-streak: let the heal try again ─────────────────────────────────
+# The heal stands down after DRIFT_HEAL_MAX_STREAK attempts in a row have not
+# cleared the drift, because repeating the same repair is not a plan - and nothing
+# heals again until this is run. That is deliberate (a person looks at the stack
+# first), so it needs to be easy to say "I looked, go ahead": this keeps the heal
+# clock - which is what says when the last attempt was - and zeroes the count and
+# the standdown alert clock with it.
+if [ "$RESET_STREAK" -eq 1 ]; then
+  if [ ! -f "$HEAL_STATE" ]; then
+    echo "drift-check: no heal state at $HEAL_STATE - nothing to reset" >&2
+    exit 2
+  fi
+  prev=$(cat "$HEAL_STATE" 2>/dev/null)
+  heal_last=0
+  read -r heal_last _ < "$HEAL_STATE" 2>/dev/null || true
+  case "${heal_last:-}" in ''|*[!0-9]*) heal_last=0 ;; esac
+  if echo "$heal_last 0 0" > "$HEAL_STATE"; then
+    echo "drift-check: heal streak reset (was '${prev}', now '${heal_last} 0 0') - the next run may heal again"
+    exit 0
+  fi
+  echo "drift-check: could not write $HEAL_STATE" >&2
+  exit 2
 fi
 
 # ── --check-manifest: validate schema only (no .env, no network) ──────────
@@ -1405,18 +1440,35 @@ DRIFT_HEAL_MIN_INTERVAL="${DRIFT_HEAL_MIN_INTERVAL:-3600}"
 # second is the one that says stop waiting for the timer. The count goes back to
 # zero on a clean run. A file from before this holds only the epoch, which reads
 # as a streak of 0 - it is a hint, not a contract.
+# ... and the clock of the last standing-down alert, so it is not repeated every
+# tick - a stack already known to be in this state does not need to be re-sent it.
 heal_last=0
 HEAL_COUNT=0
+STANDDOWN_ALERTED=0
 if [ -f "$HEAL_STATE" ]; then
-  read -r heal_last HEAL_COUNT < "$HEAL_STATE" 2>/dev/null || true
+  read -r heal_last HEAL_COUNT STANDDOWN_ALERTED < "$HEAL_STATE" 2>/dev/null || true
 fi
 case "${heal_last:-}" in ''|*[!0-9]*) heal_last=0 ;; esac
 case "${HEAL_COUNT:-}" in ''|*[!0-9]*) HEAL_COUNT=0 ;; esac
+case "${STANDDOWN_ALERTED:-}" in ''|*[!0-9]*) STANDDOWN_ALERTED=0 ;; esac
 HEAL_SUPPRESSED=0
+HEAL_STANDDOWN=0
+STANDDOWN_ALERT_DUE=0
 if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
   now=$(date +%s)
   last="$heal_last"
-  if [ $((now - last)) -lt "$DRIFT_HEAL_MIN_INTERVAL" ]; then
+  # Standing down is checked before the rate limit: after N attempts in a row that
+  # have not cleared the drift, another attempt is not a plan, whatever the clock
+  # says. The alert that follows is the escalation - it is the one the reader has
+  # to act on - so it repeats at most once per DRIFT_STANDDOWN_ALERT_REPEAT_SEC.
+  if [ "${DRIFT_HEAL_MAX_STREAK:-5}" -gt 0 ] \
+      && [ "$HEAL_COUNT" -ge "${DRIFT_HEAL_MAX_STREAK:-5}" ]; then
+    HEAL_STANDDOWN=1
+    if [ $((now - STANDDOWN_ALERTED)) -ge "${DRIFT_STANDDOWN_ALERT_REPEAT_SEC:-86400}" ]; then
+      STANDDOWN_ALERT_DUE=1
+    fi
+    echo "drift-check: heal standing down - ${HEAL_COUNT} attempt(s) in a row have not cleared this (DRIFT_HEAL_MAX_STREAK=${DRIFT_HEAL_MAX_STREAK:-5}); nothing is healed until 'scripts/drift-check.sh --reset-streak' is run" >&2
+  elif [ $((now - last)) -lt "$DRIFT_HEAL_MIN_INTERVAL" ]; then
     HEAL_SUPPRESSED=1
     echo "drift-check: heal suppressed - last attempt $((now - last))s ago (< ${DRIFT_HEAL_MIN_INTERVAL}s) - escalating to alert" >&2
   else
@@ -1556,11 +1608,24 @@ fi
 # read-only check: 0 clean, 1 drift, 2 nothing recorded. Written to a temp file and
 # renamed so a reader never sees half of it. A staged run records nothing (see the
 # staged rule above), and a state directory that is not there is not an error -
-# this is bookkeeping, not a finding.
+# this is bookkeeping, not a finding. `monarch-init` folds this file into its own
+# status.json, so the verdict also shows up where an operator already looks after
+# an install.
+#
+# `heal=` says what this run did about the findings, which is the part a verdict
+# cannot carry on its own: nothing, a repair that then re-checked clean, a
+# re-check after a repair that did not take, a repair the rate limit suppressed,
+# or a heal that has stood down.
 write_status() {  # write_status <ok|drift>
   [ "$STAGED" -eq 1 ] && return 0
   [ -d "$STATE_DIR" ] || return 0
-  local tmp="$STATUS_FILE.$$"
+  local tmp="$STATUS_FILE.$$" heal
+  if [ "$HEAL_STANDDOWN" -eq 1 ]; then heal=stood_down
+  elif [ "$HEAL_SUPPRESSED" -eq 1 ]; then heal=suppressed
+  elif [ "${DRIFT_REVERIFY_FROM_HEAL:-0}" = "1" ]; then
+    if [ "$1" = "ok" ]; then heal=healed; else heal=recheck; fi
+  else heal=none
+  fi
   {
     printf 'verdict=%s\n' "$1"
     printf 'at=%s\n' "$(date -Is)"
@@ -1569,6 +1634,7 @@ write_status() {  # write_status <ok|drift>
     printf 'manifest=%s\n' "$MANIFEST"
     printf 'issues=%s\n' "$FAILS"
     printf 'heal_streak=%s\n' "${HEAL_COUNT:-0}"
+    printf 'heal=%s\n' "$heal"
     if [ "${#FAIL_LINES[@]}" -gt 0 ]; then
       for line in "${FAIL_LINES[@]}"; do printf 'finding=%s\n' "$line"; done
     fi
@@ -1589,7 +1655,9 @@ if [ "$FAILS" -gt 0 ]; then
       # words before this, and they were told apart by remembering that the timer
       # heals - which is exactly what a reader of an alert does not know.
       subject="⚠️ Monarch drift check failed on $(hostname)"
-      if [ "${DRIFT_REVERIFY_FROM_HEAL:-0}" = "1" ]; then
+      if [ "$HEAL_STANDDOWN" -eq 1 ]; then
+        FAIL_LINES=("the heal has stood down - it reconciled the stack ${HEAL_COUNT} time(s) in a row and this survived every one, so it will not try again until somebody resets it ('scripts/drift-check.sh --reset-streak', after looking at why): this one is for a person" "${FAIL_LINES[@]}")
+      elif [ "${DRIFT_REVERIFY_FROM_HEAL:-0}" = "1" ]; then
         subject="$subject AFTER A HEAL"
         FAIL_LINES=("a heal reconciled the stack and re-ran monarch-init, and this re-check still finds drift - the repair did not take, so this one needs a person" "${FAIL_LINES[@]}")
       else
@@ -1597,8 +1665,9 @@ if [ "$FAILS" -gt 0 ]; then
       fi
       # How long this has been going on, which is what makes it persistent rather
       # than a blip: the heal state counts the attempts in a row that have not
-      # cleared the drift, and a clean run puts that count back to zero.
-      if [ "${HEAL_COUNT:-0}" -gt 0 ]; then
+      # cleared the drift, and a clean run puts that count back to zero. A
+      # standing-down heal has already said its count in the line above.
+      if [ "$HEAL_STANDDOWN" -eq 0 ] && [ "${HEAL_COUNT:-0}" -gt 0 ]; then
         if [ "${DRIFT_REVERIFY_FROM_HEAL:-0}" = "1" ]; then
           FAIL_LINES+=("this is heal attempt ${HEAL_COUNT} in a row that has not cleared it")
         else
@@ -1608,7 +1677,22 @@ if [ "$FAILS" -gt 0 ]; then
       if [ "$HEAL_SUPPRESSED" -eq 1 ]; then
         FAIL_LINES+=("heal suppressed by rate limit (DRIFT_HEAL_MIN_INTERVAL=${DRIFT_HEAL_MIN_INTERVAL}s) - persistent drift")
       fi
-      notify_telegram "$subject" "${FAIL_LINES[@]}" || true
+      # A standing-down stack is in a state the reader already knows about; the
+      # alert that announced it goes out once and then at most once per
+      # DRIFT_STANDDOWN_ALERT_REPEAT_SEC. The note goes to stderr rather than
+      # through `say`, so a --quiet run says why it stayed silent instead of
+      # looking like a run that found nothing.
+      if [ "$HEAL_STANDDOWN" -eq 1 ] && [ "$STANDDOWN_ALERT_DUE" -eq 0 ]; then
+        echo "drift-check: no alert - the heal stood down $(( $(date +%s) - STANDDOWN_ALERTED ))s ago and already said so (< ${DRIFT_STANDDOWN_ALERT_REPEAT_SEC:-86400}s); 'scripts/drift-check.sh --status' has the current verdict" >&2
+      else
+        notify_telegram "$subject" "${FAIL_LINES[@]}" || true
+        # Remember that the standing-down alert went out, so the next ticks stay
+        # quiet for its interval. (Only this one is rate-limited: an ordinary
+        # finding alerts every run, which is the point of it.)
+        if [ "$HEAL_STANDDOWN" -eq 1 ]; then
+          echo "$heal_last $HEAL_COUNT $now" > "$HEAL_STATE" 2>/dev/null || true
+        fi
+      fi
     fi
   fi
   write_status drift
@@ -1617,9 +1701,10 @@ fi
 echo "drift-check: all live-stack invariants OK"
 
 # A clean run ends the streak. The clock keeps the last attempt's epoch (the rate
-# limiter still needs it) and the count goes back to zero.
+# limiter still needs it), and the count and the standing-down alert clock go back
+# to zero with it.
 if [ "$STAGED" -eq 0 ] && [ "${HEAL_COUNT:-0}" -gt 0 ] && [ -d "$STATE_DIR" ]; then
-  echo "$heal_last 0" > "$HEAL_STATE" 2>/dev/null || true
+  echo "$heal_last 0 0" > "$HEAL_STATE" 2>/dev/null || true
 fi
 write_status ok
 exit 0
