@@ -1195,36 +1195,109 @@ def ldap_plugin_config_path() -> str:
 # The one element of this file the plugin owns rather than init: the Jellyfin
 # accounts it has linked to LDAP identities.
 LDAP_USERS_RE = re.compile(r"<LdapUsers\s*/>|<LdapUsers>.*?</LdapUsers>", re.S)
+# Elements whose contents are the plugin's business, so a comparison of managed
+# values must not read them as drift - the plugin adds a `<LdapUser>` record every
+# time somebody signs in over LDAP.
+PLUGIN_OWNED_TAGS = {"LdapUsers"}
 
 
-def ldap_config_values(xml: str) -> dict:
-    """The `<Tag>value</Tag>` map of a plugin config, or `{}` if it will not parse.
+def plugin_owns(path: str) -> bool:
+    """Whether a `/Tag[i]/Tag[i]` path sits inside an element the plugin owns."""
+    return any(segment.split("[", 1)[0] in PLUGIN_OWNED_TAGS
+               for segment in path.split("/") if segment)
 
-    Compare this instead of the file's bytes, because the file is shared with the
-    plugin: it owns `<LdapUsers>` and rewrites the whole file in its own shape
-    (including an `encoding="utf-8"` XML declaration) as soon as it has linked an
-    account. A byte comparison therefore reported a change on **every** run - so
-    `needs_restart` was always true and `monarch-init` restarted Jellyfin, ~40s of
-    outage and the 503 window `drift-check` used to read, whether or not anything
-    init manages had moved. Measured on monarch: every managed value identical,
-    and the run restarted Jellyfin anyway.
+
+def plugin_config_values(xml: str) -> dict:
+    """Every value in a plugin config, by element path, or `{}` if it will not parse.
+
+    Deep, not just the root's children: the OIDC config keeps the client secret
+    two levels down (`/Providers/OidcProviderConfig/ClientSecret`), so a shallow
+    map would not notice a rotation - and a rotated secret that is written but
+    never loaded looks configured and is not. Repeated siblings are kept apart by
+    index (`/RoleMappings/RoleMapping[1]`), so a change to one mapping is not
+    hidden by the next.
+
+    Compared instead of the file's bytes, because these files are shared with the
+    plugin that owns them: the LDAP plugin keeps its linked accounts in
+    `<LdapUsers>` and rewrites the whole file in its own shape (including an
+    `encoding="utf-8"` XML declaration) as soon as it has linked one. A byte
+    comparison therefore reported a change on **every** run - so `needs_restart`
+    was always true and `monarch-init` restarted Jellyfin, ~40s of outage and the
+    503 window `drift-check` used to read, whether or not anything init manages
+    had moved. Measured on monarch 2026-10-06: every managed value identical, and
+    the run restarted Jellyfin anyway. `PLUGIN_OWNED_TAGS` is what keeps the deep
+    comparison from counting the plugin's own bookkeeping as a change.
     """
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
         return {}
-    return {child.tag: (child.text or "").strip() for child in root}
+    values: dict[str, str] = {}
+
+    def walk(node: ET.Element, path: str) -> None:
+        for index, child in enumerate(node):
+            here = f"{path}/{child.tag}[{index}]"
+            values[here] = (child.text or "").strip()
+            walk(child, here)
+
+    walk(root, "")
+    return {path: value for path, value in values.items()
+            if not plugin_owns(path)}
 
 
-def ldap_config_changed(previous: str | None, xml: str) -> bool:
+def plugin_config_changed(previous: str | None, xml: str) -> bool:
     """Whether a value init MANAGES moved - not whether the file differs."""
     if previous is None:
         return True
-    return ldap_config_values(previous) != ldap_config_values(xml)
+    return plugin_config_values(previous) != plugin_config_values(xml)
 
 
-def write_ldap_plugin_config() -> tuple[str, str]:
-    """Write the LDAP-Auth plugin config file. Returns (path, xml)."""
+def read_plugin_config(path: str) -> str | None:
+    """A plugin config file as it stands, or None when it is not there."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def write_plugin_config(path: str, xml: str) -> None:
+    """Write a plugin config file and hand it to the uid Jellyfin runs as."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    try:
+        ensure_owner(path)
+    except Exception:
+        pass
+
+
+def apply_plugin_config(path: str, xml: str, previous: str | None, label: str) -> bool:
+    """Write `xml` only when the values init manages moved. True when it wrote.
+
+    A write is not free and not harmless: Jellyfin re-reads a plugin config only
+    at startup, so the caller restarts it for a write, and both of these files are
+    shared with the plugin that owns them - writing one that already says what this
+    deployment sets is a ~40s outage for nothing, and it hands the plugin a file in
+    init's shape to rewrite again.
+    """
+    if not plugin_config_changed(previous, xml):
+        _log(f"{label} plugin config already says what this deployment sets - left as is")
+        return False
+    write_plugin_config(path, xml)
+    _log(f"{label} plugin config written -> {path}")
+    return True
+
+
+def render_ldap_plugin_config(existing: str | None = None) -> str:
+    """The LDAP-Auth plugin config for this deployment, as text.
+
+    `existing` is the file as it stands, so the plugin's own `<LdapUsers>` - the
+    Jellyfin accounts it has linked to LDAP identities - can be carried across
+    rather than overwritten with the empty element the template holds. Those links
+    are the plugin's, and dropping them is not init's to do; carrying them is also
+    the other half of `plugin_config_changed` settling.
+    """
     bind_dn = f"cn={LDAP_BIND_USER},ou=users,{LDAP_BASE_DN}"
     search_filter = f"(memberOf=cn={LDAP_BIND_GROUP},ou=groups,{LDAP_BASE_DN})"
     admin_filter = f"(memberOf=cn={LDAP_ADMIN_GROUP},ou=groups,{LDAP_BASE_DN})"
@@ -1261,27 +1334,10 @@ def write_ldap_plugin_config() -> tuple[str, str]:
   <PasswordResetUrl>{LDAP_PUBLIC_URL}/if/user/</PasswordResetUrl>
 </PluginConfiguration>
 """
-    path = ldap_plugin_config_path()
-    # Carry the plugin's own `<LdapUsers>` across rather than writing the empty
-    # element the template holds: it is the list of Jellyfin accounts the plugin
-    # has linked to LDAP identities, and writing over it drops those links. It is
-    # also what makes the file stop matching the template after the plugin edits
-    # it, so carrying it over is the other half of `ldap_config_changed` settling.
-    try:
-        with open(path, encoding="utf-8") as fh:
-            carried = LDAP_USERS_RE.search(fh.read())
-    except OSError:
-        carried = None
+    carried = LDAP_USERS_RE.search(existing or "")
     if carried:
         xml = LDAP_USERS_RE.sub(lambda _match: carried.group(0), xml, count=1)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(xml)
-    try:
-        ensure_owner(path)
-    except Exception:
-        pass
-    return path, xml
+    return xml
 
 
 # ---------------------------------------------------------------------------
@@ -1438,12 +1494,13 @@ def oidc_plugin_config_path() -> str:
     return os.path.join(plugins_dir(), "configurations", OIDC_PLUGIN_CONFIG)
 
 
-def write_oidc_plugin_config() -> tuple[str, str]:
-    """Write the OIDC plugin config (providers + group mappings).
+def render_oidc_plugin_config() -> str:
+    """The OIDC plugin config (providers + group mappings), as text.
 
-    Returns (path, xml). Read-before-write at the call site: this file is
-    re-read by Jellyfin only on a restart, so a rotated client secret that is
-    written but never loaded looks configured and is not.
+    Rendered, not written, and the caller writes it only when the values here
+    moved: Jellyfin re-reads this file only on a restart, so a rotated client
+    secret that is written but never loaded looks configured and is not - and a
+    write on every run is a restart (and ~40s of Jellyfin outage) on every run.
     """
     authority = (f"{MONARCH_SSO_AUTHENTIK_BASE}"
                  f"/application/o/{MONARCH_SSO_APP}/")
@@ -1492,15 +1549,7 @@ def write_oidc_plugin_config() -> tuple[str, str]:
   <DefaultProvider>{OIDC_PROVIDER_ID}</DefaultProvider>
 </PluginConfiguration>
 """
-    path = oidc_plugin_config_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(xml)
-    try:
-        ensure_owner(path)
-    except Exception:
-        pass
-    return path, xml
+    return xml
 
 
 @arrived("jellyfin OIDC SSO")
@@ -1521,14 +1570,9 @@ def configure_jellyfin_oidc():
         return False
 
     path = oidc_plugin_config_path()
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            previous = fh.read()
-    except OSError:
-        previous = None
-    path, xml = write_oidc_plugin_config()
-    _log(f"OIDC plugin config written -> {path}")
-    needs_restart = previous != xml
+    previous = read_plugin_config(path)
+    xml = render_oidc_plugin_config()
+    needs_restart = apply_plugin_config(path, xml, previous, "OIDC")
 
     state = pinned_plugin_state(pin)
     if state == "ok":
@@ -1606,19 +1650,13 @@ def configure_jellyfin_ldap():
     # true and a rotated bind token sat on disk while Jellyfin kept serving the old
     # one out of memory. That is the whole failure this ordering avoids: the plugin
     # re-reads its config only on a restart.
+    #
+    # And what moved, not what the bytes are: this file is shared with the plugin,
+    # so comparing it whole is true on every run (see `plugin_config_values`).
     path = ldap_plugin_config_path()
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            previous = fh.read()
-    except OSError:
-        previous = None
-
-    path, xml = write_ldap_plugin_config()
-    _log(f"LDAP-Auth plugin config written -> {path}")
-
-    # What moved, not what the bytes are: the file is shared with the plugin, so
-    # comparing it whole is true on every run (see `ldap_config_values`).
-    needs_restart = ldap_config_changed(previous, xml)
+    previous = read_plugin_config(path)
+    xml = render_ldap_plugin_config(previous)
+    needs_restart = apply_plugin_config(path, xml, previous, "LDAP-Auth")
     state = pinned_plugin_state(pin_for("ldap"))
     if state == "ok" and jellyfin_plugin_installed(token):
         _log("LDAP-Auth plugin already installed, and it is the pinned build.")

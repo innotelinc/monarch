@@ -198,10 +198,20 @@ are written by hand and describe the behaviour change, not the commits.
   downtime, and the 503 window this changelog's other Jellyfin entries are about —
   whether or not anything had changed. Measured on monarch 2026-10-06: every
   managed value byte-identical, and the run restarted Jellyfin anyway. It now
-  compares the values it manages (`ldap_config_changed()`) rather than the bytes,
+  compares the values it manages (`plugin_config_changed()`) rather than the bytes,
   and carries the plugin's `<LdapUsers>` across when it does rewrite — so those
   links are no longer dropped, and the file converges instead of alternating.
-  Pinned by `scripts/tests/test_init_ldap_config_idempotence.py`.
+  Both configs are now rendered, compared, and *then* written: the write itself was
+  unconditional, so a no-op run still handed the plugin a file in init's shape for
+  it to rewrite. The same read-render-compare-apply shape covers the OIDC config
+too, and its
+  comparison is deep — the client secret lives at
+  `/Providers/OidcProviderConfig/ClientSecret`, so a shallow map would have
+  stopped noticing a rotation while still looking correct. `apply_plugin_config()`
+  is what both call: it writes **only** when the managed values moved, so a no-op
+  run no longer hands a plugin a file of init's shape to rewrite, or restarts
+  Jellyfin for the write. Pinned by
+  `scripts/tests/test_init_plugin_config_idempotence.py`.
 
 - **A six-hourly run that lands inside a Jellyfin restart no longer pages.**
   Something other than the heal can restart Jellyfin — its own dashboard, a

@@ -1424,7 +1424,13 @@ including an `encoding="utf-8"` XML declaration. So the comparison was true on
 every run and init restarted Jellyfin, ~40s of outage, whether or not anything had
 changed; measured on 2026-10-06 with every managed value byte-identical. It now
 compares the values it manages and carries the plugin's `<LdapUsers>` across when
-it does rewrite, so the links survive and the file converges.
+it does rewrite, so the links survive and the file converges. It also does not
+*write* on a run where nothing moved — the write itself used to be unconditional,
+which is what handed the plugin a file in init's shape to rewrite every time. The
+OIDC config is judged the same way, and that comparison is deep, so a rotated
+client secret at `/Providers/OidcProviderConfig/ClientSecret` is still noticed. A
+run that finds nothing to do logs `<plugin> plugin config already says what this
+deployment sets - left as is`.
 
 **A scheduled run gets the same benefit, shorter.** Something other than the heal
 can restart Jellyfin — its own dashboard, a plugin install — and a six-hourly
