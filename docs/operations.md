@@ -68,7 +68,7 @@ Watch it work / check for problems:
 
 ```
 sudo docker logs monarch-init
-sudo cat /docker/appdata/init/status.json      # per-service result + any issues list
+sudo cat /docker/appdata/init/status.json      # per-service result, issues, last drift verdict
 ```
 
 Everything is idempotent - `monarch-init` re-runs safely on every `up -d` and
@@ -1403,22 +1403,53 @@ journalctl -u monarch-drift-check.service      # last run + any DRIFT-FAIL lines
 **The verdict is a file.** A timer's run is only readable in the journal, which
 needs a shell on the host and the right time window, so every completed run also
 records what it found in `/docker/appdata/init/drift-last` — `verdict=`, `at=`,
-`host=`, `manifest=`, `issues=`, `heal_streak=` and one `finding=` line per
-finding — and `--status` prints it, exiting `0` if that verdict was clean, `1` if
-drift and `2` if no run has recorded one. A staged run records nothing: the
+`host=`, `manifest=`, `issues=`, `heal_streak=`, `heal=` and one `finding=` line
+per finding — and `--status` prints it, exiting `0` if that verdict was clean, `1`
+if drift and `2` if no run has recorded one. A staged run records nothing: the
 verdict is this host's, and a rehearsal of someone else's manifest would make the
 file lie.
 
+`heal=` is what this run did about the findings, which the verdict alone cannot
+say: `none` (nothing was tried), `healed` (a repair ran and its re-check was
+clean), `recheck` (a repair ran and its re-check still found drift), `suppressed`
+(the rate limit held the repair back) or `stood_down` (the streak above did).
+`monarch-init` folds this whole file into `status.json` under `drift`, so
+`sudo cat /docker/appdata/init/status.json` — the file that already says what init
+did — also says whether the live stack is drifted, and its SUMMARY log gains a
+`drift` line. init only reads the check's file; it never judges the stack itself,
+because `init says everything is configured` and `the live stack is healthy` are
+different claims and only the check probes the services.
+
 **Heal rate limit and streak:** a heal attempt is recorded in
-`/docker/appdata/init/drift-heal-last` as one line, `<epoch> <count>`; if drift is
-still present and the last attempt was less than `DRIFT_HEAL_MIN_INTERVAL`
-(default 3600s) ago, the check skips healing and escalates straight to an alert
-instead of looping `monarch-init` on every tick. The count is how many attempts in
-a row have **not** cleared the drift — it goes up on each attempt and back to zero
-on a clean run — and the alert says it (`this has survived 3 heal attempt(s) in a
-row`, or `this is heal attempt 4 in a row that has not cleared it` after a
-re-check), because "the timer heals this" is only reassurance the first time.
-A file from before this holds just the epoch and reads as a streak of zero.
+`/docker/appdata/init/drift-heal-last` as one line, `<epoch> <count> <standdown>`;
+if drift is still present and the last attempt was less than
+`DRIFT_HEAL_MIN_INTERVAL` (default 3600s) ago, the check skips healing and
+escalates straight to an alert instead of looping `monarch-init` on every tick.
+The count is how many attempts in a row have **not** cleared the drift — it goes up
+on each attempt and back to zero on a clean run — and the alert says it (`this has
+survived 3 heal attempt(s) in a row`, or `this is heal attempt 4 in a row that has
+not cleared it` after a re-check), because "the timer heals this" is only
+reassurance the first time. A file from before this holds just the epoch and reads
+as a streak of zero.
+
+**The heal stands down after `DRIFT_HEAL_MAX_STREAK`** attempts in a row (default
+5) that did not clear the drift. Repeating a repair that has failed five times is
+not a plan, so the check stops healing (`heal standing down - 5 attempt(s) in a row
+have not cleared this`), says so in an alert that names the repair it will not make
+again, and then alerts at most once per `DRIFT_STANDDOWN_ALERT_REPEAT_SEC` (default
+86400s) so a stack already known to be in that state does not page every six hours.
+The runs in between print `no alert - the heal stood down … ago and already said
+so` on stderr, so a quiet timer is still distinguishable from a timer that found
+nothing; `--status` has the verdict either way. After looking at why, a person says
+"go ahead" on the host:
+
+```
+sudo /opt/monarch/scripts/drift-check.sh --reset-streak
+```
+
+That keeps the heal clock (the rate limiter still needs it) and zeroes the count
+and the stand-down alert clock; the next tick heals again. Set
+`DRIFT_HEAL_MAX_STREAK=0` to never stand down.
 
 **The heal waits for Jellyfin before it re-verifies.** `monarch-init` restarts
 Jellyfin through its own `POST /System/Restart`, which is asynchronous: the old
@@ -1819,8 +1850,9 @@ hosts thousands of public domain movies.
 
 #### monarch-init / monarch-seed
 `sudo docker logs monarch-init` shows what the automation did. Its per-service
-result and any "MANUAL ACTIONS NEEDED" list is in
-`/docker/appdata/init/status.json`. If a service was mid-startup during the
+result, any "MANUAL ACTIONS NEEDED" list, and the last drift check's verdict (under
+`drift` — see [Live-stack drift check](#live-stack-drift-check-monarch-drift-check))
+are in `/docker/appdata/init/status.json`. If a service was mid-startup during the
 run, just re-run: `sudo docker start monarch-init`
 (or `sudo docker compose up -d` — it is idempotent).
 

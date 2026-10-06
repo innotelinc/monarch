@@ -234,7 +234,21 @@ def evaluate(facts: dict) -> list[str]:
 
 
 def docker(args: list[str], input_text: str | None = None) -> subprocess.CompletedProcess:
+    """Run docker with nothing on its stdin unless this call has something to send.
+
+    `in_container()` invokes `docker exec -i`, and `-i` attaches the *host's* stdin
+    and streams it into the container - so a call with nothing to send still drains
+    whatever the caller had on stdin. Measured on monarch 2026-10-06: a
+    `drift-check` run lost the rest of the script that started it, at the first
+    `docker exec -i ... cat <file>` (`read_app_file`), and the caller's script
+    silently ended there. Nothing here wants the caller's stdin; only the calls
+    that pass `input_text` (a file write, a mysql statement) have their own.
+    """
     try:
+        if input_text is None:
+            return subprocess.run(
+                ["docker", *args], stdin=subprocess.DEVNULL, capture_output=True, text=True
+            )
         return subprocess.run(
             ["docker", *args], input=input_text, capture_output=True, text=True
         )

@@ -2713,6 +2713,44 @@ def _pin_summary() -> list:
         return []
 
 
+def read_drift_verdict(path: str | None = None) -> dict:
+    """The last verdict `scripts/drift-check.sh` recorded, as data.
+
+    The check keeps its own state (`drift-last`) because it runs four times a day on
+    a timer and this does not. monarch-init folds that file into status.json, so the
+    one file an operator already reads after an install (`sudo cat
+    /docker/appdata/init/status.json`) answers "is the stack drifted right now?"
+    beside "what did init do?" - no second place to remember and no second writer,
+    because init only *reads* the check's verdict and never judges the stack itself.
+
+    Never fatal: a missing or unreadable file is reported as "not recorded yet",
+    which is the truth on a host whose timer has not run since it was installed.
+    """
+    path = path or os.path.join(INIT_DIR, "drift-last")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return {
+            "recorded": False,
+            "note": f"no verdict recorded yet at {path} - scripts/drift-check.sh writes one after each run",
+        }
+    verdict: dict = {"recorded": True}
+    findings: list[str] = []
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep or not key:
+            continue
+        if key == "finding":
+            findings.append(value)
+        elif key in ("issues", "heal_streak") and value.isdigit():
+            verdict[key] = int(value)
+        elif key in ("verdict", "at", "host", "manifest", "heal"):
+            verdict[key] = value
+    verdict["findings"] = findings
+    return verdict
+
+
 def build_invariants() -> dict:
     """The invariants monarch-init is supposed to maintain, as data.
 
@@ -2799,7 +2837,11 @@ def main() -> int:
     try:
         os.makedirs(INIT_DIR, exist_ok=True)
         with open(os.path.join(INIT_DIR, "status.json"), "w", encoding="utf-8") as fh:
-            json.dump({"user": USER, "results": _results, "issues": _issues}, fh, indent=2)
+            json.dump(
+                {"user": USER, "results": _results, "issues": _issues,
+                 "drift": read_drift_verdict()},
+                fh, indent=2,
+            )
         ensure_owner(os.path.join(INIT_DIR, "status.json"))
         with open(os.path.join(INIT_DIR, "invariants.json"), "w", encoding="utf-8") as fh:
             json.dump(build_invariants(), fh, indent=2)
@@ -2812,6 +2854,16 @@ def main() -> int:
     _log("SUMMARY")
     for svc, state in _results.items():
         _log(f"  {svc:16s} {state}")
+    # The stack's own verdict, not init's: read from drift-check's file rather than
+    # judged here, so "init said everything is configured" cannot be mistaken for
+    # "the live stack is healthy" (they are different questions, and the second one
+    # belongs to the check that actually probes the services).
+    drift = read_drift_verdict()
+    if drift.get("recorded"):
+        _log(f"  drift            {drift.get('verdict')} at {drift.get('at')} "
+             f"({drift.get('issues')} issue(s), heal={drift.get('heal')})")
+    else:
+        _log(f"  drift            {drift.get('note')}")
     if _issues:
         _log("")
         _log("MANUAL ACTIONS NEEDED:")

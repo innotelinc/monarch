@@ -26,6 +26,7 @@ import os
 import socket
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -68,6 +69,16 @@ class DriftCheckAlerts(unittest.TestCase):
         self.env_file = self.tmp / "check.env"
         self.env_file.write_text("MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n")
 
+        # A docker that logs and fails, first on PATH. Not an accident: a test must
+        # never be able to touch the machine's stack, and the standing-down tests
+        # assert that the heal did not even ask docker for anything.
+        self.shim = self.tmp / "bin"
+        self.shim.mkdir()
+        self.docker_log = self.tmp / "docker-called"
+        fake_docker = self.shim / "docker"
+        fake_docker.write_text(f'#!/bin/sh\necho "docker $*" >> "{self.docker_log}"\nexit 1\n')
+        fake_docker.chmod(0o755)
+
         # Every probed service on one closed port, so the run finds drift on a
         # machine with no stack, on one with a perfect stack, and in CI. Built from
         # the real manifest so the shape cannot drift from init's.
@@ -101,6 +112,7 @@ class DriftCheckAlerts(unittest.TestCase):
                 "DRIFT_ALERT_FILE": str(self.alerted),
                 "TELEGRAM_BOT_TOKEN": FAKE_TOKEN,
                 "TELEGRAM_CHAT_ID": FAKE_TOKEN,
+                "PATH": f"{self.shim}:{os.environ.get('PATH', '')}",
             }
         )
         if own_manifest:
@@ -123,8 +135,11 @@ class DriftCheckAlerts(unittest.TestCase):
     def alert_text(self) -> str:
         return self.alerted.read_text() if self.alerted.exists() else ""
 
-    def seed_heal_state(self, epoch: int, count: int) -> None:
-        (self.state / "drift-heal-last").write_text(f"{epoch} {count}\n")
+    def seed_heal_state(self, epoch: int, count: int, standdown_alerted: int = 0) -> None:
+        (self.state / "drift-heal-last").write_text(f"{epoch} {count} {standdown_alerted}\n")
+
+    def docker_calls(self) -> str:
+        return self.docker_log.read_text() if self.docker_log.exists() else ""
 
     def status(self) -> dict:
         text = (self.state / "drift-last").read_text()
@@ -169,6 +184,50 @@ class DriftCheckAlerts(unittest.TestCase):
         res = self.run_check(own_manifest=True)
         self.assertEqual(res.returncode, 1, res.stderr)
         self.assertIn("survived 3 heal attempt(s) in a row", self.alert_text())
+
+    # ── the heal that stops trying ──────────────────────────────────────
+    def test_the_heal_stands_down_after_its_streak(self):
+        # Five attempts in a row did not clear it, so the sixth run must not try
+        # again: repeating a repair that has failed five times is not a plan. The
+        # docker shim is the proof - the heal never asked it for anything.
+        self.seed_heal_state(0, 5)
+        res = self.run_check("--heal", own_manifest=True)
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("heal standing down", res.stderr)
+        self.assertNotIn("reconciling the stack", res.stderr)
+        self.assertNotIn("compose", self.docker_calls())
+        self.assertIn("has stood down", self.alert_text())
+        self.assertNotIn("only checked", self.alert_text())
+
+    def test_a_standing_down_heal_does_not_alert_again_the_next_tick(self):
+        # A stack already known to be in this state does not need to be told again
+        # every six hours - but the run has to say why it stayed silent, or a quiet
+        # timer looks like a timer that found nothing.
+        self.seed_heal_state(0, 5, standdown_alerted=int(time.time()))
+        res = self.run_check("--heal", "--quiet", own_manifest=True)
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("no alert - the heal stood down", res.stderr)
+        self.assertEqual(self.alert_text(), "")
+
+    def test_reset_streak_lets_the_heal_try_again(self):
+        self.seed_heal_state(0, 5, standdown_alerted=int(time.time()))
+        res = self.run_check("--reset-streak")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((self.state / "drift-heal-last").read_text().split()[1:], ["0", "0"])
+        self.assertIn("heal streak reset", res.stdout)
+        (self.state / "drift-heal-last").unlink()
+        self.assertEqual(self.run_check("--reset-streak").returncode, 2)
+
+    def test_the_verdict_records_what_the_heal_did(self):
+        # One attempt, below the streak, so the heal runs (through the shim) and the
+        # re-check it execs records both that it was a re-check and the new streak.
+        self.seed_heal_state(0, 1)
+        res = self.run_check("--heal", own_manifest=True)
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("compose", self.docker_calls())
+        recorded = self.status()
+        self.assertEqual(recorded["heal"], "recheck")
+        self.assertEqual(recorded["heal_streak"], "2")
 
     # ── the verdict, for a reader who is not in the journal ─────────────
     def test_a_run_records_its_verdict_where_status_can_read_it(self):

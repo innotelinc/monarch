@@ -199,6 +199,18 @@ jobs:
             || { echo "::error::$f no longer marks a run as staged"; exit 1; }
           grep -q 'if \[ "\$STAGED" -eq 1 \]' "$f" \
             || { echo "::error::$f no longer withholds the alert from a staged run"; exit 1; }
+          # A heal that has failed N times in a row has to stop trying: the whole
+          # point of the streak is that the sixth attempt is not a plan, and the
+          # escape hatch (`--reset-streak`, run by a person who has looked) has to
+          # exist or the stack stays unhealed forever.
+          grep -q 'DRIFT_HEAL_MAX_STREAK' "$f" \
+            || { echo "::error::$f no longer stands the heal down after a failing streak"; exit 1; }
+          grep -q -- '--reset-streak) RESET_STREAK=1' "$f" \
+            || { echo "::error::$f no longer lets a person reset the heal streak"; exit 1; }
+          # The verdict has to say what the heal did about the findings, or a reader
+          # cannot tell "nothing is wrong" from "nothing was tried".
+          grep -q "printf 'heal=%s" "$f" \
+            || { echo "::error::$f no longer records what the heal did"; exit 1; }
           echo "posture: drift-check wired"
 
       # LDAP is what makes every Jellyfin account Authentik's rather than
@@ -301,6 +313,21 @@ jobs:
             exit 1
           fi
           echo "posture: plugin configs are compared by managed value"
+
+      # status.json is the file an operator reads after an install, so the drift
+      # check's verdict has to be folded into it - read from the check's own file,
+      # never judged here ("init says everything is configured" is a different
+      # claim from "the live stack is healthy", and only the check probes it).
+      - name: init carries the drift verdict into status.json
+        run: |
+          set -euo pipefail
+          grep -q '"drift": read_drift_verdict()' init/init.py \
+            || { echo "::error::status.json no longer carries the drift verdict"; exit 1; }
+          grep -q 'scripts/drift-check.sh writes one after each run' init/init.py \
+            || { echo "::error::init no longer says where the verdict comes from"; exit 1; }
+          grep -q 'drift-last' scripts/drift-check.sh \
+            || { echo "::error::drift-check no longer records a verdict for init to read"; exit 1; }
+          echo "posture: the drift verdict is in the file an operator reads"
 
       # One account is allowed to sign in outside Authentik, and two scripts
       # have to agree on which. Divergence is not loud: the checker calls the
@@ -570,7 +597,65 @@ jobs:
             || { echo "::error::the run recorded no drift verdict"; cat "$MONARCH_STATE_DIR/drift-last"; exit 1; }
           grep -q '^finding=' "$MONARCH_STATE_DIR/drift-last" \
             || { echo "::error::the recorded verdict does not say what was found"; exit 1; }
+          grep -q '^heal=recheck$' "$MONARCH_STATE_DIR/drift-last" \
+            || { echo "::error::the verdict does not say what the heal did"; exit 1; }
           if MONARCH_STATE_DIR="$MONARCH_STATE_DIR" bash scripts/drift-check.sh --status; then
             echo "::error::--status called a drifted stack clean"; exit 1
           fi
           echo "un-staged run: notified, both subjects distinct, verdict readable"
+
+      - name: A heal that has failed its streak stands down
+        run: |
+          set -euo pipefail
+          export MONARCH_STATE_DIR=/tmp/drift-state
+          mkdir -p "$MONARCH_STATE_DIR"
+          [ -f "$MONARCH_STATE_DIR/invariants.json" ] \
+            || { echo "::error::the previous step's manifest is not there - this step judges the host's own state and needs it"; exit 1; }
+          # docker is a shim that logs and fails, so this step can assert that the
+          # heal did not even ask it for anything - and so a bug in the stand-down
+          # cannot start the stack's containers on a runner.
+          mkdir -p /tmp/drift-shim
+          cat > /tmp/drift-shim/docker <<'SH'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/docker-called
+          exit 1
+          SH
+          chmod +x /tmp/drift-shim/docker
+          export PATH=/tmp/drift-shim:$PATH
+          printf 'MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n' > /tmp/check.env
+          export TELEGRAM_BOT_TOKEN='<fake>' TELEGRAM_CHAT_ID='<fake>'
+          export DRIFT_JELLYFIN_GRACE_SEC=0
+          export DRIFT_TELEGRAM_CMD='printf "%s\n" "$DRIFT_TELEGRAM_SUBJECT" "$DRIFT_TELEGRAM_BODY" >> /tmp/alerted'
+
+          # Five attempts in a row have already failed to clear the drift.
+          rm -f /tmp/alerted /tmp/docker-called
+          printf '%s 5 0\n' "$(( $(date +%s) - 7200 ))" > "$MONARCH_STATE_DIR/drift-heal-last"
+          MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh --heal > /tmp/standdown.log 2>&1 \
+            && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'heal standing down' /tmp/standdown.log \
+            || { echo "::error::the heal did not stand down after five failing attempts"; exit 1; }
+          if grep -q 'reconciling the stack' /tmp/standdown.log; then
+            echo "::error::the heal tried again after standing down"; exit 1
+          fi
+          if grep -qE '^docker (compose|start|run)' /tmp/docker-called 2>/dev/null; then
+            echo "::error::the standing-down heal still drove the stack:"; cat /tmp/docker-called; exit 1
+          fi
+          grep -q 'has stood down' /tmp/alerted \
+            || { echo "::error::the standing-down heal did not say so in its alert"; exit 1; }
+
+          # And the next tick must not repeat it - but must say why it was quiet.
+          rm -f /tmp/alerted
+          MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh --heal --quiet \
+            > /tmp/standdown2.log 2>&1 && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'no alert - the heal stood down' /tmp/standdown2.log \
+            || { echo "::error::a quiet standing-down run does not say why it stayed silent"; exit 1; }
+          if [ -e /tmp/alerted ]; then
+            echo "::error::the standing-down alert repeated within its interval"; exit 1
+          fi
+
+          # The escape hatch a person runs after looking at the stack.
+          MONARCH_STATE_DIR="$MONARCH_STATE_DIR" bash scripts/drift-check.sh --reset-streak \
+            || { echo "::error::--reset-streak failed"; exit 1; }
+          grep -q ' 0 0$' "$MONARCH_STATE_DIR/drift-heal-last" \
+            || { echo "::error::--reset-streak did not clear the streak"; exit 1; }
+          echo "standing down: no heal, one alert, reset works"
