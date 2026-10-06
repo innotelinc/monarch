@@ -1338,7 +1338,7 @@ against the services:
 | Prowlarr | Transmission download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
 | Transmission | RPC reachable, download dir `/data/torrents`, and no local WebUI login (Cerulean is the only door) |
 | Jellyfin | admin API access — the shared credentials when they still match, otherwise the durable admin API key (`/docker/appdata/init/jellyfin-api-key.txt`; when the local admin password has diverged the check says so and names the repair, `scripts/jellyfin-admin-password.py --set`) — plus media libraries (Movies / TV Shows / Music / Other) |
-| Jellyfin API keys held by the apps | Jellyseerr's copy in `settings.json` and Homarr's encrypted copy in its database still authenticate — the state a half-finished rotation leaves behind, which nothing else catches since the container and its own UI stay up (`jellyfin-admin-password.py --check-apps`) |
+| Jellyfin API keys held by the apps | Jellyseerr's copy in `settings.json` and Homarr's encrypted copy in its database still authenticate — the state a half-finished rotation leaves behind, which nothing else catches since the container and its own UI stay up (`jellyfin-admin-password.py --check-apps`). Only a **verdict** counts: a `401`/`403` is a rejected key, while a Jellyfin that does not answer (`0`, or the `503` its setup server returns for the whole ~40s boot after `/System/Restart`) is reported as *unverified* — a key cannot be rejected by a server that never read it |
 | Jellyseerr | initialized, Jellyfin sign-in enabled, owned by the account the manifest names (`seerr-owner.py --check`) |
 | Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
 | ClipBucket | the install is *finished*, not merely serving: schema present, `version` row populated, admin user with an owner profile, `base_url` matching `MONARCH_BASE_URL`, and the installer locked (`scripts/clipbucket-install.py --check`; skipped when the container isn't reachable) |
@@ -1402,9 +1402,23 @@ last attempt was less than `DRIFT_HEAL_MIN_INTERVAL` (default 3600s) ago,
 the check skips healing and escalates straight to an alert instead of
 looping `monarch-init` on every tick.
 
+**The heal waits for Jellyfin before it re-verifies.** `monarch-init` restarts
+Jellyfin through its own `POST /System/Restart`, which is asynchronous: the old
+process keeps answering for a few seconds, then the new one boots for ~40s with
+its setup server listening first and answering `503` the whole time. The
+re-check that follows a heal is the next reader after all of that, so it used to
+read a half-started Jellyfin and report `libraries missing: … (have: '')` beside
+`an app's stored API key no longer authenticates` — a library finding and a
+credential finding about a server that had simply not finished starting, both
+gone by the next tick. It now polls one authenticated call (`GET /Users`, which
+only the wired server can answer) until it returns 200, for up to
+`DRIFT_READY_TIMEOUT_SEC` (default 300s), and says so if that elapses. Set
+`DRIFT_READY_WAIT=0` to skip the wait.
+
 Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
-`DRIFT_MAX_RESTARTS` (default 10), `DRIFT_HEAL_MIN_INTERVAL` and
-`DRIFT_GATEWAY_URL` (see below) in `.env`.
+`DRIFT_MAX_RESTARTS` (default 10), `DRIFT_HEAL_MIN_INTERVAL`,
+`DRIFT_READY_TIMEOUT_SEC` / `DRIFT_READY_WAIT` (the post-heal readiness wait)
+and `DRIFT_GATEWAY_URL` (see below) in `.env`.
 
 #### Model gateway: a provider key that stopped being accepted
 

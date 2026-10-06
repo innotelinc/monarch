@@ -54,6 +54,12 @@ Modes:
                 rotation leaves an app configured with a token Jellyfin has
                 forgotten, which nothing else notices: the container is up and
                 its own UI answers. Read-only; drift-check runs this.
+                Only an authentication verdict counts: 401/403 is a rejection,
+                while a server that does not answer (0, or a 5xx from a Jellyfin
+                that is still booting) is reported as unverified. A key cannot
+                be rejected by a server that never read it, and treating that as
+                a rejection is how a restart reads as "an app's stored API key
+                no longer authenticates".
 
 Usage:
 
@@ -259,7 +265,8 @@ def check_app_keys(jf, log=print):
     A key that cannot be READ - the file is absent, or Homarr's secret cannot be
     decrypted because its container is not reachable - is reported as unverified
     rather than failed: what this exists to catch is a key Jellyfin REJECTS,
-    which is what a half-finished rotation leaves behind.
+    which is what a half-finished rotation leaves behind. The same goes for a
+    Jellyfin that does not answer the call: no verdict is not a rejection.
     """
     failures = 0
 
@@ -269,10 +276,22 @@ def check_app_keys(jf, log=print):
         if status == 200:
             log(f"  ok: {who} holds a Jellyfin API key that still authenticates")
             return
-        failures += 1
-        log(f"  DRIFT: {who} holds a Jellyfin API key Jellyfin rejects "
-            f"(HTTP {status}), so it cannot read Jellyfin. Re-run the rotation "
-            "in docs/operations.md.")
+        if status in (401, 403):
+            failures += 1
+            log(f"  DRIFT: {who} holds a Jellyfin API key Jellyfin rejects "
+                f"(HTTP {status}), so it cannot read Jellyfin. Re-run the rotation "
+                "in docs/operations.md.")
+            return
+        # Everything else is the server declining to answer rather than judging
+        # the key: 0 is no reply, and a 5xx is a Jellyfin that is up but not
+        # serving yet - after its own /System/Restart its setup server listens
+        # first and answers 503 for the whole ~40s boot. Reporting that as a
+        # rejection is exactly how a restart became "an app's stored API key no
+        # longer authenticates" the instant the heal re-checked the stack it had
+        # just restarted.
+        log(f"  note: {who}'s Jellyfin API key could not be judged - Jellyfin "
+            f"answered HTTP {status} instead of a verdict (restarting, or not "
+            "serving), so nothing was checked")
 
     # Jellyseerr keeps its copy in plaintext.
     settings = Path(env("JELLYSEERR_SETTINGS_FILE", DEFAULT_SEERR_SETTINGS))

@@ -147,6 +147,31 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **A heal no longer reports the Jellyfin it just restarted as drifted.**
+  `drift-check --heal` reconciled the stack, re-ran `monarch-init`, and re-verified
+  immediately — but init restarts Jellyfin through its own `POST /System/Restart`,
+  which is asynchronous: the old process answers for a few seconds and the new one
+  then boots for ~40s, its setup server listening first and replying `503` the
+  whole time. The re-check was therefore the first reader of a Jellyfin that had
+  not finished starting, and it reported two findings about a credential nothing
+  was wrong with: `jellyfin: libraries missing: 'Movies' 'TV Shows' 'Music'
+  'Other' (have: '')` and `jellyfin: an app's stored API key no longer
+  authenticates`, both gone by the next tick. Two changes, at the two layers that
+  were each telling half the truth. The heal **waits for the stack it restarted**
+  before judging it — it polls one authenticated call (`GET /Users`, which only
+  the wired server can answer, so the boot-time setup server cannot satisfy it)
+  until it returns 200, up to `DRIFT_READY_TIMEOUT_SEC` (default 300s), and says
+  so if that elapses (`DRIFT_READY_WAIT=0` skips it). And the probes **stop
+  conflating "did not answer" with "the answer is wrong"**: the library check
+  reads the status code and reports a non-200 as *the server is not serving, so
+  its libraries could not be read* rather than as missing libraries, and
+  `jellyfin-admin-password.py --check-apps` now fails only on a verdict —
+  `401`/`403` is a rejected key, while `0` or a 5xx is reported as unverified,
+  because a key cannot be rejected by a server that never read it (the module
+  already treated an unreadable key that way; a server that would not answer was
+  the case it missed). The `--check-apps` verdicts are pinned by
+  `scripts/tests/test_jellyfin_admin_password.py`.
+
 - **ClipBucket can no longer start with a blank MariaDB password.** The password
   left the compose file on 2026-09-19 and became `CLIPBUCKET_DB_PASSWORD`, but an
   `.env` written before that day has no such variable — so the runtime was handed
