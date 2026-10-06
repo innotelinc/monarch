@@ -1415,6 +1415,17 @@ only the wired server can answer) until it returns 200, for up to
 `DRIFT_READY_TIMEOUT_SEC` (default 300s), and says so if that elapses. Set
 `DRIFT_READY_WAIT=0` to skip the wait.
 
+**And `monarch-init` now restarts Jellyfin only when something actually moved.** It
+checks the LDAP-Auth plugin config before writing it (a rotated bind token has to
+be noticed — the plugin reads its config only at startup), but it compared the
+whole file. That file is shared: the plugin owns `<LdapUsers>` — the Jellyfin
+accounts it has linked to LDAP identities — and rewrites the file in its own shape,
+including an `encoding="utf-8"` XML declaration. So the comparison was true on
+every run and init restarted Jellyfin, ~40s of outage, whether or not anything had
+changed; measured on 2026-10-06 with every managed value byte-identical. It now
+compares the values it manages and carries the plugin's `<LdapUsers>` across when
+it does rewrite, so the links survive and the file converges.
+
 **A scheduled run gets the same benefit, shorter.** Something other than the heal
 can restart Jellyfin — its own dashboard, a plugin install — and a six-hourly
 tick could land inside that boot. So the library probe reads the status code and,
