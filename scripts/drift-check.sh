@@ -105,6 +105,12 @@ set -uo pipefail
 # alert - a rehearsal is not an alarm.
 #   --test-telegram      send a test Telegram message (needs .env vars)
 #
+# Alerting is deliberately narrow: a staged run (a manifest other than this
+# host's) never notifies, and a notification says whether the stack had just been
+# healed and re-checked (a repair that did not take, which needs a person) or was
+# only read (which the heal is the repair for). DRIFT_TELEGRAM_CMD replaces the
+# send, so both paths are testable without a bot.
+#
 # Usage:
 #   scripts/drift-check.sh
 #   scripts/drift-check.sh --quiet --heal
@@ -244,6 +250,16 @@ notify_telegram() {  # notify_telegram <subject> <message...> -> 0 on success
   local subject="$1"; shift
   local msg="$subject" line
   for line in "$@"; do msg+=$'\n'"$line"; done
+  # DRIFT_TELEGRAM_CMD replaces the send, the same shape and for the same reason
+  # as MONARCH_LDAP_PROBE: it is how the alert paths are exercised without a bot.
+  # CI uses it to assert that a staged run stays silent and that an un-staged
+  # failure does not - and no request ever reaches api.telegram.org from there.
+  # The subject and the body arrive in the environment.
+  if [ -n "${DRIFT_TELEGRAM_CMD:-}" ]; then
+    DRIFT_TELEGRAM_SUBJECT="$subject" DRIFT_TELEGRAM_BODY="$msg" \
+      bash -c "$DRIFT_TELEGRAM_CMD"
+    return $?
+  fi
   local reply
   reply=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
     --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
@@ -1467,7 +1483,10 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
     fi
 
     # Re-run the check suite WITHOUT --heal (avoids a heal loop). The exit code
-    # of that run reports whether the stack healed.
+    # of that run reports whether the stack healed, and the marker says its
+    # failure is the POST-HEAL one, so the alert can distinguish a stack that was
+    # reconciled and is still drifted from a plain finding.
+    export DRIFT_REVERIFY_FROM_HEAL=1
     exec bash "$0" --quiet
   fi
 fi
@@ -1478,10 +1497,23 @@ if [ "$FAILS" -gt 0 ]; then
     if [ "$STAGED" -eq 1 ]; then
       say "note: no alert - this run reads the manifest at $MANIFEST rather than this host's, so it is staged"
     else
+      # Which failure this is decides what the reader has to do, so the alert says
+      # it. A heal that ran, reconciled the stack and re-checked, and still finds
+      # drift is the one whoever is paged has to act on; a run that only checked
+      # has an obvious repair the alert can name. Both arrived as the same nine
+      # words before this, and they were told apart by remembering that the timer
+      # heals - which is exactly what a reader of an alert does not know.
+      subject="⚠️ Monarch drift check failed on $(hostname)"
+      if [ "${DRIFT_REVERIFY_FROM_HEAL:-0}" = "1" ]; then
+        subject="$subject AFTER A HEAL"
+        FAIL_LINES=("a heal reconciled the stack and re-ran monarch-init, and this re-check still finds drift - the repair did not take, so this one needs a person" "${FAIL_LINES[@]}")
+      else
+        FAIL_LINES=("this run only checked - nothing was repaired; 'scripts/drift-check.sh --heal' reconciles the stack" "${FAIL_LINES[@]}")
+      fi
       if [ "$HEAL_SUPPRESSED" -eq 1 ]; then
         FAIL_LINES+=("heal suppressed by rate limit (DRIFT_HEAL_MIN_INTERVAL=${DRIFT_HEAL_MIN_INTERVAL}s) - persistent drift")
       fi
-      notify_telegram "⚠️ Monarch drift check failed on $(hostname)" "${FAIL_LINES[@]}" || true
+      notify_telegram "$subject" "${FAIL_LINES[@]}" || true
     fi
   fi
   exit 1

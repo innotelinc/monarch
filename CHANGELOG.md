@@ -147,6 +147,20 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **The drift alert says which failure it is.** A repair that did not take and a
+  run that only looked both arrived as the same nine words, `⚠️ Monarch drift check
+  failed on <host>`, and they were told apart by remembering that the timer runs
+  with `--heal`. The re-check the heal executes is now marked, so the surviving
+  failure reads **AFTER A HEAL** and opens with *a heal reconciled the stack and
+  re-ran monarch-init, and this re-check still finds drift — the repair did not
+  take, so this one needs a person*, while a read-only run says *nothing was
+  repaired* and names `--heal` as the repair. The send is replaceable too
+  (`DRIFT_TELEGRAM_CMD`, the same seam as `MONARCH_LDAP_PROBE`), which is how the
+  new `drift-alerts` CI job asserts both rules — and the staged-run rule beside
+  them — without a request leaving the runner. That job needs no stack (absent
+  services are findings, which is what the alert reacts to), so it runs with the
+  rest of CI.
+
 - **A staged drift run can no longer page.** `MONARCH_INVARIANTS=<path>` is how
   CI and an operator rehearse the check against a manifest other than this host's
   own, and its findings are the thing being looked at rather than an alarm — but
