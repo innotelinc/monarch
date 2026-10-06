@@ -99,6 +99,10 @@ set -uo pipefail
 #   --check-manifest     validate a manifest file's schema only (no network) -
 #                        used by fresh-install-check.sh in CI; pass the file
 #                        with MONARCH_INVARIANTS=<path>
+#
+# MONARCH_INVARIANTS also marks a run as staged: it reads a manifest other than
+# this host's own, so it reports and exits non-zero but does NOT send the Telegram
+# alert - a rehearsal is not an alarm.
 #   --test-telegram      send a test Telegram message (needs .env vars)
 #
 # Usage:
@@ -124,7 +128,17 @@ for arg in "$@"; do
 done
 
 ENV_FILE="${MONARCH_ENV:-.env}"
-MANIFEST="${MONARCH_INVARIANTS:-/docker/appdata/init/invariants.json}"
+DEFAULT_MANIFEST="/docker/appdata/init/invariants.json"
+MANIFEST="${MONARCH_INVARIANTS:-$DEFAULT_MANIFEST}"
+# A run pointed at another manifest is staged, not this host's own check: CI
+# (`fresh-install-check.sh --full-stack`, `drift-check --check-manifest`) and an
+# operator rehearsing a change both pass their own. Its findings are the point of
+# it, so it must not push an alert - the runs that verified this check's own
+# failure paths notified an operator about a fabricated library name and a port
+# nothing listens on, which is a page about a stack that was fine. It still
+# reports and still exits non-zero; only the notification is withheld.
+STAGED=0
+[ "$MANIFEST" = "$DEFAULT_MANIFEST" ] || STAGED=1
 
 # ── --check-manifest: validate schema only (no .env, no network) ──────────
 if [ "$CHECK_MANIFEST" -eq 1 ]; then
@@ -1461,10 +1475,14 @@ fi
 if [ "$FAILS" -gt 0 ]; then
   echo "drift-check: $FAILS issue(s) found" >&2
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-    if [ "$HEAL_SUPPRESSED" -eq 1 ]; then
-      FAIL_LINES+=("heal suppressed by rate limit (DRIFT_HEAL_MIN_INTERVAL=${DRIFT_HEAL_MIN_INTERVAL}s) - persistent drift")
+    if [ "$STAGED" -eq 1 ]; then
+      say "note: no alert - this run reads the manifest at $MANIFEST rather than this host's, so it is staged"
+    else
+      if [ "$HEAL_SUPPRESSED" -eq 1 ]; then
+        FAIL_LINES+=("heal suppressed by rate limit (DRIFT_HEAL_MIN_INTERVAL=${DRIFT_HEAL_MIN_INTERVAL}s) - persistent drift")
+      fi
+      notify_telegram "⚠️ Monarch drift check failed on $(hostname)" "${FAIL_LINES[@]}" || true
     fi
-    notify_telegram "⚠️ Monarch drift check failed on $(hostname)" "${FAIL_LINES[@]}" || true
   fi
   exit 1
 fi
