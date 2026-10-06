@@ -1510,6 +1510,18 @@ Telegram message listing every `DRIFT-FAIL` line when drift is found:
 ./scripts/drift-check.sh --test-telegram      # send a test message
 ```
 
+**A staged run does not alert.** `MONARCH_INVARIANTS=<path>` points the check at a
+manifest other than this host's own — that is what CI does
+(`fresh-install-check.sh --full-stack`, `drift-check --check-manifest`) and what an
+operator does to rehearse a change — so its findings are the thing being looked at
+rather than an alarm. Such a run still reports every `DRIFT-FAIL` line and still
+exits non-zero; only the push notification is withheld (it says so: `no alert -
+this run reads the manifest at <path> rather than this host's, so it is staged`).
+Note that `drift-check` re-sources `.env` itself, so blanking `TELEGRAM_*` in your
+shell does **not** keep a staged run from notifying — that is what this is for.
+
+The timer's own runs are never staged, so real drift always reaches you.
+
 Drift happens when a container is recreated without the seed (e.g. an app
 reset its own config, or a volume was restored from a stale backup). Re-run
 `monarch-init` to repair it (the timer's `--heal` mode does this

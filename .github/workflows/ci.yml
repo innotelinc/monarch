@@ -190,6 +190,15 @@ jobs:
           # only as "every model in the chain failed" somewhere else.
           grep -q 'gateway-provider-keys.py --check' "$f" \
             || { echo "::error::$f no longer runs gateway-provider-keys.py --check - a gateway key it refused goes unreported"; exit 1; }
+          # A staged run is a rehearsal, not an alarm: CI and an operator both
+          # pass their own manifest through MONARCH_INVARIANTS, and a failure there
+          # is the thing being looked at. Without this the notification fires on a
+          # stack that is fine - which is what happened when a fabricated library
+          # name and a port nothing listens on were pushed to an operator's phone.
+          grep -q 'STAGED=1' "$f" \
+            || { echo "::error::$f no longer marks a run as staged"; exit 1; }
+          grep -q 'if \[ "\$STAGED" -eq 1 \]' "$f" \
+            || { echo "::error::$f no longer withholds the alert from a staged run"; exit 1; }
           echo "posture: drift-check wired"
 
       # LDAP is what makes every Jellyfin account Authentik's rather than
@@ -255,6 +264,43 @@ jobs:
           # The pin is what the check and init agree on, so both must point at it.
           grep -q 'jellyfin-plugins.json' scripts/jellyfin-plugin-pin.py \
             || { echo "::error::scripts/jellyfin-plugin-pin.py no longer reads the pin"; exit 1; }
+
+      # Both plugin config files are shared with the plugin that owns them, and a
+      # write is not free: Jellyfin re-reads a plugin config only at startup, so
+      # the caller restarts it for a write. That is why "changed" has to mean the
+      # values init manages (plugin_config_changed()) and the write is done in one
+      # place (apply_plugin_config()). A bare `previous != xml` reads as changed on
+      # EVERY run - the LDAP plugin adds a <LdapUser> record and rewrites the XML
+      # declaration - which cost a Jellyfin restart (~40s of outage) per init run
+      # until it was fixed, and with it the 503 window drift-check read as
+      # *libraries missing*.
+      - name: Both plugin configs are compared by value, not by bytes
+        run: |
+          set -euo pipefail
+          f=init/init.py
+          for helper in plugin_config_values plugin_config_changed \
+                        read_plugin_config write_plugin_config apply_plugin_config; do
+            grep -q "^def $helper" "$f" \
+              || { echo "::error::$f no longer defines $helper"; exit 1; }
+          done
+          # The plugin's own bookkeeping must stay out of the comparison.
+          grep -q 'PLUGIN_OWNED_TAGS = {"LdapUsers"}' "$f" \
+            || { echo "::error::$f no longer excludes the plugin-owned elements from the comparison - a linked account would read as drift on every run"; exit 1; }
+          # Both writers render, and both call sites apply through the one writer.
+          for writer in render_ldap_plugin_config render_oidc_plugin_config; do
+            grep -q "^def $writer" "$f" \
+              || { echo "::error::$f no longer defines $writer"; exit 1; }
+          done
+          grep -q 'apply_plugin_config(path, xml, previous, "LDAP-Auth")' "$f" \
+            || { echo "::error::$f no longer applies the LDAP config through apply_plugin_config"; exit 1; }
+          grep -q 'apply_plugin_config(path, xml, previous, "OIDC")' "$f" \
+            || { echo "::error::$f no longer applies the OIDC config through apply_plugin_config"; exit 1; }
+          # And the byte comparison that made every run "changed" must not return.
+          if grep -nE '^ *needs_restart = previous != ' "$f"; then
+            echo "::error::$f compares a plugin config as bytes again - a plugin-owned element or the XML declaration makes that true on every run, so Jellyfin restarts every run"
+            exit 1
+          fi
+          echo "posture: plugin configs are compared by managed value"
 
       # One account is allowed to sign in outside Authentik, and two scripts
       # have to agree on which. Divergence is not loud: the checker calls the

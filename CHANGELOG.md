@@ -147,6 +147,20 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **A staged drift run can no longer page.** `MONARCH_INVARIANTS=<path>` is how
+  CI and an operator rehearse the check against a manifest other than this host's
+  own, and its findings are the thing being looked at rather than an alarm — but
+  the run still notified, so the runs that verified this check's own failure paths
+  pushed a fabricated library name and a port nothing listens on to an operator's
+  phone. A run whose manifest is not this host's now reports every `DRIFT-FAIL`
+  line and exits non-zero exactly as before, and withholds only the Telegram
+  alert (saying so in its output). Blanketing `TELEGRAM_*` in the shell is not the
+  answer: `drift-check` re-sources `.env` itself, so the values come back. The
+  guard is pinned in CI beside the other drift-check posture assertions, and
+  `.github/workflows/ci.yml` gained a step that keeps both plugin config writers
+  on `apply_plugin_config()` — a bare byte comparison reads as changed on every
+  run, which is how `monarch-init` came to restart Jellyfin every run.
+
 - **A heal no longer reports the Jellyfin it just restarted as drifted.**
   `drift-check --heal` reconciled the stack, re-ran `monarch-init`, and re-verified
   immediately — but init restarts Jellyfin through its own `POST /System/Restart`,
