@@ -172,6 +172,29 @@ are written by hand and describe the behaviour change, not the commits.
   the case it missed). The `--check-apps` verdicts are pinned by
   `scripts/tests/test_jellyfin_admin_password.py`.
 
+- **`monarch-init` no longer calls a restart it cannot see "done".** The wait
+  that followed `POST /System/Restart` accepted any non-zero status as up, so it
+  was satisfied by the *outgoing* process — the call answers while the server it
+  is replacing is still serving — and init finished wiring a Jellyfin that went
+  down moments later and spent ~40s booting. That is the half of the 2026-10-05
+  00:04 heal the drift-check gate above was papering over. A restart is now two
+  observations: `wait_for_jellyfin_restart()` waits for the old process to stop
+  answering (bounded by a grace, so a `/System/Restart` that turns out to be a
+  no-op does not hang) and then for a server that can answer an *authenticated*
+  call (`GET /Users`) to start. The public `/System/Info/Public` is not enough to
+  ask with — this build's setup host binds the port first and answers it — and a
+  stale key answers `401` there, which is the wired server answering, so the wait
+  never judges a credential it has not been asked about yet. Pinned by
+  `scripts/tests/test_init_jellyfin_restart_wait.py`.
+
+- **A six-hourly run that lands inside a Jellyfin restart no longer pages.**
+  Something other than the heal can restart Jellyfin — its own dashboard, a
+  plugin install — and this build answers `503` from its setup host for the whole
+  ~40s boot. The library probe now waits `DRIFT_JELLYFIN_GRACE_SEC` (default 60s,
+  one boot; `0` judges the first read) for the server to come back before calling
+  it drift, and a run that still cannot read the libraries says the server is not
+  serving rather than that the libraries are gone.
+
 - **ClipBucket can no longer start with a blank MariaDB password.** The password
   left the compose file on 2026-09-19 and became `CLIPBUCKET_DB_PASSWORD`, but an
   `.env` written before that day has no such variable — so the runtime was handed
