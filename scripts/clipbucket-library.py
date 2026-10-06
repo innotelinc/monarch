@@ -578,12 +578,20 @@ def probe(path: str) -> dict:
     """What the catalogue needs to know about a file: codecs, size, length."""
     proc = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-print_format", "json",
+            "ffprobe", "-nostdin", "-v", "error", "-print_format", "json",
             "-show_entries", "format=duration,format_name",
             "-show_entries", "stream=index,codec_type,codec_name,width,height",
             path,
         ],
         capture_output=True, text=True, timeout=120,
+        # ffmpeg (and so ffprobe) reads its own stdin for interactive keys - `q` to
+        # quit - so a child that inherits the caller's stdin eats it. Measured on
+        # monarch 2026-10-06: a `drift-check` run over ssh swallowed every line of
+        # the script that started it after this call, which is the whole library
+        # check reporting as a short read, with nothing to point at. `-nostdin`
+        # says it at the ffprobe level, DEVNULL says it at the spawn level, and
+        # nothing here wants input.
+        stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0:
         raise ImportError_(f"ffprobe could not read {path}: {proc.stderr.strip()}")
@@ -788,6 +796,14 @@ def evaluate_serve(facts: dict) -> None:
 
 
 def run(args: list[str], stdin: str | None = None, timeout: int = 7200) -> subprocess.CompletedProcess:
+    """Run a child with nothing on its stdin unless this call has something to feed
+    it (`stdin=`), for the same reason `probe()` sets DEVNULL: every docker, mysql
+    and ffmpeg call in here goes through this, and ffmpeg reads its own stdin for
+    interactive keys, so it would otherwise eat the caller's."""
+    if stdin is None:
+        return subprocess.run(
+            args, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout,
+        )
     return subprocess.run(args, capture_output=True, text=True, input=stdin, timeout=timeout)
 
 
