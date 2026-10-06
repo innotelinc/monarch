@@ -1415,10 +1415,19 @@ only the wired server can answer) until it returns 200, for up to
 `DRIFT_READY_TIMEOUT_SEC` (default 300s), and says so if that elapses. Set
 `DRIFT_READY_WAIT=0` to skip the wait.
 
+**A scheduled run gets the same benefit, shorter.** Something other than the heal
+can restart Jellyfin — its own dashboard, a plugin install — and a six-hourly
+tick could land inside that boot. So the library probe reads the status code and,
+when the server is not serving, waits `DRIFT_JELLYFIN_GRACE_SEC` (default 60s, one
+boot; `0` judges the first read) before calling it drift. A run that still cannot
+read the libraries reports *the server is not serving* rather than *the libraries
+are missing* — see [Troubleshooting](#jellyfin-is-not-serving-a-restart-versus-its-libraries-being-gone).
+
 Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
 `DRIFT_MAX_RESTARTS` (default 10), `DRIFT_HEAL_MIN_INTERVAL`,
-`DRIFT_READY_TIMEOUT_SEC` / `DRIFT_READY_WAIT` (the post-heal readiness wait)
-and `DRIFT_GATEWAY_URL` (see below) in `.env`.
+`DRIFT_READY_TIMEOUT_SEC` / `DRIFT_READY_WAIT` (the post-heal readiness wait),
+`DRIFT_JELLYFIN_GRACE_SEC` (how long a run waits for a restarting Jellyfin to
+answer) and `DRIFT_GATEWAY_URL` (see below) in `.env`.
 
 #### Model gateway: a provider key that stopped being accepted
 
@@ -1949,6 +1958,57 @@ Recreating is what fixes it: `monarch-init` pins the outpost's token to
 failing on its own (the retry backoff grows to minutes and it never re-reads the
 environment). `MONARCH_LDAP_PROBE` overrides the probe command, which is how the
 note and fail paths are tested without breaking a working outpost.
+
+#### Jellyfin is not serving (a restart) versus its libraries being gone
+
+`drift-check` says two different things about Jellyfin's libraries, and only one
+of them is about the libraries:
+
+```
+DRIFT-FAIL: jellyfin: GET /Library/VirtualFolders answered HTTP 503, not 200 even after waiting 60s - the server is not serving, ...
+DRIFT-FAIL: jellyfin: libraries missing: 'Movies' 'TV Shows' 'Music' 'Other' (have: 'Collections,Movies,Music,Other,TV Shows')
+```
+
+The second names the missing libraries because the server answered and listed
+what it has. The **first means the server did not answer at all**, so nothing about
+its libraries was read — and the two are not the same finding, because the first
+is what a *restart* looks like.
+
+This build starts in two phases: a setup host binds the port first (its log says
+`ServerSetupApp.SetupServer: Kestrel is listening`) and the real server follows
+~25s later with `Core startup complete`. Every authenticated call is answered
+`503` for that whole window — `/Library/VirtualFolders`, `/Users`, and so the
+apps' key check too — and `POST /System/Restart` is asynchronous, so the outgoing
+process keeps answering for several seconds after it is asked to leave. What
+restarts Jellyfin: its own dashboard, a plugin install, and `monarch-init` — which
+is what `drift-check --heal` runs.
+
+So neither side judges that window as drift. A run waits
+`DRIFT_JELLYFIN_GRACE_SEC` (default 60s — one boot) for the server to answer
+before calling it a failure, and the heal waits longer (`DRIFT_READY_TIMEOUT_SEC`,
+default 300s) before re-checking, because it is the thing that restarted it. A run
+that still cannot read the libraries is looking at a Jellyfin that is not serving
+rather than one that is:
+
+```bash
+docker ps --filter name=jellyfin          # is the container up at all?
+docker logs --tail 40 jellyfin            # "Startup complete", or a crash?
+
+# Ask an AUTHENTICATED endpoint: a 200 from /System/Info/Public is the *setup*
+# host answering. 200 = serving, 401 = serving but the key is stale, 503 = still
+# booting, 000 = down.
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8097/Users \
+  -H "Authorization: MediaBrowser Token=$(cat /docker/appdata/init/jellyfin-api-key.txt)"
+```
+
+If the stack is only partly up, `docker compose up -d` starts what is missing, and
+`drift-check --heal` does that and re-runs `monarch-init` for you.
+
+`jellyfin-admin-password.py --check-apps` makes the same distinction: a key is
+*rejected* only on `401`/`403`, while a `503` from a server that never read it is
+reported as unverified. A key cannot be rejected by a server that did not answer,
+which is why a restart used to read as *an app's stored API key no longer
+authenticates*.
 
 #### Hardlinks check
 Find the same file in `/data/torrents` and `/data/media` and compare inodes:

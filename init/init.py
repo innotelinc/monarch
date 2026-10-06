@@ -1023,6 +1023,74 @@ def jellyfin_headers(token):
     return {"Authorization": f"MediaBrowser Token={token}"}
 
 
+def jellyfin_serving(token) -> bool:
+    """Whether the WIRED Jellyfin is answering, not the boot-time setup server.
+
+    This build starts in two phases: a setup host binds the port first (its log
+    says `ServerSetupApp.SetupServer: Kestrel is listening`) and the real server
+    follows ~25s later with `Core startup complete`. The setup host answers
+    `/Users` with HTTP 503 - which is what `drift-check --check-apps` recorded
+    while the server was booting - and it is the reason a plain "is anything
+    listening" probe is not an answer to "is Jellyfin up".
+
+    Two calls, because neither alone is enough: `/System/Info/Public` is public,
+    so the setup host can satisfy it; `/Users` needs the server's user manager,
+    so the setup host cannot. The token's own validity is deliberately not part
+    of the test - a stale key answers 401, which is the wired server answering -
+    so a host mid-restart is never judged by a credential it has not been asked
+    about yet.
+    """
+    status, _, _ = _http(JELLYFIN_BASE, "/System/Info/Public")
+    if status != 200:
+        return False
+    users, _, _ = _http(JELLYFIN_BASE, "/Users", headers=jellyfin_headers(token))
+    return users in (200, 401, 403)
+
+
+def wait_for_jellyfin_restart(desc, token, timeout=900, down_grace=25, interval=4):
+    """Wait for Jellyfin to come back SERVING after `POST /System/Restart`.
+
+    `wait_for` above is the wrong shape here, and the reason is in its own
+    summary ("other statuses count as up"): `/System/Restart` answers while the
+    process it is replacing is still serving, so a poll started immediately gets
+    a healthy answer from the server that is about to disappear. init then
+    finished wiring a Jellyfin that went down moments later and spent ~40s
+    booting - which is how `drift-check --heal`, re-checking the instant init
+    returned, came to report the libraries missing and the apps' API keys dead
+    about a stack nothing was wrong with (measured on monarch, 2026-10-05
+    00:04).
+
+    A restart is therefore two observations, not one: the old process stops
+    answering, and a server that can answer the *authenticated* endpoint starts.
+    The first is bounded by `down_grace` - a restart that never visibly happens
+    is not a reason to hang - and the second by `timeout`.
+    """
+    deadline = time.time() + timeout
+    stop_grace = time.time() + down_grace
+
+    went_down = False
+    while time.time() < stop_grace:
+        if not jellyfin_serving(token):
+            # Confirmed twice, so a single hiccup is not read as the restart.
+            time.sleep(interval)
+            if not jellyfin_serving(token):
+                went_down = True
+                break
+        time.sleep(interval)
+    if not went_down:
+        _log(f"NOTE: {desc}: the running process was still serving after "
+             f"{down_grace}s - waiting for it to answer regardless")
+
+    while time.time() < deadline:
+        if jellyfin_serving(token):
+            _log(f"{desc} is serving.")
+            return True
+        time.sleep(interval)
+    _issues.append(f"{desc} never came back serving at {JELLYFIN_BASE}/Users")
+    _log(f"WARNING: {desc} never came back serving at {JELLYFIN_BASE}/Users")
+    return False
+
+
 def jellyfin_ensure_api_key(token, name=None) -> str:
     """Return Jellyfin's durable API key called <name>, creating it if needed.
 
@@ -1459,8 +1527,7 @@ def configure_jellyfin_oidc():
         status, _, _ = _http(JELLYFIN_BASE, "/System/Restart", method="POST",
                              headers=jellyfin_headers(token))
         _log(f"Jellyfin restart triggered (HTTP {status}).")
-        if not wait_for(JELLYFIN_BASE, "/System/Info/Public", "Jellyfin (after OIDC restart)",
-                        timeout=900):
+        if not wait_for_jellyfin_restart("Jellyfin (after OIDC restart)", token):
             return False
         time.sleep(10)
 
@@ -1537,8 +1604,7 @@ def configure_jellyfin_ldap():
         status, _, _ = _http(JELLYFIN_BASE, "/System/Restart", method="POST",
                              headers=jellyfin_headers(token))
         _log(f"Jellyfin restart triggered (HTTP {status}).")
-        if not wait_for(JELLYFIN_BASE, "/System/Info/Public", "Jellyfin (after restart)",
-                        timeout=900):
+        if not wait_for_jellyfin_restart("Jellyfin (after restart)", token):
             return False
         time.sleep(10)
 

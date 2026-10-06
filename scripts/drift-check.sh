@@ -35,8 +35,9 @@ set -uo pipefail
 #     - admin API access works: the shared credentials when they still match,
 #       otherwise the exported admin token (init writes it; a diverged local
 #       admin password is reported as a note, not a failure)
-#     - media libraries exist (read from the API: a server that does not answer
-#       is reported as not serving, not as a stack whose libraries are gone)
+#     - media libraries exist (read from the API: a server that does not answer is
+#       reported as not serving rather than as a stack whose libraries are gone,
+#       after waiting DRIFT_JELLYFIN_GRACE_SEC for a restart to settle)
 #     - the login screen shows Monarch's own splash: the rendered asset is
 #       installed under the data dir and branding.xml names it, rather than the
 #       poster collage Jellyfin's own post-scan task regenerates
@@ -490,18 +491,29 @@ fi
 if [ -z "$jf_token" ]; then
   fail "jellyfin: admin login failed (HTTP $jf_code) and no exported token at $JELLYFIN_KEY_FILE"
 else
-  # The status code is read, not just the body. This endpoint needs Jellyfin's
-  # media library service, which is absent for the ~40s the server spends
-  # booting after its own /System/Restart - its setup server listens first and
-  # answers 503 the whole time - and for as long as it is stopped. Both used to
-  # arrive here as an unparseable body and be reported as `libraries missing:
-  # ... (have: '')`, which is what the heal produced seconds after restarting
-  # the stack: a library finding, and a credential one beside it, describing a
-  # Jellyfin that had simply not finished starting. A server that did not answer
-  # is not a server whose libraries are gone, so say which happened.
-  libs_code=$(curl -s -o /tmp/drift-libs.$$ -w "%{http_code}" \
-    "http://localhost:$JF_PORT/Library/VirtualFolders" \
-    -H "Authorization: MediaBrowser Token=$jf_token")
+  # The status code is read, not just the body - and a non-200 is not judged on
+  # the first read. This endpoint needs Jellyfin's media library service, which
+  # is absent for the ~40s the server spends booting after a restart (its own
+  # dashboard, a plugin install, or monarch-init through the heal all restart
+  # it) and for as long as it is stopped. Its setup server listens first and
+  # answers 503 for that whole window, which is what a scheduled run can land on;
+  # both cases used to arrive here as an unparseable body and be reported as
+  # `libraries missing: ... (have: '')` - a finding about a server that had
+  # simply not finished starting. So a run that finds it not serving waits a
+  # bounded moment to see whether it is coming back before calling it drift;
+  # DRIFT_JELLYFIN_GRACE_SEC is how long (default 60s, one boot), 0 judges the
+  # first read, and the heal's own wait is separate and longer.
+  jf_grace="${DRIFT_JELLYFIN_GRACE_SEC:-60}"
+  libs_code="000"
+  jf_waited=0
+  for _ in $(seq 1 $(( jf_grace / 3 + 1 ))); do
+    libs_code=$(curl -s -o /tmp/drift-libs.$$ -w "%{http_code}" \
+      "http://localhost:$JF_PORT/Library/VirtualFolders" \
+      -H "Authorization: MediaBrowser Token=$jf_token")
+    [ "$libs_code" = "200" ] && break
+    sleep 3
+    jf_waited=1
+  done
   libs=$(python3 -c "
 import sys, json
 try:
@@ -511,8 +523,9 @@ except Exception:
 " < /tmp/drift-libs.$$ 2>/dev/null)
   rm -f /tmp/drift-libs.$$
   if [ "$libs_code" != "200" ]; then
-    fail "jellyfin: GET /Library/VirtualFolders answered HTTP $libs_code, not 200 - the server is not serving (still starting after a restart, or stopped), so its libraries could not be read at all"
+    fail "jellyfin: GET /Library/VirtualFolders answered HTTP $libs_code, not 200 even after waiting ${jf_grace}s - the server is not serving, so its libraries could not be read at all (a restart settles within one boot; a stopped server does not - see 'systemctl status jellyfin')"
   else
+    [ "$jf_waited" = 0 ] || say "note: jellyfin was not serving on the first read - it answered after waiting (grace ${jf_grace}s)"
     missing=""
     while IFS= read -r want; do
       [ -n "$want" ] || continue
