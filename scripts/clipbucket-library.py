@@ -585,12 +585,12 @@ def probe(path: str) -> dict:
         ],
         capture_output=True, text=True, timeout=120,
         # ffmpeg (and so ffprobe) reads its own stdin for interactive keys - `q` to
-        # quit - so a child that inherits the caller's stdin eats it. Measured on
-        # monarch 2026-10-06: a `drift-check` run over ssh swallowed every line of
-        # the script that started it after this call, which is the whole library
-        # check reporting as a short read, with nothing to point at. `-nostdin`
-        # says it at the ffprobe level, DEVNULL says it at the spawn level, and
-        # nothing here wants input.
+        # quit - so a child that inherits the caller's stdin consumes it. That is
+        # invisible until the caller's own stdin is something it needs: a script
+        # fed to `ssh host 'bash -s' <<EOF` loses every line after this call, with
+        # nothing to point at, and the check that runs on the host does exactly
+        # that (measured 2026-10-06). `-nostdin` says it at the ffprobe level,
+        # DEVNULL says it at the spawn level, and nothing here wants input.
         stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0:

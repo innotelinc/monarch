@@ -171,15 +171,18 @@ are written by hand and describe the behaviour change, not the commits.
 ### Fixed
 
 - **The library check no longer eats its caller's stdin.** `ffmpeg` — and so
-  `ffprobe` — reads its own stdin for interactive keys (`q` to quit), so an
-  `ffprobe` that inherits the caller's stdin consumes it. Measured on monarch
-  2026-10-06: a `drift-check` run started from a script on stdin swallowed every
-  line of that script after the library check, so the caller's script silently
-  ended there — which is what made a remote verification look like it had hung.
-  `scripts/clipbucket-library.py` now passes `-nostdin` and `stdin=DEVNULL` at the
-  `ffprobe` spawn and `stdin=DEVNULL` for every other child (`run()` covers the
-  docker, mysql and ffmpeg calls), so nothing in it reads a stream it does not
-  own. Both spawn points are pinned by tests.
+  `ffprobe` — reads its own stdin for interactive keys (`q` to quit), so a child
+  that inherits the caller's stdin consumes it. That is invisible until the
+  caller's stdin is something it needs, which is exactly the case for a host
+  check started from a script on stdin (`ssh host 'bash -s' <<EOF`): the caller's
+  script silently ends at that call, and it reads as a hang rather than as a
+  short read. `scripts/clipbucket-library.py` now passes `-nostdin` and
+  `stdin=DEVNULL` at the `ffprobe` spawn and `stdin=DEVNULL` for every other child
+  (`run()` covers the docker, mysql and ffmpeg calls), so nothing in it reads a
+  stream it does not own. Both spawn points are pinned by tests. (Measured on
+  monarch 2026-10-06: the check run over ssh does lose those lines. This fixes the
+  `ffprobe` instance; the same run still has another consumer somewhere in it,
+  which is still open.)
 
 - **The drift alert says which failure it is.** A repair that did not take and a
   run that only looked both arrived as the same nine words, `⚠️ Monarch drift check
