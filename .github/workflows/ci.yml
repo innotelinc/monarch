@@ -449,3 +449,106 @@ jobs:
           grep -q '"https://subscribe.innotel.us"' scripts/seed-homarr-board.py \
             || { echo "::error::Homarr seeder has no Subscribe tile"; exit 1; }
           echo "portal: ok"
+
+  # The alerts are the part of the drift check that reaches a person, and the part
+  # that cannot be exercised against the real bot. `DRIFT_TELEGRAM_CMD` replaces
+  # the send (the same shape as MONARCH_LDAP_PROBE), so both rules are asserted
+  # here with no request leaving the runner:
+  #
+  #   * a STAGED run - one pointed at a manifest other than the host's own, which
+  #     is what CI and an operator rehearsal both do - reports its findings and
+  #     stays silent. It did not once: the runs that verified this check's own
+  #     failure paths pushed a fabricated library name and a port nothing listens
+  #     on to an operator's phone.
+  #   * an un-staged failure notifies, and the notification says whether the stack
+  #     had just been healed and re-checked (a repair that did not take, so it
+  #     needs a person) or was only read (which `--heal` is the repair for). Both
+  #     used to arrive as the same nine words.
+  #
+  # No stack is needed: absent services are findings here, which is what the alert
+  # paths react to.
+  drift-alerts:
+    name: Drift-check alert paths
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: A staged run reports, and does not notify
+        run: |
+          set -euo pipefail
+          # A manifest at any other path is what marks a run staged.
+          python3 - /tmp/staged-invariants.json <<'PY'
+          import json, os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), "init"))
+          import init as monarch_init
+          with open(sys.argv[1], "w") as fh:
+              json.dump(monarch_init.build_invariants(), fh, indent=2)
+          PY
+          printf 'MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n' > /tmp/check.env
+          # Placeholder-shaped on purpose: these only have to be non-empty for the
+          # alert branch to be entered, and DRIFT_TELEGRAM_CMD replaces the send,
+          # so no token is needed and none may be written down.
+          export TELEGRAM_BOT_TOKEN='<fake>' TELEGRAM_CHAT_ID='<fake>'
+          export DRIFT_JELLYFIN_GRACE_SEC=0
+          # Both halves are recorded: the subject carries which failure it is, the
+          # body carries what to do about it, and the assertions read both.
+          export DRIFT_TELEGRAM_CMD='printf "%s\n" "$DRIFT_TELEGRAM_SUBJECT" "$DRIFT_TELEGRAM_BODY" >> /tmp/alerted'
+          rm -f /tmp/alerted
+          # Bounded: this job asserts an exit code, not a duration, and a check
+          # that hangs would wedge the runner rather than fail the test.
+          if MONARCH_ENV=/tmp/check.env MONARCH_INVARIANTS=/tmp/staged-invariants.json \
+               timeout 240 bash scripts/drift-check.sh > /tmp/staged.log 2>&1; then
+            echo "::error::the staged run found nothing - this asserts the alert path, so it needs a finding"; exit 1
+          fi
+          grep -q 'DRIFT-FAIL' /tmp/staged.log \
+            || { echo "::error::a staged run did not report its finding"; exit 1; }
+          grep -q 'no alert' /tmp/staged.log \
+            || { echo "::error::a staged run did not say why it stayed silent"; exit 1; }
+          if [ -e /tmp/alerted ]; then
+            echo "::error::a staged run notified the operator:"; cat /tmp/alerted; exit 1
+          fi
+          echo "staged run: reported, silent"
+
+      - name: An un-staged failure notifies, and says which failure it is
+        run: |
+          set -euo pipefail
+          # A manifest at the host's own path is what makes a run un-staged.
+          # Under sudo because the directory is root's, and the check only reads it.
+          sudo mkdir -p /docker/appdata/init
+          sudo python3 - /docker/appdata/init/invariants.json <<'PY'
+          import json, os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), "init"))
+          import init as monarch_init
+          with open(sys.argv[1], "w") as fh:
+              json.dump(monarch_init.build_invariants(), fh, indent=2)
+          PY
+          printf 'MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n' > /tmp/check.env
+          export TELEGRAM_BOT_TOKEN='<fake>' TELEGRAM_CHAT_ID='<fake>'
+          export DRIFT_JELLYFIN_GRACE_SEC=0
+          # Both halves are recorded: the subject carries which failure it is, the
+          # body carries what to do about it, and the assertions read both.
+          export DRIFT_TELEGRAM_CMD='printf "%s\n" "$DRIFT_TELEGRAM_SUBJECT" "$DRIFT_TELEGRAM_BODY" >> /tmp/alerted'
+
+          rm -f /tmp/alerted
+          if MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh > /tmp/live.log 2>&1; then
+            echo "::error::the un-staged run found nothing - the alert path was not exercised"; exit 1
+          fi
+          [ -e /tmp/alerted ] \
+            || { echo "::error::an un-staged failure did not notify at all"; exit 1; }
+          grep -q 'Monarch drift check failed' /tmp/alerted \
+            || { echo "::error::the notification lost its subject"; exit 1; }
+          grep -q 'only checked - nothing was repaired' /tmp/alerted \
+            || { echo "::error::a read-only failure does not say so"; exit 1; }
+
+          # And the same failure after a heal must read differently.
+          rm -f /tmp/alerted
+          export DRIFT_REVERIFY_FROM_HEAL=1
+          MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh > /tmp/live2.log 2>&1 || true
+          [ -e /tmp/alerted ] \
+            || { echo "::error::a post-heal failure did not notify"; exit 1; }
+          grep -q 'AFTER A HEAL' /tmp/alerted \
+            || { echo "::error::a post-heal failure is not distinguishable from a read-only one"; exit 1; }
+          if grep -q 'nothing was repaired' /tmp/alerted; then
+            echo "::error::the post-heal alert also claims nothing was repaired"; exit 1
+          fi
+          echo "un-staged run: notified, both subjects distinct"

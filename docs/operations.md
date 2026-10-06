@@ -1510,6 +1510,21 @@ Telegram message listing every `DRIFT-FAIL` line when drift is found:
 ./scripts/drift-check.sh --test-telegram      # send a test message
 ```
 
+**The alert says which failure it is.** Both cases used to arrive as the same nine
+words, and the reader had to remember that the timer runs with `--heal` to tell
+them apart:
+
+```
+⚠️ Monarch drift check failed on monarch AFTER A HEAL
+  a heal reconciled the stack and re-ran monarch-init, and this re-check still finds drift - the repair did not take, so this one needs a person
+  ...
+```
+
+versus a run that only looked (the same alert without `AFTER A HEAL`, opening with
+`this run only checked - nothing was repaired`). The first is the one to act on:
+the stack was already reconciled and the finding survived it. The re-check the heal
+executes is marked for exactly this reason.
+
 **A staged run does not alert.** `MONARCH_INVARIANTS=<path>` points the check at a
 manifest other than this host's own — that is what CI does
 (`fresh-install-check.sh --full-stack`, `drift-check --check-manifest`) and what an
@@ -1521,6 +1536,13 @@ Note that `drift-check` re-sources `.env` itself, so blanking `TELEGRAM_*` in yo
 shell does **not** keep a staged run from notifying — that is what this is for.
 
 The timer's own runs are never staged, so real drift always reaches you.
+
+**Testing the alerts** does not need a bot: `DRIFT_TELEGRAM_CMD` replaces the send
+(the same seam as `MONARCH_LDAP_PROBE`), with the subject and body in
+`DRIFT_TELEGRAM_SUBJECT` / `DRIFT_TELEGRAM_BODY`. The `drift-alerts` CI job uses it
+to assert both rules — a staged run reports and stays silent, an un-staged failure
+notifies with the right subject — so no request reaches `api.telegram.org` from
+there.
 
 Drift happens when a container is recreated without the seed (e.g. an app
 reset its own config, or a volume was restored from a stale backup). Re-run
