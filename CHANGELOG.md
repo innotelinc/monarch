@@ -114,6 +114,29 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Changed
 
+- **The drift check keeps a scoreboard, and can be asked for it.** A timer's run
+  was only readable in the journal, and its state was one number (when it last
+  tried to heal), so both "is the stack drifted right now?" and "has anything been
+  trying to fix this?" needed a shell on the host and a time window. Every
+  completed run now records its verdict in `/docker/appdata/init/drift-last`
+  (`verdict`, `at`, `host`, `manifest`, `issues`, `heal_streak` and one `finding=`
+  line per finding) and `scripts/drift-check.sh --status` prints it, exiting like
+  the check itself does (`0` clean, `1` drift, `2` nothing recorded yet).
+  `/docker/appdata/init/drift-heal-last` now holds `<epoch> <count>` — the heal
+  clock it always was, plus how many attempts in a row have **not** cleared the
+  drift, incremented on an attempt and reset by a clean run — and the alert says
+  it (`this has survived 3 heal attempt(s) in a row`, or `this is heal attempt 4
+  in a row that has not cleared it` after a re-check). A file from before this
+  reads as a streak of zero. The directory all of it lives in is
+  `MONARCH_STATE_DIR` (default `/docker/appdata/init`, unset on a host) so the
+  whole check can run against state that is not a host's own — which is what the
+  new tests and the `drift-alerts` CI job do, and what "staged" now keys off: a
+  run whose manifest is not the one under that directory neither alerts nor
+  records a verdict. `scripts/tests/test_drift_check_alerts.py` covers both alert
+  wordings, the streak and the recorded verdict offline (every probed port points
+  at a closed one, so there is drift to find on any machine and no stack, boot or
+  bot is involved); the CI job covers the same ground end to end.
+
 - **qBittorrent is gone; Transmission is the downloader.** qBittorrent 5.2.x
   leaked memory (~10 GB/day, upstream qBittorrent/qBittorrent#24618) and
   OOM-restart-looped against the monarch cgroup until the container had to be
