@@ -35,7 +35,8 @@ set -uo pipefail
 #     - admin API access works: the shared credentials when they still match,
 #       otherwise the exported admin token (init writes it; a diverged local
 #       admin password is reported as a note, not a failure)
-#     - media libraries exist
+#     - media libraries exist (read from the API: a server that does not answer
+#       is reported as not serving, not as a stack whose libraries are gone)
 #     - the login screen shows Monarch's own splash: the rendered asset is
 #       installed under the data dir and branding.xml names it, rather than the
 #       poster collage Jellyfin's own post-scan task regenerates
@@ -86,7 +87,11 @@ set -uo pipefail
 #                        Docker's Dead state (which needs a daemon restart; opt
 #                        out with DRIFT_HEAL_DOCKER_RESTART=0), reconcile the
 #                        stack with `docker compose up`, re-run monarch-init, then
-#                        re-verify and report whether the stack healed.
+#                        re-verify and report whether the stack healed. The
+#                        re-verify waits for Jellyfin to answer an authenticated
+#                        call first, because init restarts it and the boot is not
+#                        over when the commands return (DRIFT_READY_TIMEOUT_SEC,
+#                        default 300s; DRIFT_READY_WAIT=0 skips the wait).
 #                        Rate-limited: DRIFT_HEAL_MIN_INTERVAL (default 3600s)
 #                        must have passed since the last heal attempt, else
 #                        it escalates straight to an alert instead of looping.
@@ -485,25 +490,40 @@ fi
 if [ -z "$jf_token" ]; then
   fail "jellyfin: admin login failed (HTTP $jf_code) and no exported token at $JELLYFIN_KEY_FILE"
 else
-  libs=$(curl -s "http://localhost:$JF_PORT/Library/VirtualFolders" \
-    -H "Authorization: MediaBrowser Token=$jf_token" | \
-    python3 -c "
+  # The status code is read, not just the body. This endpoint needs Jellyfin's
+  # media library service, which is absent for the ~40s the server spends
+  # booting after its own /System/Restart - its setup server listens first and
+  # answers 503 the whole time - and for as long as it is stopped. Both used to
+  # arrive here as an unparseable body and be reported as `libraries missing:
+  # ... (have: '')`, which is what the heal produced seconds after restarting
+  # the stack: a library finding, and a credential one beside it, describing a
+  # Jellyfin that had simply not finished starting. A server that did not answer
+  # is not a server whose libraries are gone, so say which happened.
+  libs_code=$(curl -s -o /tmp/drift-libs.$$ -w "%{http_code}" \
+    "http://localhost:$JF_PORT/Library/VirtualFolders" \
+    -H "Authorization: MediaBrowser Token=$jf_token")
+  libs=$(python3 -c "
 import sys, json
 try:
     print(','.join(sorted(v.get('Name','') for v in json.load(sys.stdin))))
 except Exception:
     print('')
-" 2>/dev/null)
-  missing=""
-  while IFS= read -r want; do
-    [ -n "$want" ] || continue
-    case ",$libs," in
-      *",$want,"*) : ;;
-      *) missing="$missing '$want'" ;;
-    esac
-  done < <(manifest_list "['jellyfin']['libraries']")
-  [ -z "$missing" ] || fail "jellyfin: libraries missing:$missing (have: '$libs')"
-  say "ok: jellyfin ($jf_via, libraries='$libs')"
+" < /tmp/drift-libs.$$ 2>/dev/null)
+  rm -f /tmp/drift-libs.$$
+  if [ "$libs_code" != "200" ]; then
+    fail "jellyfin: GET /Library/VirtualFolders answered HTTP $libs_code, not 200 - the server is not serving (still starting after a restart, or stopped), so its libraries could not be read at all"
+  else
+    missing=""
+    while IFS= read -r want; do
+      [ -n "$want" ] || continue
+      case ",$libs," in
+        *",$want,"*) : ;;
+        *) missing="$missing '$want'" ;;
+      esac
+    done < <(manifest_list "['jellyfin']['libraries']")
+    [ -z "$missing" ] || fail "jellyfin: libraries missing:$missing (have: '$libs')"
+    say "ok: jellyfin ($jf_via, libraries='$libs')"
+  fi
 fi
 rm -f /tmp/drift-jf.$$
 
@@ -1381,6 +1401,44 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
         echo "drift-check: NPM reconciler failed (see: scripts/npm-proxy-hosts.py)" >&2
       fi
     fi
+    # The stack this heal just reconciled is not ready when the commands return.
+    # `docker compose up` only starts containers, and monarch-init POSTs
+    # Jellyfin's own /System/Restart - which is asynchronous, so the old process
+    # answers for a few seconds and the new one then spends ~40s booting, its
+    # setup server listening first and replying 503 throughout. The re-check
+    # below is the next reader after all of that, so it used to read a
+    # half-started Jellyfin and report its libraries missing and its API keys
+    # dead - two findings about a credential that was never wrong, both gone by
+    # the next tick. Wait for the server to answer one authenticated call before
+    # asking it the questions it can only answer once it is up.
+    #
+    # /Users and not /System/Info/Public: only the wired server can answer an
+    # authenticated call, so this cannot be satisfied by the boot-time setup
+    # server the way a public endpoint can. Override the bound with
+    # DRIFT_READY_TIMEOUT_SEC, or skip the wait with DRIFT_READY_WAIT=0.
+    if [ "${DRIFT_READY_WAIT:-1}" = "1" ] && command -v curl >/dev/null 2>&1 \
+        && [ -n "${JF_PORT:-}" ]; then
+      ready_timeout="${DRIFT_READY_TIMEOUT_SEC:-300}"
+      ready_key=""
+      [ -f "$JELLYFIN_KEY_FILE" ] && ready_key=$(cat "$JELLYFIN_KEY_FILE" 2>/dev/null)
+      if [ -n "$ready_key" ]; then
+        echo "drift-check: waiting up to ${ready_timeout}s for Jellyfin to serve again before re-checking..." >&2
+        jf_ready=0
+        for _ in $(seq 1 $(( ready_timeout / 3 ))); do
+          ready_code=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+            "http://localhost:$JF_PORT/Users" \
+            -H "Authorization: MediaBrowser Token=\"$ready_key\", Client=\"Drift Check\", Device=\"Linux\", DeviceId=\"drift-check-001\", Version=\"1.0.0\"")
+          if [ "$ready_code" = "200" ]; then jf_ready=1; break; fi
+          sleep 3
+        done
+        if [ "$jf_ready" = "1" ]; then
+          echo "drift-check: Jellyfin is serving again" >&2
+        else
+          echo "drift-check: Jellyfin did not start serving within ${ready_timeout}s - the re-check reports what it finds" >&2
+        fi
+      fi
+    fi
+
     # Re-run the check suite WITHOUT --heal (avoids a heal loop). The exit code
     # of that run reports whether the stack healed.
     exec bash "$0" --quiet
