@@ -138,6 +138,23 @@ class DriftCheckAlerts(unittest.TestCase):
     def seed_heal_state(self, epoch: int, count: int, standdown_alerted: int = 0) -> None:
         (self.state / "drift-heal-last").write_text(f"{epoch} {count} {standdown_alerted}\n")
 
+    def heal_state_fields(self) -> list[str]:
+        return (self.state / "drift-heal-last").read_text().split()
+
+    def stand_down_once(self) -> Path:
+        """Put the heal in the standing-down state and let its first alert out.
+
+        Returns the record of what that alert said.
+        """
+        self.seed_heal_state(0, 5)
+        first = self.run_check("--heal", own_manifest=True)
+        self.assertEqual(first.returncode, 1, first.stderr)
+        self.assertIn("has stood down", self.alert_text())
+        record = self.state / "drift-standdown-alert"
+        self.assertTrue(record.exists(), "the standing-down alert left no record of what it said")
+        self.alerted.unlink()
+        return record
+
     def docker_calls(self) -> str:
         return self.docker_log.read_text() if self.docker_log.exists() else ""
 
@@ -209,12 +226,87 @@ class DriftCheckAlerts(unittest.TestCase):
         self.assertIn("no alert - the heal stood down", res.stderr)
         self.assertEqual(self.alert_text(), "")
 
+    def test_a_standing_down_repeat_says_what_changed(self):
+        # The interval is how often the operator may be told again; it is not a
+        # promise to send the same page again. A repeat the stack did not move under
+        # leads with what moved, so yesterday's reader does not diff two messages.
+        record = self.stand_down_once()
+        said = record.read_text().splitlines()
+        record.write_text("\n".join(said[:-1]) + "\n")  # as if the last one had been fixed
+        res = self.run_check(
+            "--heal", "--quiet", own_manifest=True,
+            env={"DRIFT_STANDDOWN_ALERT_REPEAT_SEC": "0"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        text = self.alert_text()
+        self.assertIn("what changed since", text)
+        self.assertIn(f"new since then: {said[-1]}", text)
+        # Sending it re-records what it said, so the next repeat compares against
+        # the alert that actually went out, and the interval starts again.
+        self.assertEqual(record.read_text().splitlines(), said)
+        self.assertGreater(int(self.heal_state_fields()[2]), int(time.time()) - 60)
+
+    def test_a_standing_down_repeat_names_drift_that_went_away(self):
+        # The other direction counts too: drift that shrank means a repair worked on
+        # part of the stack, which is a different situation from nothing happening.
+        record = self.stand_down_once()
+        record.write_text("DRIFT-FAIL: a service that is no longer checked\n" + record.read_text())
+        res = self.run_check(
+            "--heal", "--quiet", own_manifest=True,
+            env={"DRIFT_STANDDOWN_ALERT_REPEAT_SEC": "0"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn(
+            "no longer reported since then: DRIFT-FAIL: a service that is no longer checked",
+            self.alert_text(),
+        )
+
+    def test_a_standing_down_repeat_with_nothing_new_stays_silent(self):
+        record = self.stand_down_once()
+        before = record.read_text()
+        res = self.run_check(
+            "--heal", "--quiet", own_manifest=True,
+            env={"DRIFT_STANDDOWN_ALERT_REPEAT_SEC": "0"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        # Silent, but not unexplained: a quiet timer must not look like a timer that
+        # found nothing.
+        self.assertIn("no alert - the standing-down alert went out", res.stderr)
+        self.assertEqual(self.alert_text(), "")
+        self.assertEqual(record.read_text(), before)
+
+    def test_a_standing_down_repeat_without_the_record_alerts(self):
+        # Nothing to compare against is not the same as nothing having changed, so
+        # the unknown case is sent rather than swallowed.
+        self.stand_down_once()
+        (self.state / "drift-standdown-alert").unlink()
+        res = self.run_check(
+            "--heal", "--quiet", own_manifest=True,
+            env={"DRIFT_STANDDOWN_ALERT_REPEAT_SEC": "0"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("has stood down", self.alert_text())
+
+    def test_a_heal_attempt_keeps_the_standdown_clock(self):
+        # One line holds three facts, and a heal attempt is not standing down - so
+        # writing that line must not drop the clock of the alert that was sent (a
+        # raised DRIFT_HEAL_MAX_STREAK puts a standing-down heal back to work).
+        self.seed_heal_state(0, 1, standdown_alerted=999)
+        res = self.run_check("--heal", own_manifest=True)
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual(self.heal_state_fields()[1:], ["2", "999"])
+
     def test_reset_streak_lets_the_heal_try_again(self):
         self.seed_heal_state(0, 5, standdown_alerted=int(time.time()))
         res = self.run_check("--reset-streak")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual((self.state / "drift-heal-last").read_text().split()[1:], ["0", "0"])
         self.assertIn("heal streak reset", res.stdout)
+        # Nothing else on stderr, because this run does nothing else: a shell that
+        # executes a line meant to be prose reports it there and nowhere else
+        # (measured 2026-10-07: a doc-header edit left a bare sentence outside the
+        # comment block, and the only symptom was `Pointing: command not found`).
+        self.assertEqual(res.stderr, "", "the reset run said something besides its own message")
         (self.state / "drift-heal-last").unlink()
         self.assertEqual(self.run_check("--reset-streak").returncode, 2)
 

@@ -670,7 +670,16 @@ ssh_do() { # remote shell command line (built here, run by the target's shell)
   [ -n "${DEPLOY_HOST}" ] || die "deploy requires --host [user@]host."
   local opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
   [ -n "${SSH_KEY}" ] && opts+=(-i "${SSH_KEY}")
-  ssh "${opts[@]}" -p "${SSH_PORT}" "${DEPLOY_HOST}" "$*"
+  # `-n` so the remote command is not handed this script's stdin. ssh without it
+  # forwards stdin to the far side, and every remote command line here is a
+  # command, not a filter - measured 2026-10-07: `ssh host cat` with a file on
+  # stdin consumed all 1092 bytes of it, `ssh -n host cat` consumed none. A deploy
+  # driven as `ssh host 'bash -s' < scripts/mesh.sh` (a shape this deployment is
+  # driven in) would otherwise end at the first ssh_do, silently, half done. It is
+  # written into the call rather than into `opts` so that it is visible where the
+  # call is - scripts/tests/test_stdin_hygiene.py asserts it there, and a flag two
+  # lines up in an array is exactly what a reader (and a grep) misses.
+  ssh -n "${opts[@]}" -p "${SSH_PORT}" "${DEPLOY_HOST}" "$*"
 }
 
 q() { printf '%q' "$1"; }

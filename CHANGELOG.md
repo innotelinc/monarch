@@ -12,6 +12,22 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **One screen for "is the stack drifted right now?".** The verdict, the heal
+  clock and streak, and what the last standing-down alert carried are three files
+  under `MONARCH_STATE_DIR`, and answering the question meant knowing all three -
+  `drift-check.sh --status` prints the first verbatim, which is right for a script
+  and wrong for a person. `scripts/drift-status.py` reads them together: one
+  screen, or `--json` for a dashboard, exiting like a read-only check (`0` clean,
+  `1` drift, `2` cannot judge). "Cannot judge" is its own answer rather than a
+  quiet clean - no run has recorded a verdict against that state directory, or the
+  newest one is older than `--stale-after` (default 13h: two ticks of the six-hour
+  timer plus its jitter), because a verdict that old is a memory of the stack
+  rather than a reading of it, and a stopped timer is itself the finding. It names
+  the way out when the heal has stood down, and
+  `scripts/tests/test_drift_status.py` pins the reading rules and the exit codes.
+  (Homarr has no dynamic tile to hang this on - a tile is a link plus a ping - so
+  the board still shows service up/down; `--json` is the half a tile would need.)
+
 - **The drift verdict is in the file an operator already reads.** `drift-check`
   records its verdict in `drift-last` and nothing else looked at it unless you knew
   to ask, so `monarch-init` now folds that file into the `status.json` it writes
@@ -126,6 +142,23 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Changed
 
+- **A standing-down alert repeats only when it has something new to say.** The
+  first one already said the heal had reconciled the stack N times in a row and
+  this survived every one, so the same page a day later is a page nobody can act
+  on differently. The findings each standing-down alert carried are kept in
+  `MONARCH_STATE_DIR/drift-standdown-alert`, and when
+  `DRIFT_STANDDOWN_ALERT_REPEAT_SEC` comes round the check compares them with
+  what it finds now. A difference is what the repeat leads with (`what changed
+  since:` then `new since then: …` / `no longer reported since then: …` - drift
+  that shrank is a repair working on part of the stack, which is not the same as
+  nothing happening), and no difference means no alert, with `no alert - the
+  standing-down alert went out … ago and these are the findings it already
+  carried` on stderr so a quiet timer is still distinguishable from a timer that
+  found nothing. Nothing is silenced: the operator is paged again as soon as the
+  situation they were paged about is not the situation any more, and
+  `--reset-streak` re-arms the first alert regardless. A record that cannot be
+  read is "not known", never "unchanged", so it alerts.
+
 - **Jellyfin is pinned to the 12.2 build.** The image was pinned to 12.0.0 by
   digest; it now points at the verified 12.2 index digest
   (`sha256:048001357ab34f032f757c72aff22d7256f7ee96e63005ba451cc3265fc99797`),
@@ -206,6 +239,48 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **`ffprobe` gets no `-nostdin`: the flag itself was the breakage.** The previous
+  entry added `-nostdin` to `clipbucket-library.py`'s `probe()` as a second belt
+  beside `stdin=DEVNULL`, and on this deployment it is a landmine: ffprobe
+  6.1.1-3ubuntu5 reads it as an option that *wants a value* and takes the next
+  argument, so `ffprobe -nostdin -v error …` fails with `Failed to set value '-v'
+  for option 'nostdin': Option not found` and exits 1 for **every** file (measured
+  on monarch 2026-10-07 against a 12.7 GB film that probes fine without the flag).
+  `monarch-clipbucket-sync.service` had been failing twice a minute since the flag
+  was deployed - 115 failed runs, the whole catalogue stuck behind the first file
+  - while the box where the suite runs has no ffprobe at all, so nothing local
+  could see it. `stdin=DEVNULL` is the fix that actually closes the consumer and
+  the only one that is portable; the flag is gone, and the test that asserted its
+  presence now runs the real ffprobe where it exists and asserts the flag is not
+  there where it does not.
+
+- **`docker compose run` no longer forwards the caller's stdin.** The heal's
+  fresh-stack branch (`docker compose … run --rm monarch-init`) and
+  `fresh-install-check.sh`'s init run attach the caller's stdin and stream it into
+  the container - measured on monarch 2026-10-07 with 5000 lines on stdin: all
+  23893 bytes consumed, and `-T` does not stop it (23893 either way), while
+  `docker run` without `-i` and `docker compose up -d` consume none. monarch-init
+  reads no stdin today, but the caller of a heal is often a script on stdin
+  (`ssh host 'bash -s' <<EOF` is how this deployment is driven), and then every
+  line after that call is gone - the same silent truncation as `docker exec -i`.
+  Both calls now redirect stdin, and `scripts/mesh.sh`'s `ssh_do` passes `-n` for
+  the same reason (`ssh host cat` consumed a 1092-byte stdin file in full;
+  `ssh -n host cat` consumed none).
+
+- **The search for the remaining stdin consumer is closed, and the rule is a
+  test.** A PATH shim that logs the position of the caller's own stdin around
+  every child ran the whole check on the live host on 2026-10-07 - 18068 children
+  spawned by `drift-check.sh`, one fd 0 that moved: the check's own
+  `python3 -c … < /tmp/drift-libs.$$` reading the 53-byte body it had just
+  redirected (`docker exec -i` was the consumer the 2026-10-06 hunt found, and it
+  is fixed). Nothing else in the run touches the caller's stream.
+  `scripts/tests/test_stdin_hygiene.py` keeps it that way: every spawn of a tool
+  that reads stdin (`ffprobe`, `ffmpeg`, `ssh`, `mysql`, `nsupdate`, `docker` with
+  `-i` or a `compose run`) has to pass `stdin=` or `input=`, a shell `docker`
+  invocation that attaches stdin has to redirect it, and `ssh` has to be `ssh -n`
+  - with planted-violation tests of its own, so a green run cannot just mean the
+  checker matches nothing.
+
 - **`docker exec -i` no longer drains the caller's stdin.** This is the consumer
   the previous note was looking for: `clipbucket-install.py` invokes
   `docker exec -i` for every in-container read, and `-i` attaches the *host's*
@@ -228,9 +303,11 @@ are written by hand and describe the behaviour change, not the commits.
   `stdin=DEVNULL` at the `ffprobe` spawn and `stdin=DEVNULL` for every other child
   (`run()` covers the docker, mysql and ffmpeg calls), so nothing in it reads a
   stream it does not own. Both spawn points are pinned by tests. (Measured on
-  monarch 2026-10-06: the check run over ssh does lose those lines. This fixes the
-  `ffprobe` instance; the same run still has another consumer somewhere in it,
-  which is still open.)
+  monarch 2026-10-06: the check run over ssh does lose those lines. The other
+  consumer that run still had was `docker exec -i`, found and fixed the next day -
+  and the shim run that closed the search for any others is in the entries above.
+  The `-nostdin` half of this fix turned out to be a landmine and was removed: see
+  **`ffprobe` gets no `-nostdin`**.)
 
 - **The drift alert says which failure it is.** A repair that did not take and a
   run that only looked both arrived as the same nine words, `⚠️ Monarch drift check

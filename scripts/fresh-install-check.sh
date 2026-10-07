@@ -459,10 +459,15 @@ EOF
   ok "stack started (jellyfin, *arrs, prowlarr, Transmission, bazarr, jellyseerr, NPM)"
 
   echo "  Running monarch-init to wire the stack..."
+  # `< /dev/null`: `docker compose run` attaches and forwards the caller's stdin
+  # (measured on monarch 2026-10-07 - a 5000-line file on stdin was fully consumed
+  # by a `run` whose container read it, and `-T` does not stop that). monarch-init
+  # reads nothing, and this script is run from a shell, but the operator's stdin
+  # is not this command's to eat.
   if ! MONARCH_DOMAIN="$TEST_DOMAIN" docker compose -f docker-compose.yml \
        -f "$SCRATCH/no-authentik.yml" \
        --env-file "$SCRATCH/.env" run --rm --no-deps monarch-init \
-       > "$SCRATCH/init.log" 2>&1; then
+       > "$SCRATCH/init.log" 2>&1 < /dev/null; then
     bad "monarch-init failed to run:"
     tail -40 "$SCRATCH/init.log" | sed 's/^/    /'
     exit 1

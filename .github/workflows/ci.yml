@@ -329,6 +329,33 @@ jobs:
             || { echo "::error::drift-check no longer records a verdict for init to read"; exit 1; }
           echo "posture: the drift verdict is in the file an operator reads"
 
+      # A standing-down heal is in a state the reader was already told about, so the
+      # interval is how long they get before being told AGAIN - and being handed the
+      # same page again is not information. The findings of the alert that went out
+      # are kept, a repeat is only sent when they changed, and what changed leads it.
+      # Losing any of that turns the escalation back into a repeating page.
+      - name: A standing-down alert repeats only with news
+        run: |
+          set -euo pipefail
+          grep -q 'STANDDOWN_ALERT_FILE=' scripts/drift-check.sh \
+            || { echo "::error::drift-check keeps no record of what the standing-down alert said"; exit 1; }
+          grep -q 'standdown_recall' scripts/drift-check.sh \
+            || { echo "::error::the repeat is not compared with the last alert"; exit 1; }
+          for line in 'what changed since' 'new since then' 'no longer reported since then'; do
+            grep -q "$line" scripts/drift-check.sh \
+              || { echo "::error::the repeat no longer says '$line'"; exit 1; }
+          done
+          grep -q 'these are the findings it already carried' scripts/drift-check.sh \
+            || { echo "::error::an unchanged repeat no longer says why it stayed silent"; exit 1; }
+          # The one screen an operator opens, and the state files it reads.
+          grep -q 'drift-standdown-alert' docs/operations.md \
+            || { echo "::error::the state directory is documented without the alert record"; exit 1; }
+          grep -q 'scripts/drift-status.py' docs/operations.md \
+            || { echo "::error::the status view is undocumented"; exit 1; }
+          grep -q 'scripts/drift-status.py' README.md \
+            || { echo "::error::README does not say where to look"; exit 1; }
+          echo "posture: the standing-down alert is news or silence"
+
       # One account is allowed to sign in outside Authentik, and two scripts
       # have to agree on which. Divergence is not loud: the checker calls the
       # real admin a stray, and `--apply` then tries to disable the account the
@@ -653,9 +680,75 @@ jobs:
             echo "::error::the standing-down alert repeated within its interval"; exit 1
           fi
 
+          # The interval is up (DRIFT_STANDDOWN_ALERT_REPEAT_SEC=0) and the stack has
+          # not moved, so the repeat is the same page - and must not be sent. The
+          # record of what the last alert carried is what makes that judgement
+          # possible, so it has to exist, and it has to be read by content rather
+          # than by "we alerted before".
+          [ -f "$MONARCH_STATE_DIR/drift-standdown-alert" ] \
+            || { echo "::error::the standing-down alert recorded nothing about what it said"; exit 1; }
+          rm -f /tmp/alerted
+          MONARCH_ENV=/tmp/check.env DRIFT_STANDDOWN_ALERT_REPEAT_SEC=0 timeout 240 \
+            bash scripts/drift-check.sh --heal --quiet > /tmp/same.log 2>&1 \
+            && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'no alert - the standing-down alert went out' /tmp/same.log \
+            || { echo "::error::an unchanged repeat does not say why it stayed silent"; exit 1; }
+          if [ -e /tmp/alerted ]; then
+            echo "::error::the same page was sent twice:"; cat /tmp/alerted; exit 1
+          fi
+
+          # Change what the last alert carried and the repeat has news, so it goes -
+          # and it says what changed rather than re-describing the stack.
+          printf 'DRIFT-FAIL: a service that is no longer checked\n' >> "$MONARCH_STATE_DIR/drift-standdown-alert"
+          grep -q 'a service that is no longer checked' "$MONARCH_STATE_DIR/drift-standdown-alert" \
+            || { echo "::error::the injected finding is not in the record - the comparison would be vacuous"; exit 1; }
+          rm -f /tmp/alerted
+          MONARCH_ENV=/tmp/check.env DRIFT_STANDDOWN_ALERT_REPEAT_SEC=0 timeout 240 \
+            bash scripts/drift-check.sh --heal --quiet > /tmp/changed.log 2>&1 \
+            && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'what changed since' /tmp/alerted \
+            || { echo "::error::the repeat does not lead with what changed"; cat /tmp/alerted; exit 1; }
+          grep -q 'no longer reported since then: DRIFT-FAIL: a service that is no longer checked' /tmp/alerted \
+            || { echo "::error::the repeat does not name the finding that went away"; cat /tmp/alerted; exit 1; }
+          grep -q 'has stood down' /tmp/alerted \
+            || { echo "::error::the repeat lost the sentence that says the heal has stood down"; exit 1; }
+          # ... and what it said becomes the record the next repeat compares with,
+          # which is this run's findings rather than the ones it was handed.
+          [ -s "$MONARCH_STATE_DIR/drift-standdown-alert" ] \
+            || { echo "::error::the repeat left no findings recorded"; exit 1; }
+          if grep -q 'a service that is no longer checked' "$MONARCH_STATE_DIR/drift-standdown-alert"; then
+            echo "::error::the record was not rewritten from the findings of the alert that went out"; exit 1
+          fi
+
           # The escape hatch a person runs after looking at the stack.
           MONARCH_STATE_DIR="$MONARCH_STATE_DIR" bash scripts/drift-check.sh --reset-streak \
             || { echo "::error::--reset-streak failed"; exit 1; }
           grep -q ' 0 0$' "$MONARCH_STATE_DIR/drift-heal-last" \
             || { echo "::error::--reset-streak did not clear the streak"; exit 1; }
-          echo "standing down: no heal, one alert, reset works"
+
+          # And the one screen an operator opens, over the state those runs wrote:
+          # it must call this drifted stack drifted, name the way out, and answer
+          # JSON for a dashboard. A clean, fresh verdict exits 0 by contrast.
+          if python3 scripts/drift-status.py --state-dir "$MONARCH_STATE_DIR" > /tmp/status.txt 2>/tmp/status.err; then
+            echo "::error::drift-status called a drifted stack clean"; cat /tmp/status.txt; exit 1
+          fi
+          grep -q 'DRIFT' /tmp/status.txt \
+            || { echo "::error::drift-status does not say the stack is drifted"; cat /tmp/status.txt; exit 1; }
+          grep -q 'DRIFT-FAIL' /tmp/status.txt \
+            || { echo "::error::drift-status does not list the findings"; exit 1; }
+          grep -q -- '--reset-streak' /tmp/status.txt \
+            || { echo "::error::drift-status does not name the way out of a stood-down heal"; exit 1; }
+          python3 scripts/drift-status.py --state-dir "$MONARCH_STATE_DIR" --json > /tmp/status.json || true
+          python3 - /tmp/status.json <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          assert payload["status"] == "drift", payload
+          assert payload["heal"] == "stood_down", payload
+          assert payload["findings"], payload
+          PY
+          mkdir -p /tmp/clean-state
+          printf 'verdict=ok\nat=%s\nepoch=%s\nhost=runner\nmanifest=/x\nissues=0\nheal_streak=0\nheal=none\n' \
+            "$(date -Is)" "$(date +%s)" > /tmp/clean-state/drift-last
+          python3 scripts/drift-status.py --state-dir /tmp/clean-state \
+            || { echo "::error::drift-status did not call a fresh clean verdict clean"; exit 1; }
+          echo "standing down: no heal, one alert, a repeat needs news, reset works, status answers"

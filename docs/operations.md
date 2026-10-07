@@ -1420,6 +1420,23 @@ did — also says whether the live stack is drifted, and its SUMMARY log gains a
 because `init says everything is configured` and `the live stack is healthy` are
 different claims and only the check probes the services.
 
+**One screen instead of three files.** The verdict, the heal clock and streak, and
+what the last standing-down alert carried are three files in that directory, and an
+operator asking "is anything wrong right now, and is the repair getting anywhere?"
+should not have to know that:
+
+```
+./scripts/drift-status.py            # one screen, exit 0 clean / 1 drift / 2 cannot judge
+./scripts/drift-status.py --json     # the same facts, for a dashboard
+```
+
+It answers like a read-only check, so it can be used like one, and it names the way
+out when the heal has stood down. `2` means it *cannot judge* rather than that it
+found nothing: either no run has recorded a verdict against this state directory, or
+the newest one is older than `--stale-after` (default 13h: two ticks of the six-hour
+timer, its jitter, and a margin) — a verdict that old is a memory of the stack, not
+a reading of it, and usually means the timer stopped, which is the finding.
+
 **Heal rate limit and streak:** a heal attempt is recorded in
 `/docker/appdata/init/drift-heal-last` as one line, `<epoch> <count> <standdown>`;
 if drift is still present and the last attempt was less than
@@ -1440,7 +1457,23 @@ again, and then alerts at most once per `DRIFT_STANDDOWN_ALERT_REPEAT_SEC` (defa
 86400s) so a stack already known to be in that state does not page every six hours.
 The runs in between print `no alert - the heal stood down … ago and already said
 so` on stderr, so a quiet timer is still distinguishable from a timer that found
-nothing; `--status` has the verdict either way. After looking at why, a person says
+nothing; `--status` has the verdict either way.
+
+**A repeat of that alert has to carry news.** The first one already said "it
+reconciled the stack N times in a row and this survived every one", so being handed
+that same page again a day later is not information — it is a page nobody can act
+on differently. The findings each standing-down alert carried are kept in
+`/docker/appdata/init/drift-standdown-alert`, and when the interval comes round the
+check compares them with what it finds now: a difference is what the repeat leads
+with (`what changed since:` then `new since then: …` / `no longer reported since
+then: …` — drift that shrank is a repair working on part of the stack, which is not
+the same as nothing happening), and no difference means no alert, with
+`no alert - the standing-down alert went out … ago and these are the findings it
+already carried` on stderr. Nothing is being silenced: a person is paged again as
+soon as the situation they were paged about is not the situation any more, and
+`--reset-streak` (below) re-arms the first alert regardless.
+
+After looking at why, a person says
 "go ahead" on the host:
 
 ```
@@ -1496,8 +1529,9 @@ Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
 answer) and `DRIFT_GATEWAY_URL` (see below) in `.env`.
 
 **State lives in one directory**, `MONARCH_STATE_DIR` (default
-`/docker/appdata/init`): the manifest the run judges, the heal clock and streak,
-and the verdict. Leave it unset on a host — pointing it elsewhere is how the check
+`/docker/appdata/init`): the manifest the run judges, the heal clock, streak and
+stand-down alert clock, the findings the last standing-down alert carried, and the
+verdict. Leave it unset on a host — pointing it elsewhere is how the check
 runs against a host's state that is not this one, which is what
 `scripts/tests/test_drift_check_alerts.py` and the `drift-alerts` CI job do (and
 it is what "staged" means: a run whose manifest is not the one under that
