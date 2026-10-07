@@ -126,6 +126,14 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Changed
 
+- **Jellyfin is pinned to the 12.2 build.** The image was pinned to 12.0.0 by
+  digest; it now points at the verified 12.2 index digest
+  (`sha256:048001357ab34f032f757c72aff22d7256f7ee96e63005ba451cc3265fc99797`),
+  the build hotio's `release-12.2` tag resolves to (its own label reports
+  `org.opencontainers.image.version=12.2`). The digest is the multi-arch index,
+  so amd64 and arm64 hosts move together; set `JELLYFIN_IMAGE` to move off it
+  deliberately instead of by surprise.
+
 - **A heal that keeps failing stops trying.** Five attempts in a row (tunable:
   `DRIFT_HEAL_MAX_STREAK`) that do not clear the drift is not a plan, so the check
   now stands the heal down instead of reconciling the stack every tick forever:

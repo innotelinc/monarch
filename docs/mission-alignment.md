@@ -24,7 +24,7 @@ prioritised** gap rather than an assumption.
 
 | Mission capability | Delivered by | Status |
 |---|---|---|
-| Video streaming, collections, libraries | Jellyfin (pin: v12.0.0 digest) | **Done** |
+| Video streaming, collections, libraries | Jellyfin (pin: v12.2 digest) | **Done** |
 | User profiles, watch history, Continue Watching | Native Jellyfin profiles, backed by Authentik identities | **Done** |
 | Live TV | Native M3U tuner + XMLTV guide (`iptv` container, `/opt/epg/channels.xml`) | **Done** — no TVHeadend/NextPVR needed |
 | AI recommendations + smart search | `monarch-recs` (`/api/recommendations`, `/api/trending`, `/api/search`, optional LLM blurbs) | **Done** — fully local TF‑IDF, no external AI required |
