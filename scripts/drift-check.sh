@@ -37,7 +37,10 @@ set -uo pipefail
 #       admin password is reported as a note, not a failure)
 #     - media libraries exist (read from the API: a server that does not answer is
 #       reported as not serving rather than as a stack whose libraries are gone,
-#       after waiting DRIFT_JELLYFIN_GRACE_SEC for a restart to settle)
+#       after waiting DRIFT_JELLYFIN_GRACE_SEC for a restart to settle - and, when
+#       nothing is listening at all, up to DRIFT_JELLYFIN_BOOT_SEC if Docker says
+#       the container has just been started, which is what a recreate by
+#       watchtower looks like from here)
 #     - the login screen shows Monarch's own splash: the rendered asset is
 #       installed under the data dir and branding.xml names it, rather than the
 #       poster collage Jellyfin's own post-scan task regenerates
@@ -645,26 +648,86 @@ else
   # DRIFT_JELLYFIN_GRACE_SEC is how long (default 60s, one boot), 0 judges the
   # first read, and the heal's own wait is separate and longer.
   jf_grace="${DRIFT_JELLYFIN_GRACE_SEC:-60}"
+  # Nothing listening is a different situation from listening-but-not-serving, and
+  # it needs a different answer. The grace above is one boot's worth of waiting for
+  # a server that is already listening (its setup server answers 503 while it
+  # starts). A *recreate* takes the port away entirely for far longer, because
+  # there is a container to start and a server to bind before anything answers at
+  # all - and one happens on this host without anybody asking: watchtower pulls a
+  # new image and recreates the container. Measured on monarch 2026-10-07:
+  # watchtower pulled and recreated Jellyfin at 22:16:54, the port refused
+  # connections for ~9 minutes, and a check that landed at 22:19:31 read 000,
+  # waited its 60s, still read 000, and reported the libraries unreadable - a
+  # finding about an image update, which is exactly the page nobody can act on.
+  # So when nothing answers at all, the container's own start time decides:
+  # younger than DRIFT_JELLYFIN_BOOT_SEC (default 900s, inside the unit's
+  # TimeoutStartSec=1800s) is a boot in progress and the run waits out the rest of
+  # it; older than that is a server that is not coming back by itself, and stays a
+  # finding. A host where docker cannot answer (the tests, a CI runner) keeps the
+  # old behaviour exactly: no answer about the container, no guess about it.
+  jf_boot="${DRIFT_JELLYFIN_BOOT_SEC:-900}"
+  libs_tmp="/tmp/drift-libs.$$"
   libs_code="000"
   jf_waited=0
   for _ in $(seq 1 $(( jf_grace / 3 + 1 ))); do
-    libs_code=$(curl -s -o /tmp/drift-libs.$$ -w "%{http_code}" \
+    libs_code=$(curl -s -o "$libs_tmp" -w "%{http_code}" \
       "http://localhost:$JF_PORT/Library/VirtualFolders" \
       -H "Authorization: MediaBrowser Token=$jf_token")
     [ "$libs_code" = "200" ] && break
     sleep 3
     jf_waited=1
   done
+  jf_boot_note=""
+  jf_age=""
+  if [ "$libs_code" = "000" ] && [ "$jf_boot" -gt 0 ] && command -v docker >/dev/null 2>&1; then
+    jf_started=$(docker inspect -f '{{.State.StartedAt}}' jellyfin 2>/dev/null || echo "")
+    jf_started_epoch=""
+    if [ -n "$jf_started" ]; then
+      jf_started_epoch=$(date -d "$jf_started" +%s 2>/dev/null || echo "")
+      case "${jf_started_epoch:-}" in ''|*[!0-9]*) jf_started_epoch="" ;; esac
+      if [ -n "$jf_started_epoch" ]; then
+        jf_age=$(( $(date +%s) - jf_started_epoch ))
+        # A container whose clock says it started in the future (the timestamps
+        # come from the daemon, the arithmetic from here) is "just started".
+        [ "$jf_age" -lt 0 ] && jf_age=0
+      fi
+    fi
+    if [ -n "$jf_age" ] && [ "$jf_age" -lt "$jf_boot" ]; then
+      say "note: nothing is listening on jellyfin's port and the container started ${jf_age}s ago - waiting for it to come up (DRIFT_JELLYFIN_BOOT_SEC=${jf_boot})"
+      while [ "$(date +%s)" -lt "$(( jf_started_epoch + jf_boot ))" ]; do
+        sleep 3
+        libs_code=$(curl -s -o "$libs_tmp" -w "%{http_code}" \
+          "http://localhost:$JF_PORT/Library/VirtualFolders" \
+          -H "Authorization: MediaBrowser Token=$jf_token")
+        [ "$libs_code" = "200" ] && break
+      done
+      if [ "$libs_code" = "200" ]; then
+        say "note: jellyfin came up while this run was waiting - it started $(( $(date +%s) - jf_started_epoch ))s ago and its libraries are read below"
+      else
+        jf_boot_note=" - it is still starting $(( $(date +%s) - jf_started_epoch ))s after the container came up, which is longer than a boot"
+      fi
+      jf_waited=1
+    elif [ -n "$jf_age" ]; then
+      jf_boot_note=" - the container has been up ${jf_age}s without answering, so this is a stopped or wedged server rather than a boot in progress"
+    fi
+  fi
+  # The body file may not exist at all: curl writes it only when it reads
+  # something, and a refused connection reads nothing. The redirect below would
+  # then fail and bash would print that on stderr (measured on monarch 2026-10-07:
+  # `drift-check.sh: line 664: /tmp/drift-libs.2490581: No such file or directory`
+  # under a finding that already says what is wrong). So it is created here, empty,
+  # and the reader below turns an empty body into '' on its own.
+  [ -f "$libs_tmp" ] || : > "$libs_tmp"
   libs=$(python3 -c "
 import sys, json
 try:
     print(','.join(sorted(v.get('Name','') for v in json.load(sys.stdin))))
 except Exception:
     print('')
-" < /tmp/drift-libs.$$ 2>/dev/null)
-  rm -f /tmp/drift-libs.$$
+" < "$libs_tmp" 2>/dev/null)
+  rm -f "$libs_tmp"
   if [ "$libs_code" != "200" ]; then
-    fail "jellyfin: GET /Library/VirtualFolders answered HTTP $libs_code, not 200 even after waiting ${jf_grace}s - the server is not serving, so its libraries could not be read at all (a restart settles within one boot; a stopped server does not - see 'systemctl status jellyfin')"
+    fail "jellyfin: GET /Library/VirtualFolders answered HTTP $libs_code, not 200 even after waiting ${jf_grace}s${jf_boot_note} - the server is not serving, so its libraries could not be read at all (a restart settles within one boot; a stopped server does not - see 'systemctl status jellyfin')"
   else
     [ "$jf_waited" = 0 ] || say "note: jellyfin was not serving on the first read - it answered after waiting (grace ${jf_grace}s)"
     missing=""

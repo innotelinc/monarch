@@ -239,6 +239,25 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **Nothing listening on Jellyfin is its own situation, and it is waited for.**
+  The `503` grace covers a server that is already listening and still starting; a
+  *recreate* is not that. Watchtower pulled a new Jellyfin image and recreated the
+  container on monarch at `22:16:54` on 2026-10-07, the port refused connections
+  for about nine minutes, and the check that landed at `22:19:31` read `000`,
+  waited its 60s, still read `000`, and reported the libraries unreadable - a page
+  about an image update. A run that reads `000` now asks Docker when the `jellyfin`
+  container was started: younger than `DRIFT_JELLYFIN_BOOT_SEC` (default 900s,
+  inside the unit's `TimeoutStartSec=1800s`) is a boot in progress, so the run
+  waits the rest of it out and says so; older than that, or a host where Docker
+  cannot answer at all (the tests, a CI runner), is judged exactly as before. The
+  finding says which of the two it was - `it is still starting Ns after the
+  container came up`, or `the container has been up Ns without answering, so this
+  is a stopped or wedged server rather than a boot in progress`. And the refused
+  connection used to leave the redirect into the body reader pointing at a file
+  curl never created, so bash printed `drift-check.sh: line 664:
+  /tmp/drift-libs.…: No such file or directory` underneath a finding that already
+  said what was wrong; the body file is created empty now.
+
 - **`ffprobe` gets no `-nostdin`: the flag itself was the breakage.** The previous
   entry added `-nostdin` to `clipbucket-library.py`'s `probe()` as a second belt
   beside `stdin=DEVNULL`, and on this deployment it is a landmine: ffprobe

@@ -1522,11 +1522,30 @@ boot; `0` judges the first read) before calling it drift. A run that still canno
 read the libraries reports *the server is not serving* rather than *the libraries
 are missing* — see [Troubleshooting](#jellyfin-is-not-serving-a-restart-versus-its-libraries-being-gone).
 
+**And a Jellyfin that is not there at all is waited for too, if it is young.**
+Nothing listening on the port is a different situation from listening-but-not-
+serving, and it lasts far longer: a *recreate* means a container to start and a
+server to bind before anything answers. One happens without anybody asking here —
+watchtower pulls a new image and recreates the container — and it was measured on
+2026-10-07: the recreate started at 22:16:54, the port refused connections for
+about nine minutes, and the check that landed at 22:19:31 read `000`, waited its
+60s, still read `000`, and reported the libraries unreadable. A finding about an
+image update is a page nobody can act on. So when nothing answers at all, Docker
+is asked when the `jellyfin` container was started: younger than
+`DRIFT_JELLYFIN_BOOT_SEC` (default 900s, comfortably inside the unit's
+`TimeoutStartSec=1800s`) and the run waits the rest of the boot out and says so;
+older than that, or a host where Docker cannot answer, and the read is judged as
+before. The finding itself says which of the two it was — `it is still starting
+Ns after the container came up`, or `the container has been up Ns without
+answering, so this is a stopped or wedged server`. `DRIFT_JELLYFIN_BOOT_SEC=0`
+turns the wait off.
+
 Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
 `DRIFT_MAX_RESTARTS` (default 10), `DRIFT_HEAL_MIN_INTERVAL`,
 `DRIFT_READY_TIMEOUT_SEC` / `DRIFT_READY_WAIT` (the post-heal readiness wait),
 `DRIFT_JELLYFIN_GRACE_SEC` (how long a run waits for a restarting Jellyfin to
-answer) and `DRIFT_GATEWAY_URL` (see below) in `.env`.
+answer), `DRIFT_JELLYFIN_BOOT_SEC` (how long it waits for a container that was
+just recreated to answer at all) and `DRIFT_GATEWAY_URL` (see below) in `.env`.
 
 **State lives in one directory**, `MONARCH_STATE_DIR` (default
 `/docker/appdata/init`): the manifest the run judges, the heal clock, streak and
@@ -2132,7 +2151,11 @@ is what `drift-check --heal` runs.
 So neither side judges that window as drift. A run waits
 `DRIFT_JELLYFIN_GRACE_SEC` (default 60s — one boot) for the server to answer
 before calling it a failure, and the heal waits longer (`DRIFT_READY_TIMEOUT_SEC`,
-default 300s) before re-checking, because it is the thing that restarted it. A run
+default 300s) before re-checking, because it is the thing that restarted it. A
+*recreate* is not that window at all: the port refuses connections until the new
+container's server binds, which takes minutes, so a run that finds nothing
+listening asks Docker how long the container has been up and waits out
+`DRIFT_JELLYFIN_BOOT_SEC` (default 900s) while it is young. A run
 that still cannot read the libraries is looking at a Jellyfin that is not serving
 rather than one that is:
 
