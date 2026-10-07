@@ -103,6 +103,7 @@ connect Bazarr, and initialize Jellyseerr — all idempotent, all with your shar
 ```bash
 sudo docker logs monarch-init                       # what the automation did
 sudo cat /docker/appdata/init/status.json           # per-service result + issues
+sudo ./scripts/drift-status.py                      # is the live stack drifted right now? (0 clean, 1 drift, 2 cannot judge)
 ```
 
 ## 🗺️ What you get

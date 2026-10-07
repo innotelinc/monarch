@@ -578,7 +578,7 @@ def probe(path: str) -> dict:
     """What the catalogue needs to know about a file: codecs, size, length."""
     proc = subprocess.run(
         [
-            "ffprobe", "-nostdin", "-v", "error", "-print_format", "json",
+            "ffprobe", "-v", "error", "-print_format", "json",
             "-show_entries", "format=duration,format_name",
             "-show_entries", "stream=index,codec_type,codec_name,width,height",
             path,
@@ -589,8 +589,19 @@ def probe(path: str) -> dict:
         # invisible until the caller's own stdin is something it needs: a script
         # fed to `ssh host 'bash -s' <<EOF` loses every line after this call, with
         # nothing to point at, and the check that runs on the host does exactly
-        # that (measured 2026-10-06). `-nostdin` says it at the ffprobe level,
-        # DEVNULL says it at the spawn level, and nothing here wants input.
+        # that (measured 2026-10-06). DEVNULL is what closes it: the caller's stdin
+        # is not inherited, so there is nothing left to consume.
+        #
+        # NOT `-nostdin`, which was here first and is a landmine on this deployment:
+        # ffprobe 6.1.1-3ubuntu5 (the one monarch has) reads it as an option that
+        # WANTS a value and takes the next argument - `ffprobe -nostdin -v error ...`
+        # fails with "Failed to set value '-v' for option 'nostdin': Option not found"
+        # and exits 1 for every file, so every probe failed (measured on monarch
+        # 2026-10-07, against a 12.7 GB film that probes fine without the flag; the
+        # deploy of this flag had monarch-clipbucket-sync.service failing 115 times
+        # in the following hours, twice a minute, the whole catalogue stuck behind
+        # the first file). The flag was there to say the same thing as DEVNULL, and
+        # only DEVNULL is portable.
         stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0:

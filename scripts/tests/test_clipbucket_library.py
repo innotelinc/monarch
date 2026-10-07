@@ -22,6 +22,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -889,7 +890,15 @@ class NothingEatsTheCallersStdin(unittest.TestCase):
     swallowed every line after the library check, so the caller's script silently
     ended there. Nothing in this module wants input, and the two spawn points (the
     ffprobe in `probe()`, and `run()` for docker, mysql and the two ffmpeg
-    builders) therefore hand the child a closed stdin."""
+    builders) therefore hand the child a closed stdin.
+
+    That is DEVNULL and only DEVNULL. `-nostdin` was tried as a second belt and it
+    is a landmine on this deployment: ffprobe 6.1.1-3ubuntu5 takes it as an option
+    wanting a value (`Failed to set value '-v' for option 'nostdin': Option not
+    found`, exit 1 for every file), which is what the flag did to
+    monarch-clipbucket-sync.service - 115 failed runs in the hours after it was
+    deployed (measured 2026-10-07). A mocked spawn cannot see that, so the second
+    test here runs the real binary where it exists."""
 
     def test_probe_gives_ffprobe_no_stdin(self):
         with mock.patch.object(cl.subprocess, "run") as spawn:
@@ -902,8 +911,27 @@ class NothingEatsTheCallersStdin(unittest.TestCase):
             )
             cl.probe("/tmp/x.mp4")
         args, kwargs = spawn.call_args
-        self.assertIn("-nostdin", args[0])
         self.assertIs(kwargs.get("stdin"), cl.subprocess.DEVNULL)
+        # The flag is not a second belt, it is the breakage: see this class's
+        # docstring for what it did to the sync service on monarch.
+        self.assertNotIn("-nostdin", args[0])
+
+    def test_the_ffprobe_form_is_one_ffprobe_accepts(self):
+        if shutil.which("ffprobe") is None:
+            self.skipTest("ffprobe is not installed here")
+        # A path that is not there: the command line is fine and the failure is
+        # about the file. A rejected option says so in its own words instead, which
+        # is how this test would have caught `-nostdin` on the host that has
+        # ffprobe (the suite runs without it in one place and with it in another).
+        try:
+            cl.probe(str(Path(tempfile.gettempdir()) / f"not-a-file-{os.getpid()}.mp4"))
+        except cl.ImportError_ as error:
+            message = str(error)
+            self.assertNotIn("Option not found", message)
+            self.assertNotIn("Unrecognized option", message)
+            self.assertIn("not-a-file", message)
+            return
+        self.fail("probing a file that is not there should have failed")
 
     def test_run_gives_a_child_no_stdin_unless_this_call_has_something(self):
         with mock.patch.object(cl.subprocess, "run") as spawn:

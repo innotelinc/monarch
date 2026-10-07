@@ -101,7 +101,14 @@ set -uo pipefail
 #                        repair that has failed five times is not a plan, so the
 #                        check stops healing, says so, and alerts at most once
 #                        per DRIFT_STANDDOWN_ALERT_REPEAT_SEC (default 86400s)
-#                        until it is reset with --reset-streak.
+#                        until it is reset with --reset-streak. A repeat after
+#                        that interval is sent only when the findings changed
+#                        since the last one: the run keeps what that alert said
+#                        (drift-standdown-alert, in the state directory) and
+#                        leads with what is new or gone, because the first alert
+#                        already said "it has not healed" and sending the same
+#                        page again is not news. An unchanged stack stays quiet
+#                        with a line on stderr saying so.
 #   --check-manifest     validate a manifest file's schema only (no network) -
 #                        used by fresh-install-check.sh in CI; pass the file
 #                        with MONARCH_INVARIANTS=<path>
@@ -117,10 +124,10 @@ set -uo pipefail
 # the one under this check's state directory, so it reports and exits non-zero but
 # does NOT send the Telegram alert - a rehearsal is not an alarm.
 #   --test-telegram      send a test Telegram message (needs .env vars)
-#
 # State is one directory, $MONARCH_STATE_DIR (default /docker/appdata/init): the
-# invariants manifest this run judges, the heal clock and streak, and the verdict
-# it records for --status. Pointing it at another directory is how the whole check
+# invariants manifest this run judges, the heal clock and streak, the findings the
+# last standing-down alert carried, and the verdict it records for --status.
+# Pointing it at another directory is how the whole check
 # runs somewhere that is not a host's own state - scripts/tests/test_drift_check_alerts.py
 # and the `drift-alerts` CI job both do exactly that. Leave it unset on a host.
 #
@@ -166,6 +173,11 @@ DEFAULT_MANIFEST="$STATE_DIR/invariants.json"
 MANIFEST="${MONARCH_INVARIANTS:-$DEFAULT_MANIFEST}"
 HEAL_STATE="$STATE_DIR/drift-heal-last"
 STATUS_FILE="$STATE_DIR/drift-last"
+# What the last standing-down alert said, one bare finding per line, so a repeat of
+# it can say what changed rather than re-send the same page (see the alert block).
+# Only stand-down writes it, and the first alert of a period always goes out, so a
+# record left behind by an older streak is never read as this one's.
+STANDDOWN_ALERT_FILE="$STATE_DIR/drift-standdown-alert"
 # A run pointed at another manifest is staged, not this host's own check: CI
 # (`fresh-install-check.sh --full-stack`, `drift-check --check-manifest`) and an
 # operator rehearsing a change both pass their own. Its findings are the point of
@@ -314,6 +326,30 @@ NPM_DRIFT=0
 say()  { [ "$QUIET" -eq 0 ] && echo "$@"; }
 indent() { sed 's/^/  /'; }   # prefix each line of stdin with two spaces
 fail() { echo "DRIFT-FAIL: $*" >&2; FAIL_LINES+=("$*"); FAILS=$((FAILS + 1)); }
+
+# ── Comparing this run's findings with the last standing-down alert's ──────
+in_list() {  # in_list <needle> <list...> -> 0 when needle is one of list
+  local needle="$1"; shift
+  local item
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+# Reads the findings the last standing-down alert carried into PREV_FINDINGS and
+# says whether there was anything to read. A missing or empty record is "not
+# known", never "unchanged": the caller alerts on it, because an unknown situation
+# is not a quiet one. Written by this script only, so a line per finding is safe to
+# read back the same way - no quoting, one field per line.
+standdown_recall() {  # standdown_recall -> 0 when a previous alert was recalled
+  PREV_FINDINGS=()
+  [ -f "$STANDDOWN_ALERT_FILE" ] || return 1
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && PREV_FINDINGS+=("$line")
+  done < "$STANDDOWN_ALERT_FILE"
+  [ "${#PREV_FINDINGS[@]}" -gt 0 ]
+}
 
 # ── Telegram alerting (optional) ──────────────────────────────────────────
 # Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env to get a push message
@@ -1433,15 +1469,19 @@ fi
 # escalates to an alert instead of looping init every timer tick.
 DRIFT_HEAL_MIN_INTERVAL="${DRIFT_HEAL_MIN_INTERVAL:-3600}"
 # The state file is the heal clock and the streak together, one line
-# "<epoch> <count>": when the timer last tried to heal, and how many attempts in
-# a row have not cleared the drift. Two facts because a rate limiter alone cannot
-# say whether the situation is moving - "suppressed, persistent drift" and "the
-# 4th heal in a row failed" are the same stack told at different volumes, and the
-# second is the one that says stop waiting for the timer. The count goes back to
-# zero on a clean run. A file from before this holds only the epoch, which reads
-# as a streak of 0 - it is a hint, not a contract.
-# ... and the clock of the last standing-down alert, so it is not repeated every
-# tick - a stack already known to be in this state does not need to be re-sent it.
+# "<epoch> <count> <standdown>": when the timer last tried to heal, how many
+# attempts in a row have not cleared the drift, and when the standing-down alert
+# last went out. Two facts because a rate limiter alone cannot say whether the
+# situation is moving - "suppressed, persistent drift" and "the 4th heal in a row
+# failed" are the same stack told at different volumes, and the second is the one
+# that says stop waiting for the timer. The count goes back to zero on a clean run.
+# A file from before this holds only the epoch, which reads as a streak of 0 - it
+# is a hint, not a contract. The third field is the clock of the last
+# standing-down alert, so the alert is not repeated every tick - a stack already
+# known to be in this state does not need to be re-sent it. Each field is written
+# back with all the others, so a run that is not standing down does not lose the
+# clock of the one that was (a raised DRIFT_HEAL_MAX_STREAK can put a standing-down
+# heal back to work).
 heal_last=0
 HEAL_COUNT=0
 STANDDOWN_ALERTED=0
@@ -1478,7 +1518,7 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
     # attempts that have not cleared the drift, so it is reset by a clean run
     # rather than incremented by a clean one.)
     HEAL_COUNT=$((HEAL_COUNT + 1))
-    echo "$now $HEAL_COUNT" > "$HEAL_STATE" 2>/dev/null || true
+    echo "$now $HEAL_COUNT $STANDDOWN_ALERTED" > "$HEAL_STATE" 2>/dev/null || true
     # A container stuck in Docker's Dead state poisons *every* compose call for its
     # project (see the check above), so nothing else in this heal can work until it
     # is gone - and no CLI removes one: `docker rm` answers "No such container" for
@@ -1538,7 +1578,19 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
     else
       # No container yet (fresh stack): docker compose run is synchronous, so
       # this blocks until init finishes on its own.
-      docker compose -f docker-compose.yml run --rm monarch-init >/dev/null 2>&1 || true
+      #
+      # `< /dev/null` is not decoration. `docker compose run` attaches the
+      # caller's stdin and forwards it into the container - measured on monarch
+      # 2026-10-07 with a 5000-line file on stdin: `docker compose run --rm`
+      # against a container whose command reads stdin consumed all 23893 bytes of
+      # it, while `docker run` without `-i` consumed none. `-T` does not help
+      # (still 23893). The container here runs monarch-init, which reads no
+      # stdin, but the caller of this heal may be a script on stdin -
+      # `ssh host 'bash -s' <<EOF` is how this deployment is driven - and then
+      # every line after this call is gone, which is exactly the silent
+      # truncation the 2026-10-06 hunt was about.
+      docker compose -f docker-compose.yml run --rm monarch-init \
+        >/dev/null 2>&1 < /dev/null || true
     fi
     echo "drift-check: monarch-init finished - re-verifying..." >&2
     # Proxy-host drift is healed by the reconciler, not by monarch-init: init
@@ -1654,6 +1706,10 @@ if [ "$FAILS" -gt 0 ]; then
       # has an obvious repair the alert can name. Both arrived as the same nine
       # words before this, and they were told apart by remembering that the timer
       # heals - which is exactly what a reader of an alert does not know.
+      # The findings as the checks wrote them, before the block below prefixes its
+      # own sentences to them: the record a repeat is compared against is the bare
+      # list, so a re-worded preamble is not mistaken for a changed stack.
+      RAW_FINDINGS=("${FAIL_LINES[@]}")
       subject="⚠️ Monarch drift check failed on $(hostname)"
       if [ "$HEAL_STANDDOWN" -eq 1 ]; then
         FAIL_LINES=("the heal has stood down - it reconciled the stack ${HEAL_COUNT} time(s) in a row and this survived every one, so it will not try again until somebody resets it ('scripts/drift-check.sh --reset-streak', after looking at why): this one is for a person" "${FAIL_LINES[@]}")
@@ -1662,6 +1718,27 @@ if [ "$FAILS" -gt 0 ]; then
         FAIL_LINES=("a heal reconciled the stack and re-ran monarch-init, and this re-check still finds drift - the repair did not take, so this one needs a person" "${FAIL_LINES[@]}")
       else
         FAIL_LINES=("this run only checked - nothing was repaired; 'scripts/drift-check.sh --heal' reconciles the stack" "${FAIL_LINES[@]}")
+      fi
+      # What a repeat of the standing-down alert has to add to be worth sending.
+      # The first one already said "it reconciled the stack N times in a row and
+      # this survived every one"; the interval is how long the operator gets before
+      # being told again, and being handed that same page again is not information.
+      # So the findings each alert carried are kept (drift-standdown-alert) and here
+      # they are compared with this run's: the difference is what a repeat leads
+      # with, and no difference means no alert. A record that cannot be read is not
+      # an unchanged stack - without it there is nothing to compare, so that case
+      # alerts (STANDDOWN_RECALLED stays 0).
+      STANDDOWN_RECALLED=0
+      STANDDOWN_NEW=()
+      STANDDOWN_GONE=()
+      if [ "$HEAL_STANDDOWN" -eq 1 ] && [ "$STANDDOWN_ALERTED" -gt 0 ] && standdown_recall; then
+        STANDDOWN_RECALLED=1
+        for finding in "${RAW_FINDINGS[@]}"; do
+          in_list "$finding" "${PREV_FINDINGS[@]}" || STANDDOWN_NEW+=("$finding")
+        done
+        for finding in "${PREV_FINDINGS[@]}"; do
+          in_list "$finding" "${RAW_FINDINGS[@]}" || STANDDOWN_GONE+=("$finding")
+        done
       fi
       # How long this has been going on, which is what makes it persistent rather
       # than a blip: the heal state counts the attempts in a row that have not
@@ -1679,17 +1756,38 @@ if [ "$FAILS" -gt 0 ]; then
       fi
       # A standing-down stack is in a state the reader already knows about; the
       # alert that announced it goes out once and then at most once per
-      # DRIFT_STANDDOWN_ALERT_REPEAT_SEC. The note goes to stderr rather than
-      # through `say`, so a --quiet run says why it stayed silent instead of
-      # looking like a run that found nothing.
+      # DRIFT_STANDDOWN_ALERT_REPEAT_SEC - and, at that interval, only if the drift
+      # has changed since (see above): the same page twice is not a second page. Each
+      # note goes to stderr rather than through `say`, so a --quiet run says why it
+      # stayed silent instead of looking like a run that found nothing.
       if [ "$HEAL_STANDDOWN" -eq 1 ] && [ "$STANDDOWN_ALERT_DUE" -eq 0 ]; then
         echo "drift-check: no alert - the heal stood down $(( $(date +%s) - STANDDOWN_ALERTED ))s ago and already said so (< ${DRIFT_STANDDOWN_ALERT_REPEAT_SEC:-86400}s); 'scripts/drift-check.sh --status' has the current verdict" >&2
+      elif [ "$STANDDOWN_RECALLED" -eq 1 ] && [ "${#STANDDOWN_NEW[@]}" -eq 0 ] && [ "${#STANDDOWN_GONE[@]}" -eq 0 ]; then
+        echo "drift-check: no alert - the standing-down alert went out $(( $(date +%s) - STANDDOWN_ALERTED ))s ago and these are the findings it already carried ($STANDDOWN_ALERT_FILE); 'scripts/drift-check.sh --status' has the current verdict" >&2
       else
+        if [ "$STANDDOWN_RECALLED" -eq 1 ]; then
+          # A repeat is only sent because something moved, so it leads with what: a
+          # reader paged yesterday reads the first lines and knows whether this is
+          # still the same stack. "no longer reported" matters as much as "new" -
+          # drift that shrank is a repair working on part of the stack, which is not
+          # the same situation as nothing happening at all.
+          change_lines=("the standing-down alert went out $(( $(date +%s) - STANDDOWN_ALERTED ))s ago and this is not the stack it described - what changed since:")
+          for finding in "${STANDDOWN_NEW[@]}"; do
+            change_lines+=("new since then: $finding")
+          done
+          for finding in "${STANDDOWN_GONE[@]}"; do
+            change_lines+=("no longer reported since then: $finding")
+          done
+          FAIL_LINES=("${change_lines[@]}" "${FAIL_LINES[@]}")
+        fi
         notify_telegram "$subject" "${FAIL_LINES[@]}" || true
-        # Remember that the standing-down alert went out, so the next ticks stay
-        # quiet for its interval. (Only this one is rate-limited: an ordinary
-        # finding alerts every run, which is the point of it.)
+        # Remember what the standing-down alert said - that is what a repeat is
+        # compared against - and that it went out, so the next ticks stay quiet for
+        # its interval. (Only this one is rate-limited: an ordinary finding alerts
+        # every run, which is the point of it.) Both writes are best-effort: a state
+        # directory that cannot be written is not a new finding.
         if [ "$HEAL_STANDDOWN" -eq 1 ]; then
+          printf '%s\n' "${RAW_FINDINGS[@]}" > "$STANDDOWN_ALERT_FILE" 2>/dev/null || true
           echo "$heal_last $HEAL_COUNT $now" > "$HEAL_STATE" 2>/dev/null || true
         fi
       fi
