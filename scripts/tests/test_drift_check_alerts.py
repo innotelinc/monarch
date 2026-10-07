@@ -66,6 +66,12 @@ class DriftCheckAlerts(unittest.TestCase):
         self.state = self.tmp / "state"
         self.state.mkdir()
         self.alerted = self.tmp / "alerted"
+        # A Jellyfin token the check will accept as already exported. Without one the
+        # library probe is never reached (the login fails first and the check says
+        # so), and the tests below are about what happens when the probe IS reached
+        # and nothing answers. Placeholder-shaped: it is never sent anywhere.
+        self.jf_key = self.tmp / "jellyfin-api-key.txt"
+        self.jf_key.write_text("<fake>\n")
         self.env_file = self.tmp / "check.env"
         self.env_file.write_text("MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n")
 
@@ -76,7 +82,22 @@ class DriftCheckAlerts(unittest.TestCase):
         self.shim.mkdir()
         self.docker_log = self.tmp / "docker-called"
         fake_docker = self.shim / "docker"
-        fake_docker.write_text(f'#!/bin/sh\necho "docker $*" >> "{self.docker_log}"\nexit 1\n')
+        fake_docker.write_text(
+            '#!/bin/sh\n'
+            f'echo "docker $*" >> "{self.docker_log}"\n'
+            # `SHIM_JELLYFIN_STARTED` is how a test says docker CAN answer when the
+            # Jellyfin container started: the check asks for exactly this on the
+            # nothing-listening path, to tell a boot in progress from a server that
+            # is not coming back. Unset - the default, and what CI does - means
+            # docker answers nothing at all, and the check falls back to judging the
+            # read on its own.
+            'if [ -n "${SHIM_JELLYFIN_STARTED:-}" ]; then\n'
+            '  case "$*" in\n'
+            '    *"{{.State.StartedAt}}"*jellyfin*) printf \'%s\\n\' "$SHIM_JELLYFIN_STARTED"; exit 0 ;;\n'
+            '  esac\n'
+            'fi\n'
+            'exit 1\n'
+        )
         fake_docker.chmod(0o755)
 
         # Every probed service on one closed port, so the run finds drift on a
@@ -161,6 +182,64 @@ class DriftCheckAlerts(unittest.TestCase):
     def status(self) -> dict:
         text = (self.state / "drift-last").read_text()
         return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+    # ── a Jellyfin that is not there at all ─────────────────────────────
+    def test_nothing_listening_is_a_finding_without_shell_noise(self):
+        # curl writes the body file only when it reads something, so a refused
+        # connection leaves the redirect into python3 pointing at a file that was
+        # never created - and bash prints that on stderr, under a finding that
+        # already says what is wrong (measured on monarch 2026-10-07).
+        # DRIFT_JELLYFIN_BOOT_SEC=0 is the old behaviour: judge the read, ask docker
+        # nothing.
+        res = self.run_check(
+            own_manifest=True,
+            env={"DRIFT_JELLYFIN_BOOT_SEC": "0", "JELLYFIN_KEY_FILE": str(self.jf_key)},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        # The bug's own shape: the redirect into python3 named a file that was not
+        # there, and bash announced that under a finding that already said what was
+        # wrong. (Not "No such file or directory" in the whole stream: the *arr
+        # scripts say that about their own absent config files on a machine with no
+        # stack, which is a finding, not noise.)
+        self.assertNotIn("drift-libs", res.stderr)
+        self.assertNotRegex(res.stderr, r"drift-check\.sh: line \d+: ")
+        self.assertIn("answered HTTP 000", (self.state / "drift-last").read_text())
+        self.assertNotIn("waiting for it to come up", res.stdout)
+
+    def test_a_container_that_just_started_is_waited_for(self):
+        # A recreate - watchtower pulling a new image - takes the port away for
+        # minutes while the container starts, and a run that lands in that window
+        # used to report the libraries unreadable, which is a finding about an image
+        # update. The container's own start time is what tells the two apart.
+        started = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+        res = self.run_check(
+            own_manifest=True,
+            env={
+                "SHIM_JELLYFIN_STARTED": started,
+                "DRIFT_JELLYFIN_BOOT_SEC": "9",
+                "JELLYFIN_KEY_FILE": str(self.jf_key),
+            },
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        # `say`, not `fail`: the note goes to stdout, the finding to stderr.
+        self.assertIn("nothing is listening on jellyfin's port and the container started", res.stdout)
+        # It waited that budget out instead of calling it drift, and says how long
+        # the container has been starting when the budget was not enough.
+        self.assertIn("it is still starting", self.alert_text())
+        self.assertIn("longer than a boot", self.alert_text())
+
+    def test_a_container_that_has_been_up_a_while_is_not_a_boot(self):
+        started = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - 3600))
+        began = time.time()
+        res = self.run_check(
+            own_manifest=True,
+            env={"SHIM_JELLYFIN_STARTED": started, "JELLYFIN_KEY_FILE": str(self.jf_key)},
+        )
+        elapsed = time.time() - began
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertNotIn("waiting for it to come up", res.stdout)
+        self.assertIn("the container has been up", self.alert_text())
+        self.assertLess(elapsed, 60, "a container that has been up an hour is not waited for")
 
     # ── the rules ───────────────────────────────────────────────────────
     def test_a_staged_run_reports_and_stays_silent(self):

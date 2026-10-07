@@ -356,6 +356,25 @@ jobs:
             || { echo "::error::README does not say where to look"; exit 1; }
           echo "posture: the standing-down alert is news or silence"
 
+      # Nothing listening is a boot in progress only while the container is young,
+      # and the container's own start time is what says so. Losing that turns an
+      # image update into a page; losing the other half of it turns a wedged server
+      # into something nobody is told about.
+      - name: A Jellyfin that is not listening is judged by its container's age
+        run: |
+          set -euo pipefail
+          grep -q 'DRIFT_JELLYFIN_BOOT_SEC' scripts/drift-check.sh \
+            || { echo "::error::drift-check has no budget for a container that was just recreated"; exit 1; }
+          grep -q "docker inspect -f '{{.State.StartedAt}}' jellyfin" scripts/drift-check.sh \
+            || { echo "::error::drift-check no longer asks Docker how long the container has been up"; exit 1; }
+          grep -q 'it is still starting' scripts/drift-check.sh \
+            || { echo "::error::a boot that outlasts the budget no longer says so"; exit 1; }
+          grep -q 'stopped or wedged server rather than a boot in progress' scripts/drift-check.sh \
+            || { echo "::error::a server that is not coming back is no longer distinguished"; exit 1; }
+          grep -q 'DRIFT_JELLYFIN_BOOT_SEC' docs/operations.md \
+            || { echo "::error::the boot budget is undocumented"; exit 1; }
+          echo "posture: nothing listening is a boot only while it is young"
+
       # One account is allowed to sign in outside Authentik, and two scripts
       # have to agree on which. Divergence is not loud: the checker calls the
       # real admin a stray, and `--apply` then tries to disable the account the
