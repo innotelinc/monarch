@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Monarch Media background (light)</title>
+  <desc id="desc">The light Monarch Media backdrop: an ivory field with bronze light and the crest as a watermark.</desc>
+  <defs>
+    <linearGradient id="ivory" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#faf7ef"/><stop offset="1" stop-color="#ebe3d2"/></linearGradient>
+    <radialGradient id="pool" cx=".5" cy=".5" r=".5"><stop stop-color="#caa35d" stop-opacity=".14"/><stop offset=".55" stop-color="#caa35d" stop-opacity=".05"/><stop offset="1" stop-color="#caa35d" stop-opacity="0"/></radialGradient>
+    <linearGradient id="bronze" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#8e6b36"/><stop offset=".5" stop-color="#caa35d"/><stop offset="1" stop-color="#6e5228"/></linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#ivory)"/>
+  <ellipse cx="1508" cy="104" rx="760" ry="560" fill="url(#pool)"/>
+  <ellipse cx="292" cy="1024" rx="680" ry="500" fill="url(#pool)"/>
+  <g transform="translate(960 470) scale(1.72) translate(-256 -256)" fill="none" stroke="#8e6b36" stroke-linecap="round" opacity=".12">
+    <circle cx="256" cy="256" r="207" stroke-width="3"/>
+    <path d="M249 307V188M263 307V188" stroke-width="14"/>
+    <path d="M249 194C190 125 145 128 123 171C101 214 142 258 240 276M263 194C322 125 367 128 389 171C411 214 370 258 272 276" stroke-width="17"/>
+    <path d="M244 278C190 316 160 359 190 374C218 388 244 355 256 318M268 278C322 316 352 359 322 374C294 388 268 355 256 318" stroke-width="15"/>
+    <path d="M250 178C226 128 210 110 181 91M262 178C286 128 302 110 331 91" stroke-width="6"/>
+  </g>
+  <g stroke="#8e6b36" opacity=".3" fill="none" stroke-width="1">
+    <path d="M120 96H520M1400 96H1800M120 984H520M1400 984H1800"/>
+  </g>
+  <g fill="#8e6b36" opacity=".55">
+    <circle cx="540" cy="96" r="2.5"/><circle cx="1380" cy="96" r="2.5"/><circle cx="540" cy="984" r="2.5"/><circle cx="1380" cy="984" r="2.5"/>
+  </g>
+</svg>
