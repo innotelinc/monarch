@@ -8,7 +8,8 @@
   <meta property="og:title" content="Monarch — Media Platform">
   <meta property="og:description" content="Your own Netflix-grade streaming platform — AI recommendations, live TV and the full *arr stack, self-hosted.">
   <meta property="og:type" content="website">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0d10'/%3E%3Ctext x='32' y='44' font-size='34' text-anchor='middle'%3E🦋%3C/text%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="monarch/monarch-crown.svg">
+  <link rel="apple-touch-icon" href="monarch/monarch-crown.svg">
   <link rel="stylesheet" href="unity-theme.css">
   <script>window.UNITY_DEFAULT_SCHEME = "operations";</script>
   <script src="unity-theme.js"></script>
@@ -80,11 +81,9 @@
     }
     .brand:hover { color: var(--p-text); }
     .brand .mark {
-      display: grid; place-items: center;
-      width: 26px; height: 26px; border-radius: 8px;
-      background: var(--p-bg-elevated);
-      border: 1px solid var(--p-border);
-      font-size: 15px;
+      display: block;
+      width: 28px; height: 28px;
+      object-fit: contain;
     }
     .brand .dot { color: var(--p-accent); }
     .topbar nav { margin-left: auto; display: flex; align-items: center; gap: 4px; }
@@ -337,7 +336,7 @@
   <header class="topbar">
     <div class="wrap topbar-inner">
       <a class="brand" href="#">
-        <span class="mark" aria-hidden="true">M</span>
+        <img class="mark" src="monarch/monarch-crown.svg" alt="" width="28" height="28">
         Monarch<span class="dot">.</span>
       </a>
       <nav aria-label="Main">

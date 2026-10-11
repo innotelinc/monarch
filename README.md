@@ -5,7 +5,7 @@
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-brightgreen.svg)](LICENSE)
 
 
-# 🦋 Monarch — Media Platform
+# 👑 Monarch — Media Platform
 
 **Your own Netflix-grade streaming platform — AI recommendations, live TV, and the full *arr automation stack, self-hosted.**
 

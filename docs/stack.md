@@ -1,4 +1,4 @@
-# 🦋 Monarch — Platform Stack Role
+# 👑 Monarch — Platform Stack Role
 
 **Classification: MediaOps**
 

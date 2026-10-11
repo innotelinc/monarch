@@ -16,8 +16,13 @@ half-updated dashboard is worse than an unwritten one):
 * drops the tiles - and the app rows - of services that cannot answer (retired
   ones, and names with no DNS record at all: a row pointing at a name that does
   not resolve is a dead entry in every picker, so it goes rather than lingers),
-* creates each designed SECTION by name, orders them top to bottom, and places
-  every tile inside the section it belongs to at a deterministic x/y,
+* keeps the board's one main canvas section (Homarr v1 allows exactly one
+  `empty` section per lane, and a second one is the "has multiple main canvas
+  roots" error that stops the board rendering) and creates each designed group
+  under it as a `container`, ordered top to bottom,
+* places every tile inside the container it belongs to at a deterministic x/y,
+  on every layout the board has, and records each container's own geometry in
+  `section_layout`,
 * removes tiles, sections and placements the design does not name, so the board
   converges on the design instead of growing a new bucket every run,
 * sets the home board for every user.
@@ -43,6 +48,26 @@ import sys
 
 DB_PATH = sys.argv[1] if len(sys.argv) > 1 else "/docker/appdata/homarr/appdata/db/db.sqlite"
 ICON = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{name}.png"
+
+# Homarr v1 keeps exactly one `empty` (canvas) section per lane and renders every
+# named group as a `container` nested inside it. The board's old shape - one
+# `empty` section per group - is what `getRootSectionForLane` throws
+# "has multiple main canvas roots" on, so the design's titles are containers and
+# the lane root is a section of its own.
+MAIN_LANE_OFFSET = 0
+EMPTY_OPTIONS = '{"json": {}}'
+
+
+def container_options(title: str) -> str:
+    """The options a container section carries (Homarr's schema defaults)."""
+    return json.dumps({"json": {
+        "title": title[:64],
+        "customCssClasses": [],
+        "borderColor": "",
+        "showLabel": True,
+        "collapsible": True,
+        "showOpenAll": True,
+    }})
 
 # name -> (href, icon, tooltip). href doubles as the ping URL (status check).
 # Every href is a hostname that exists in Nginx Proxy Manager AND resolves on
@@ -224,7 +249,19 @@ DESIGN = (
     )),
 )
 
-BOARD_TITLE = "Innotel dashboard"
+# The board's own branding: the tab/meta title, the crown as its mark, and the
+# Monarch palette. Homarr keeps these on the `board` row, so the same pass that
+# places the tiles also makes the board *look* like the platform it is the front
+# door of. The crown is served from the public apex; see scripts/npm-theme.py for
+# the same asset reaching the media apps.
+BOARD_TITLE = "Monarch"
+BOARD_LOGO = "https://monarch.innotel.us/monarch/monarch-crown.svg"
+BOARD_COLORS = ("#f5cc57", "#b5101f")   # primary (crown gold), secondary (velvet red)
+BOARD_CUSTOM_CSS = (
+    "/* Monarch — the dashboard wears the platform mark, not Homarr's. */\n"
+    "a { color: #e7b63f; }\n"
+    "a:hover { color: #fff0b8; }\n"
+)
 
 
 def repair_stale_url(href: str) -> tuple[str, bool]:
@@ -286,90 +323,148 @@ def drop_dead(db, board_id: str) -> int:
     return removed
 
 
-def ensure_sections(db, board_id: str) -> dict[str, sqlite3.Row]:
-    """The design's sections, created where missing and removed where unplanned.
+def section_title(row) -> str | None:
+    """A section's design title, whether it lives in `name` or in the options.
 
-    A board that has only ever had Homarr's own default carries one section with
-    no name at all. Deleting it and inserting the design's sections would throw
-    away the section every existing tile is placed in, so the unnamed one is
-    ADOPTED for the first title that needs a section instead - the tiles are
-    re-placed either way, and the board keeps the id it was rendering.
+    A group is named twice on the way through the model change: the old canvas
+    sections carried it in `name`, and a container carries it in
+    `options.title` (which is what the UI renders). Reading both is what keeps a
+    re-run from creating a second copy of every group.
+    """
+    if row["name"]:
+        return row["name"]
+    try:
+        return json.loads(row["options"] or "{}").get("json", {}).get("title") or None
+    except (TypeError, ValueError):
+        return None
+
+
+def ensure_sections(db, board_id: str) -> tuple[str, dict[str, str]]:
+    """The board's canvas root plus the design's groups as container sections.
+
+    The root has to be a section of its own with nothing in it: adopting one of
+    the design's groups as the canvas would leave its tiles homeless, and a
+    second `empty` section in the main lane is the error the board refuses to
+    render with. A group the board already carries - in either model - keeps its
+    id, so the tiles that point at it stay where they are.
     """
     wanted = [title for title, _tiles in DESIGN]
-    rows = db.execute("SELECT id, name FROM section WHERE board_id=?", (board_id,)).fetchall()
-    by_name = {row["name"]: row["id"] for row in rows if row["name"]}
-    unnamed = [row["id"] for row in rows if not row["name"]]
+    rows = db.execute("SELECT id, name, kind, x_offset, options FROM section WHERE board_id=?",
+                      (board_id,)).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    placed_in = {row[0] for row in db.execute("SELECT DISTINCT section_id FROM item_layout")}
+
+    root = next((row for row in rows
+                 if row["kind"] == "empty"
+                 and (row["x_offset"] or 0) == MAIN_LANE_OFFSET
+                 and row["id"] not in placed_in), None)
+    if root is None:
+        root_id = nanoid()
+        db.execute("INSERT INTO section (id, board_id, kind, x_offset, y_offset, name, options) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (root_id, board_id, "empty", MAIN_LANE_OFFSET, 0, None, EMPTY_OPTIONS))
+        print("  added the board's main canvas section")
+    else:
+        root_id = root["id"]
+        db.execute("UPDATE section SET kind='empty', x_offset=?, y_offset=0, name=NULL, options=? "
+                   "WHERE id=?", (MAIN_LANE_OFFSET, EMPTY_OPTIONS, root_id))
+
+    by_title: dict[str, str] = {}
+    for row in rows:
+        title = section_title(row)
+        if title and row["id"] != root_id:
+            by_title.setdefault(title, row["id"])
+
     sections: dict[str, str] = {}
     for title in wanted:
-        if title in by_name:
-            sections[title] = by_name[title]
-            continue
-        if unnamed:
-            section_id = unnamed.pop()
-            db.execute("UPDATE section SET name=? WHERE id=?", (title, section_id))
-            print(f"  named the board's unnamed section {title!r}")
-        else:
+        section_id = by_title.get(title)
+        if section_id is None:
             section_id = nanoid()
-            db.execute(
-                "INSERT INTO section (id, board_id, kind, x_offset, y_offset, name, options) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (section_id, board_id, "empty", 0, wanted.index(title), title, '{"json": {}}'))
+            db.execute("INSERT INTO section (id, board_id, kind, x_offset, y_offset, name, options) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (section_id, board_id, "container", None, None, None,
+                        container_options(title)))
             print(f"  added section: {title!r}")
+        else:
+            was_canvas = by_id[section_id]["kind"] == "empty"
+            db.execute("UPDATE section SET kind='container', x_offset=NULL, y_offset=NULL, "
+                       "name=NULL, options=? WHERE id=?", (container_options(title), section_id))
+            if was_canvas:
+                print(f"  made {title!r} a container under the board's canvas")
         sections[title] = section_id
-    keep = set(sections.values())
+
+    keep = set(sections.values()) | {root_id}
     for row in rows:
         if row["id"] in keep:
             continue
         db.execute("DELETE FROM item_layout WHERE section_id=?", (row["id"],))
+        db.execute("DELETE FROM section_layout WHERE section_id=?", (row["id"],))
         db.execute("DELETE FROM section WHERE id=?", (row["id"],))
         print(f"  removed section {row['name']!r}" if row["name"] else "  removed an extra section")
-    return sections
+
+    # A container reads its collapsed state per user; with no row the section is
+    # open, which is what the design wants (and a re-run must not flip it shut).
+    for user in db.execute("SELECT id FROM user").fetchall():
+        for section_id in sections.values():
+            db.execute("INSERT OR IGNORE INTO section_collapse_state (user_id, section_id, collapsed) "
+                       "VALUES (?,?,0)", (user["id"], section_id))
+    return root_id, sections
 
 
-def place_tiles(db, board_id: str, layout, sections: dict[str, str],
+def place_board(db, board_id: str, layouts, root_id: str, sections: dict[str, str],
                 by_name: dict[str, str]) -> int:
-    """Put every designed tile in its section, at a deterministic x/y.
+    """Place every designed tile and group on every layout the board has.
 
-    The row cursor runs across the whole board rather than restarting per
-    section, and each section records the row it starts on: sections stack top
-    to bottom, and the two readings of `y_offset` (absolute on the item,
-    relative to the section) then agree instead of overlapping.
+    Homarr renders one layout per breakpoint, so a tile placed on only the first
+    one vanishes on the others. Each group is a container with its geometry in
+    `section_layout` (under the board's canvas root, stacked top to bottom by the
+    height it actually uses); the tiles inside it go in `item_layout`, relative
+    to the container rather than to the board.
     """
-    cols = layout["column_count"] or 10
-    cursor_y = 0
     widgets: dict[str, str] = {}
     for row in db.execute("SELECT id, kind FROM item WHERE board_id=? AND kind != 'app'",
                           (board_id,)):
         widgets.setdefault(row["kind"], row["id"])
     placed = 0
-    for title, tiles in DESIGN:
-        section_id = sections[title]
-        db.execute("UPDATE section SET y_offset=? WHERE id=?", (cursor_y, section_id))
-        x = 0
-        for kind, name, width in tiles:
-            if kind == "app":
-                item_id = by_name.get(name)
-            else:
-                item_id = widgets.get(name)
+    for layout in layouts:
+        cols = layout["column_count"] or 10
+        cursor_y = 0
+        for title, tiles in DESIGN:
+            section_id = sections[title]
+            x, row_y, height = 0, 0, 1
+            for kind, name, width in tiles:
+                if kind == "app":
+                    item_id = by_name.get(name)
+                else:
+                    item_id = widgets.get(name)
+                    if item_id is None:
+                        print(f"  skipped widget {name!r} (this board has no such tile)")
+                        continue
                 if item_id is None:
-                    print(f"  skipped widget {name!r} (this board has no such tile)")
+                    print(f"  skipped tile {name!r} (no item)")
                     continue
-            if item_id is None:
-                print(f"  skipped tile {name!r} (no item)")
-                continue
-            if x + width > cols:
-                x = 0
-                cursor_y += 1
-            db.execute("DELETE FROM item_layout WHERE item_id=? AND layout_id=?",
-                       (item_id, layout["id"]))
+                width = min(cols, max(1, width))
+                if x + width > cols:
+                    x = 0
+                    row_y += 1
+                db.execute("DELETE FROM item_layout WHERE item_id=? AND layout_id=?",
+                           (item_id, layout["id"]))
+                db.execute(
+                    "INSERT INTO item_layout (item_id, section_id, layout_id, x_offset, y_offset, "
+                    "width, height) VALUES (?,?,?,?,?,?,?)",
+                    (item_id, section_id, layout["id"], x, row_y, width, 1),
+                )
+                height = max(height, row_y + 1)
+                placed += 1
+                x += width
+            db.execute("DELETE FROM section_layout WHERE section_id=? AND layout_id=?",
+                       (section_id, layout["id"]))
             db.execute(
-                "INSERT INTO item_layout (item_id, section_id, layout_id, x_offset, y_offset, "
-                "width, height) VALUES (?,?,?,?,?,?,?)",
-                (item_id, section_id, layout["id"], x, cursor_y, width, 1),
+                "INSERT INTO section_layout (section_id, layout_id, parent_section_id, x_offset, "
+                "y_offset, width, height) VALUES (?,?,?,?,?,?,?)",
+                (section_id, layout["id"], root_id, 0, cursor_y, cols, height),
             )
-            placed += 1
-            x += width
-        cursor_y += 1
+            cursor_y += height
     return placed
 
 
@@ -438,6 +533,7 @@ def main():
         sys.exit(f"DB not found: {DB_PATH}")
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys=ON")
     try:
         boards = db.execute("SELECT id, name FROM board ORDER BY name").fetchall()
         if not boards:
@@ -452,18 +548,22 @@ def main():
                 continue
             app_ids = ensure_apps(db)
             items = ensure_items(db, board["id"], app_ids)
-            sections = ensure_sections(db, board["id"])
-            placed = place_tiles(db, board["id"], layouts[0], sections, items)
+            root_id, sections = ensure_sections(db, board["id"])
+            placed = place_board(db, board["id"], layouts, root_id, sections, items)
             removed = drop_dead(db, board["id"])
             total_placed += placed
             print(f"  {placed} tile(s) placed in {len(DESIGN)} sections, {removed} removed")
 
-        # The board is the dashboard: a title on the tab, and the apex/home board
-        # for every user (an existing user keeps their own choice only if they
-        # made one; this sets the ones that never did).
+        # The board is the dashboard: its title, its mark, its palette, and the
+        # apex/home board for every user (an existing user keeps their own choice
+        # only if they made one; this sets the ones that never did).
         first = boards[0]["id"]
-        db.execute("UPDATE board SET page_title=?, meta_title=? WHERE id=?",
-                   (BOARD_TITLE, BOARD_TITLE, first))
+        db.execute(
+            "UPDATE board SET page_title=?, meta_title=?, logo_image_url=?, "
+            "favicon_image_url=?, primary_color=?, secondary_color=?, custom_css=? "
+            "WHERE id=?",
+            (BOARD_TITLE, BOARD_TITLE, BOARD_LOGO, BOARD_LOGO,
+             BOARD_COLORS[0], BOARD_COLORS[1], BOARD_CUSTOM_CSS, first))
         db.execute("UPDATE serverSetting SET value=? WHERE setting_key='board'",
                    (json.dumps({"json": {"homeBoardId": first, "mobileHomeBoardId": first,
                                          "enableStatusByDefault": True,
