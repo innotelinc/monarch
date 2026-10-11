@@ -83,10 +83,12 @@ PLUGIN_ASSEMBLY = "Jellyfin.Plugin.OIDC.dll"
 # silently ignored.
 CALLBACK_TEMPLATE = "https://{host}/sso/OIDC/Callback/{provider}"
 # The public names Jellyfin answers on, i.e. the names a browser can reach the
-# login page at. Both must be registered: the plugin builds its redirect_uri
-# from its own ServerBaseUrl, and a user who signed in on the other name would
-# otherwise be refused at the callback.
-DEFAULT_PUBLIC_NAMES = ("media.innotel.us", "media.magnate.innotel.us")
+# login page at. Each must be registered: the plugin builds its redirect_uri
+# from its own ServerBaseUrl, and a user who signed in on another name would
+# otherwise be refused at the callback. `media.magnate.innotel.us` was dropped
+# on 2026-10-11 when it became a 301 to `media.innotel.us` (a 301 drops the
+# callback path, so keeping it registered would only invite a broken flow).
+DEFAULT_PUBLIC_NAMES = ("media.innotel.us",)
 
 
 class CheckError(RuntimeError):
@@ -367,8 +369,9 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
             failures += len(missing)
             if not missing:
-                print(f"  ok          both Jellyfin names carry their "
-                      f"{wanted[0].split('/sso/')[1]} callback")
+                hosts = ", ".join(sorted({uri.split("/")[2] for uri in wanted}))
+                print(f"  ok          every public Jellyfin name ({hosts}) carries "
+                      f"its {wanted[0].split('/sso/')[1]} callback")
 
     if failures:
         print(f"\nFAIL — {failures} problem(s): the Jellyfin login page's SSO button is "

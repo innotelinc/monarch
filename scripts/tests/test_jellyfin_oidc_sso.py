@@ -289,16 +289,18 @@ class CheckTests(unittest.TestCase):
         directory = PluginDirectory()
         self.addCleanup(directory.cleanup)
         stub = AuthentikStub([
-            "https://media.innotel.us/sso/OIDC/Callback/authentik",
-            # media.magnate.innotel.us was never registered: the failure that
-            # reads as "the button did nothing" from the login page.
+            # Nothing this Jellyfin answers on: the failure that reads as "the
+            # button did nothing" from the login page. Since the 2026-10-11
+            # rename the only public name is media.innotel.us, so a stub that
+            # registered it would register everything and prove nothing.
+            "https://other.innotel.us/sso/OIDC/Callback/authentik",
         ])
         self.addCleanup(stub.stop)
         code, _, err = run(["--check", "--plugins-dir", str(directory.root),
                             "--authentik-base", stub.url],
                            env={"AUTHENTIK_BOOTSTRAP_TOKEN": "tok"})
         self.assertEqual(code, 1)
-        self.assertIn("media.magnate.innotel.us/sso/OIDC/Callback/authentik", err)
+        self.assertIn("media.innotel.us/sso/OIDC/Callback/authentik", err)
         self.assertIn("redirect_uri does not match", err)
 
     def test_a_rejected_token_is_not_a_pass(self):

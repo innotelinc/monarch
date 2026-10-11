@@ -12,9 +12,12 @@ hand-run login test passed; the phone app could not, and that was the report.
 
 So what these tests pin is the judgement itself: the scheme a client would have
 to follow, not the config that produced it. `start_url_defect` is the whole
-decision, and `SSO_PROVIDERS` has to keep naming *both* public Jellyfin hosts —
-a check that silently judged one of them would have passed on the day this was
-found, because only the queried name is wrong.
+decision, and `SSO_PROVIDERS` has to name *every* public Jellyfin host — a check
+that silently judged one of them would have passed on the day this was found,
+because only the queried name is wrong. Since the 2026-10-11 rename there is one
+such name, and the retired `media.magnate.innotel.us` has to stay out of the
+list: it is a 301 to `media.innotel.us` now, and a 301 drops the callback path,
+so judging it would assert a flow no client can complete.
 """
 from __future__ import annotations
 
@@ -73,10 +76,14 @@ class ProviderNames(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = _load()
 
-    def test_both_jellyfin_names_are_judged(self):
+    def test_the_canonical_jellyfin_name_is_judged(self):
+        # One name since the rename, and the retired one is asserted *absent*:
+        # it answers only as a 301 to media.innotel.us, and the redirect drops the
+        # callback path, so a check that still judged it would be pinning a broken
+        # flow. The name that serves the sign-in page is the one that matters.
         hosts = {host for _, host in self.mod.SSO_PROVIDERS}
         self.assertIn("media.innotel.us", hosts)
-        self.assertIn("media.magnate.innotel.us", hosts)
+        self.assertNotIn("media.magnate.innotel.us", hosts)
 
 
 if __name__ == "__main__":

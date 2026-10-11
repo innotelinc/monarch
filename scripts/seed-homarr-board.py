@@ -59,13 +59,13 @@ APPS = {
     "IPTV (EPG)": ("https://tv.monarch.innotel.us", "tvheadend",
                    "IPTV - live TV guide (XMLTV EPG)"),
     # -- Libraries ----------------------------------------------------------
-    "Sonarr": ("https://sonarr.monarch.innotel.us", "sonarr",
+    "Sonarr": ("https://tv.innotel.us", "sonarr",
                "Sonarr - TV collection manager"),
-    "Radarr": ("https://radarr.monarch.innotel.us", "radarr",
+    "Radarr": ("https://movies.innotel.us", "radarr",
                "Radarr - movie collection manager"),
-    "Lidarr": ("https://lidarr.monarch.innotel.us", "lidarr",
+    "Lidarr": ("https://mp3.innotel.us", "lidarr",
                "Lidarr - music collection manager"),
-    "Whisparr": ("https://whisparr.monarch.innotel.us", "whisparr",
+    "Whisparr": ("https://xxx.innotel.us", "whisparr",
                  "Whisparr - adult collection manager"),
     "Bazarr": ("https://bazarr.monarch.innotel.us", "bazarr",
                "Bazarr - subtitle manager"),
@@ -139,6 +139,13 @@ DEAD = (
 STALE_SUFFIXES = (".monarch.local",)
 STALE_HOSTS = {
     "media.monarch.innotel.us": "media.innotel.us",
+    # The 2026-10 renames: these names still answer, but only as 301s to the
+    # short one, so a board pointing at them walks a redirect on every click.
+    "media.magnate.innotel.us": "media.innotel.us",
+    "sonarr.monarch.innotel.us": "tv.innotel.us",
+    "radarr.monarch.innotel.us": "movies.innotel.us",
+    "lidarr.monarch.innotel.us": "mp3.innotel.us",
+    "whisparr.monarch.innotel.us": "xxx.innotel.us",
     "req.monarch.innotel.us": "req.innotel.us",
     "recs.monarch.innotel.us": "monarch.innotel.us",
     # The old LAN tile: Requestrr's console has a gate and a name now, so a

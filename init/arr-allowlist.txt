@@ -27,6 +27,13 @@ localhost
 192.168.1.56
 # every edge name (prowlarr.monarch.innotel.us, media.magnate.innotel.us, ...)
 *.monarch.innotel.us
+# the canonical short names the media apps moved to on 2026-10-11
+movies.innotel.us
+tv.innotel.us
+mp3.innotel.us
+xxx.innotel.us
+index.innotel.us
+dl.innotel.us
 # the containers that call these apps from inside the network
 prowlarr
 sonarr

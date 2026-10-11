@@ -92,10 +92,13 @@ SESSION_COOKIE = "_innotel_sso"
 # findings, not flakiness — and both were true when this list was written, which
 # is why the row is asserted rather than assumed.
 SUBDOMAINS = [
-    ("radarr", "radarr.{base}"),
-    ("sonarr", "sonarr.{base}"),
-    ("lidarr", "lidarr.{base}"),
-    ("whisparr", "whisparr.{base}"),
+    # Renamed 2026-10-11: each app keeps its gateway, but the public name moved
+    # to the short form and the old `<app>.monarch` name is now a 301
+    # redirection host, so the gate is only real if it is asserted here.
+    ("radarr", "movies.innotel.us"),
+    ("sonarr", "tv.innotel.us"),
+    ("lidarr", "mp3.innotel.us"),
+    ("whisparr", "xxx.innotel.us"),
     ("bazarr", "bazarr.{base}"),
     ("prowlarr", "prowlarr.{base}"),
     ("transmission", "transmission.{base}"),
@@ -116,9 +119,9 @@ SUBDOMAINS = [
 # redirecting to the IdP — the whole point of the change — and the identity
 # wiring behind them is asserted by the scripts named in the module docstring.
 PUBLISHED = [
+    # media.magnate.innotel.us is retired (a 301 to media.innotel.us since the
+    # 2026-10-11 rename), so only the canonical name publishes the sign-in page.
     ("jellyfin", "media.innotel.us", "/web/index.html", "Jellyfin"),
-    ("jellyfin (magnate name)", "media.magnate.innotel.us", "/web/index.html",
-     "Jellyfin"),
     ("jellyseerr", "req.innotel.us", "/login", "Seerr"),
     ("jellyseerr (alias)", "req.{base}", "/login", "Seerr"),
 ]
@@ -140,7 +143,6 @@ PUBLISHED = [
 # app" is. `init/init.py` (`jellyfin_ensure_known_proxies`) provisions it.
 SSO_PROVIDERS = [
     ("jellyfin", "media.innotel.us"),
-    ("jellyfin (magnate name)", "media.magnate.innotel.us"),
 ]
 
 # (label, port) — bound to 127.0.0.1 only. Every one of these apps is configured
