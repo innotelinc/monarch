@@ -294,6 +294,30 @@ services:
       - /docker/appdata/homarr/appdata:/appdata
 
   ###############################################
+  # LANDING - Monarch product landing page (the platform's front door)
+  #
+  # The apex (monarch.innotel.us) is the product page a visitor sees, not the
+  # dashboard; the Homarr board is home.innotel.us now. This is a static
+  # server for web/landing/ - the same page the release publishes to GitHub
+  # Pages - so the apex and the published site cannot drift apart.
+  ###############################################
+  landing:
+    <<: *common-keys
+    container_name: monarch-landing
+    image: nginx:alpine
+    ports:
+      - 14014:80
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./web/landing:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  ###############################################
   # TRANSMISSION - Main Downloader (WebUI on :9091)
   #
   # Replaced qBittorrent on 2026-10-01: qBittorrent 5.2.x leaked memory
@@ -927,6 +951,9 @@ services:
     container_name: jellyseerr-sso
     environment:
       <<: *sso-env
+      # The request portal publishes its own sign-in page (the Jellyfin/Cerulean
+      # identity); the subscription gate lives at the Jellyfin identity layer,
+      # not here, so this name is deliberately not OIDC-gated.
       OAUTH2_PROXY_SKIP_AUTH_ROUTES: "^/.*$"
       OAUTH2_PROXY_UPSTREAMS: http://jellyseerr:5055
     ports:

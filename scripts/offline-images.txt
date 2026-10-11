@@ -35,3 +35,4 @@ ghcr.io/innotelinc/monarch/nginx-proxy-manager:latest
 ghcr.io/innotelinc/monarch-recs:latest
 ghcr.io/innotelinc/monarch-health:latest
 ghcr.io/innotelinc/monarch-clipbucket:latest
+nginx:alpine
