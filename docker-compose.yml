@@ -282,6 +282,8 @@ services:
       AUTH_OIDC_CLIENT_SECRET: "${AUTH_OIDC_CLIENT_SECRET:-}"
       AUTH_OIDC_ISSUER: "${AUTH_OIDC_ISSUER:-}"
       AUTH_OIDC_CLIENT_NAME: "${AUTH_OIDC_CLIENT_NAME:-Cerulean}"
+      # Canonical public origin (origin checks, secure cookies, MCP OAuth metadata).
+      BASE_URL: "${HOMARR_BASE_URL:-https://home.innotel.us}"
     healthcheck:
       # nginx (v1) listens on 7575 and proxies to the app.
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://$$(hostname):7575 || exit 1"]
