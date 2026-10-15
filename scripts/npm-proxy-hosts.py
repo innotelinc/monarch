@@ -30,9 +30,17 @@ Configuration comes from environment variables or the repo's .env file:
                         this host's public IP/hostname when NPM_MODE=remote
   NPM_CERT_ID           optional: reuse an existing certificate id instead of
                         requesting a new wildcard cert
-  TECHNITIUM_URL        Cerulean's Technitium DNS API base, used to create the A
-                        record for a NEW subdomain (+ TECHNITIUM_TOKEN, or
-                        TECHNITIUM_USER / TECHNITIUM_PASSWORD to log in)
+  CERULEAN_API_URL      Cerulean's service-bridge base (e.g.
+                        http://192.168.1.71:3003) - the preferred DNS path
+  CERULEAN_SERVICE_KEY  a `ceru_...` service key with the `dns:write` scope
+                        (CERULEAN_TOKEN is accepted as an alias)
+  CERULEAN_ZONE         the DNS zone to write into, default the registrable
+                        domain of MONARCH_DOMAIN (innotel.us)
+  TECHNITIUM_URL        alternative: Cerulean's Technitium HTTP API base, used
+                        only when the bridge is unset (+ TECHNITIUM_TOKEN, or
+                        TECHNITIUM_USER / TECHNITIUM_PASSWORD to log in). The
+                        console is kept off the LAN, so a remote host usually
+                        cannot reach it.
 
 Flags:  --dry-run    print the plan without touching NPM
         --skip-ssl   skip certificate creation (hosts without a cert)
@@ -52,13 +60,13 @@ The script is idempotent: existing proxy hosts are updated in place, and
 certificate issuance is only triggered when no matching wildcard cert exists.
 
 DNS: when NPM_FORWARD_HOST is an IP, the script points the subdomain at it in
-Cerulean's DNS plane (Technitium HTTP API - TECHNITIUM_URL plus
-TECHNITIUM_TOKEN, or TECHNITIUM_USER / TECHNITIUM_PASSWORD). A name that
-already resolves is left alone: Monarch's hosts are CNAMEs to the apex and
-Technitium refuses an A record where a CNAME exists, so this only ever adds
-the record for a newly listed subdomain. The legacy BIND/TSIG path
-(DNS_TSIG_*) is still read as a fallback and warns that Cerulean has moved to
-Technitium.
+Cerulean's DNS plane. The preferred path is Cerulean's service bridge
+(CERULEAN_API_URL + CERULEAN_SERVICE_KEY) - reachable from any host and scoped
+to `dns:write`, which is how a remote host writes records now that Technitium's
+console is kept off the LAN. The Technitium HTTP API (TECHNITIUM_URL) and the
+legacy BIND/TSIG path (DNS_TSIG_*) remain as fallbacks. A name that already
+resolves is left alone: Monarch's hosts are CNAMEs to the apex, so this only
+ever adds the record for a newly listed subdomain.
 """
 
 import argparse
@@ -486,10 +494,91 @@ class NpmClient:
 # ---------------------------------------------------------------------------
 # Dynamic DNS: Cerulean's Technitium HTTP API (the ecosystem's DNS plane)
 # ---------------------------------------------------------------------------
-# Cerulean owns DNS and replaced RFC2136/nsupdate/SSH+BIND with Technitium over
-# HTTP - "no SSH, no TSIG, no nsupdate" (cerulean docs/stack.md).
-# Monarch's A records go there. The legacy DNS_TSIG_* path below still works for
-# a host that runs its own BIND, and says so out loud when it is used.
+# Cerulean owns DNS and replaced RFC2136/nsupdate/SSH+BIND with the service
+# bridge - "no SSH, no TSIG, no nsupdate" (cerulean docs/stack.md).
+# Monarch's A records go through the bridge (`/api/service/dns/records` with a
+# `ceru_...` key scoped `dns:write`); the Technitium HTTP API and the legacy
+# DNS_TSIG_* path below are fallbacks.
+
+
+def zone_of(domain):
+    """The registrable zone of <domain>: a.b.innotel.us -> innotel.us."""
+    labels = [p for p in domain.strip(".").split(".") if p]
+    return ".".join(labels[-2:]) if len(labels) >= 2 else domain.strip(".")
+
+
+def cerulean_config():
+    """(url, token, zone) for Cerulean's service bridge, or None when unset.
+
+    Cerulean owns the DNS plane and its Technitium console is deliberately
+    bound off the LAN, so a remote host cannot reach the Technitium HTTP API.
+    The service bridge is the reachable, scoped way in - the same path every
+    other product uses: a `ceru_...` key carrying the `dns:write` scope.
+    """
+    url = env("CERULEAN_API_URL").rstrip("/")
+    if not url:
+        return None
+    token = env("CERULEAN_SERVICE_KEY") or env("CERULEAN_TOKEN")
+    if not token:
+        return None
+    zone = env("CERULEAN_ZONE") or zone_of(env("MONARCH_DOMAIN", "monarch.innotel.us"))
+    return url, token, zone
+
+
+def cerulean_api(url, token, path, params=None, method="GET", body=None):
+    """One Cerulean service-bridge call -> parsed JSON."""
+    query = f"?{urlencode(params)}" if params else ""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"{url}{path}{query}", data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def dns_upsert_cerulean(cfg, fqdn, ip, ttl=300, dry_run=False):
+    """Point <fqdn> at <ip> through Cerulean's service bridge.
+
+    Same rule as the Technitium path: a name that already resolves is LEFT
+    ALONE - Monarch's hosts are CNAMEs to the apex, which holds the A record -
+    so only a name with no record gets one.
+    """
+    url, token, zone = cfg
+    if dry_run:
+        print(f"  [dry-run] would DNS: {fqdn} A {ip} via Cerulean bridge {url} "
+              f"(zone {zone}; if it has no record yet)")
+        return True
+    try:
+        records = cerulean_api(url, token, "/api/service/dns/records",
+                               {"zone": zone})
+        existing = [r for r in records
+                    if str(r.get("name", "")).rstrip(".").lower() == fqdn.lower()]
+        if existing:
+            kinds = ", ".join(f"{r.get('type')} {r.get('value')}".strip()
+                              for r in existing)
+            print(f"  DNS: {fqdn} already resolves ({kinds}) - left as is")
+            return True
+        cerulean_api(url, token, "/api/service/dns/records", method="POST",
+                     body={"zone": zone, "type": "A", "name": fqdn,
+                           "value": ip, "ttl": ttl})
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read() or b"{}").get("error", "")
+        except (ValueError, OSError):
+            pass
+        if "CNAME" in str(detail).upper() or "in use" in str(detail).lower() \
+                or "exists" in str(detail).lower():
+            print(f"  DNS: {fqdn} already resolves - left as is")
+            return True
+        print(f"  ERROR: Cerulean refused {fqdn} -> {ip}: HTTP {exc.code} {detail}")
+        return False
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        print(f"  ERROR: Cerulean DNS update failed for {fqdn}: {exc}")
+        return False
+    print(f"  DNS: {fqdn} -> {ip} (A, TTL {ttl}) via Cerulean bridge ({zone})")
+    return True
 
 
 def technitium_login(url, user, password):
@@ -633,14 +722,15 @@ def credentials_ini(provider, credentials):
     return json.dumps(credentials)
 
 
-def dns_upsert(technitium, tsig, fqdn, ip, ttl=300, dry_run=False):
-    """Upsert the A record: Technitium first, legacy BIND/TSIG second."""
+def dns_upsert(cerulean, technitium, tsig, fqdn, ip, ttl=300, dry_run=False):
+    """Upsert the A record: Cerulean bridge, then Technitium, then TSIG."""
+    if cerulean:
+        return dns_upsert_cerulean(cerulean, fqdn, ip, ttl, dry_run)
     if technitium:
         return dns_upsert_technitium(technitium, fqdn, ip, ttl, dry_run)
     if tsig:
         print("  WARNING: using the legacy BIND/TSIG path - Cerulean's DNS plane "
-              "is Technitium (set TECHNITIUM_URL + TECHNITIUM_TOKEN or "
-              "TECHNITIUM_USER/PASSWORD)")
+              "is its service bridge (set CERULEAN_API_URL + CERULEAN_SERVICE_KEY)")
         return dns_upsert_a(tsig, fqdn, ip, ttl, dry_run)
     return False
 
@@ -704,25 +794,35 @@ def main():
     forward_mode = env("NPM_FORWARD_HOST", "container")
     cert_id = env("NPM_CERT_ID")
     tsig = tsig_config()
-    try:
-        technitium = technitium_config()
-    except (urllib.error.URLError, OSError, ValueError, RuntimeError) as exc:
-        print(f"  WARNING: Technitium DNS automation unavailable ({exc}) - "
-              "A records will not be written")
-        technitium = None
+    cerulean = cerulean_config()
+    technitium = None
+    if not cerulean:
+        # Only reach for the Technitium HTTP API when the bridge is not
+        # configured: the console is kept off the LAN, so a remote host cannot
+        # reach it and the login would fail on every run.
+        try:
+            technitium = technitium_config()
+        except (urllib.error.URLError, OSError, ValueError, RuntimeError) as exc:
+            print(f"  WARNING: Technitium DNS automation unavailable ({exc}) - "
+                  "A records will not be written")
+            technitium = None
 
     hosts, hosts_src = load_hosts(domain)
 
     print(f"Monarch -> Nginx Proxy Manager: {npm_url}")
     print(f"  domain: {domain}  ({len(hosts)} proxy hosts from {hosts_src})")
-    if technitium:
+    if cerulean:
+        print(f"  DNS: A records via Cerulean's service bridge {cerulean[0]} "
+              f"(zone {cerulean[2]})")
+    elif technitium:
         print(f"  DNS: A records via Technitium {technitium[0]}")
     elif tsig:
         print(f"  DNS: A records via the LEGACY BIND/TSIG path ({tsig['server']}) - "
-              "Cerulean's DNS plane is Technitium (set TECHNITIUM_URL + a token)")
+              "Cerulean's DNS plane is its service bridge (set CERULEAN_API_URL + "
+              "CERULEAN_SERVICE_KEY)")
     else:
         print("  DNS: not configured - A records are left untouched "
-              "(set TECHNITIUM_URL + TECHNITIUM_TOKEN or TECHNITIUM_USER/PASSWORD)")
+              "(set CERULEAN_API_URL + CERULEAN_SERVICE_KEY)")
     # No gate is written anywhere: this stack fronts the apps that have no OIDC
     # of their own with oauth2-proxy SSO gateways, and the apps do their own
     # Authentik OIDC where they can. See the npm repo's docs/stack.md.
@@ -928,7 +1028,7 @@ def main():
         # Keep DNS in sync: write the A record for the subdomain when the
         # forward target is an IP and a DNS mechanism is configured.
         if is_ip_address(forward_host):
-            dns_upsert(technitium, tsig, domain_name, forward_host,
+            dns_upsert(cerulean, technitium, tsig, domain_name, forward_host,
                        dry_run=args.dry_run)
 
     print("")

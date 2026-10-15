@@ -490,12 +490,13 @@ apex A record:
 monarch.innotel.us     A   <this host's public IP>
 ```
 
-#### DNS records (Cerulean's Technitium)
+#### DNS records (Cerulean's service bridge)
 
 **Cerulean owns the DNS plane and it is Technitium over HTTP** — "no SSH, no
 TSIG, no nsupdate" (`cerulean` → docs/stack.md). When
-`NPM_FORWARD_HOST` is an IP and `TECHNITIUM_URL` is set, `npm-proxy-hosts.py`
-keeps records in sync itself:
+`NPM_FORWARD_HOST` is an IP and `CERULEAN_API_URL` + `CERULEAN_SERVICE_KEY`
+are set, `npm-proxy-hosts.py` keeps records in sync itself through Cerulean's
+service bridge:
 
 * a subdomain with **no** record gets an `A` (TTL 300) — the case this exists
   for, a newly added line in `npm-hosts.conf`;
@@ -504,10 +505,19 @@ keeps records in sync itself:
   the A record lives, and Technitium refuses an `A` alongside a `CNAME` — so the
   script reports `already resolves (...) - left as is` rather than fighting it.
 
-Auth: `TECHNITIUM_TOKEN` (a persistent API token) wins, else
-`TECHNITIUM_USER`/`TECHNITIUM_PASSWORD` logs in per run. Point the URL at the
-LAN address of the Technitium Cerulean runs (`http://192.168.1.46:5380` on this
-host), never at a container name — the script runs on the host.
+Auth: a `ceru_...` service key carrying the `dns:write` scope
+(`CERULEAN_SERVICE_KEY`), minted on Cerulean by a platform admin:
+
+```
+POST /api/service/keys {"name":"monarch-dns","scopes":["dns:write"]}
+```
+
+Point `CERULEAN_API_URL` at Cerulean's app (`http://192.168.1.71:3003`) and
+`CERULEAN_ZONE` at the zone that owns the names (`innotel.us`). This is the
+path every other product uses. Cerulean's Technitium console is bound off the
+LAN (`127.0.0.1` + docker0), so the LAN address this section used to name
+cannot be reached from another host; `TECHNITIUM_URL`/`TECHNITIUM_TOKEN` and
+the legacy `DNS_TSIG_*` path remain only as fallbacks.
 
 The legacy `DNS_TSIG_*` / `nsupdate` path still works for a host that runs its
 own BIND, and prints a warning naming Technitium when it is used. The old

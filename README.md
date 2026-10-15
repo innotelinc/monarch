@@ -90,9 +90,10 @@ Re-run `./setup.sh` any time you change `.env` or `scripts/npm-hosts.conf` — p
 reconciled in place and the certificate is reused.
 
 **DNS prerequisite (one-time):** point a wildcard + apex record at this host's public IP
-(`*.monarch.innotel.us` and `monarch.innotel.us`), or set `TECHNITIUM_URL` (+ a token, or
-user/password) so the NPM script writes records itself through **Cerulean's Technitium** —
-new subdomains get an A record, and a name that already resolves is left as is. The old `ARR_USERNAME`/`ARR_PASSWORD` variables are
+(`*.monarch.innotel.us` and `monarch.innotel.us`), or set `CERULEAN_API_URL` plus a
+`ceru_...` service key (`CERULEAN_SERVICE_KEY`, scope `dns:write`) so the NPM script writes
+records itself through **Cerulean's service bridge** — new subdomains get an A record, and a
+name that already resolves is left as is. The old `ARR_USERNAME`/`ARR_PASSWORD` variables are
 `MONARCH_USERNAME`/`MONARCH_PASSWORD` now — regenerate an existing `.env` from `.env.sample`.
 
 Everything after boot is **wired for you**: one-shot `monarch-seed` and `monarch-init`
