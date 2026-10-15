@@ -2050,6 +2050,77 @@ something set `USER`/`PASS` on the `transmission` service; unset them, recreate
 the container, and re-run `monarch-init` (`configure_transmission` asserts the
 posture). A second login behind Cerulean is the exact failure this avoids.
 
+#### Why the Homarr image is pinned by digest, not `:latest`
+
+`watchtower` runs on this host every six hours with `--cleanup`, so a `:latest`
+tag means the dashboard's build can be replaced — and the previous image deleted
+— without anyone deciding to. Every rotation changes the hash of every
+`/_next/static` chunk, and a browser still holding the old page then asks for
+chunks that no longer exist: the widget queries never run and the page lands on
+Next.js's *"This page couldn't load — an unexpected error occurred"* boundary,
+which looks exactly like a real server error and does not clear on a soft reload.
+
+The image reference therefore names a digest, the same posture `jellyfin`
+already takes; set `HOMARR_IMAGE` to move to a new build deliberately instead of
+by surprise. (The image's `sw.js` is a 160-byte no-op that caches nothing, so it
+neither causes nor rescues this.)
+
+#### The dashboard's language cannot be set to one Homarr does not bundle
+
+The UI language is a per-browser cookie (`homarr.locale`), and its default comes
+from `serverSetting.culture` → `{"defaultLocale":"en"}` in Homarr's SQLite. So
+switching the board's language is that one row (site-wide) or the picker in a
+user's settings (per user) — there is no file to drop in for either.
+
+The dictionaries are **compiled into the image**: the build carries 33 locales
+(`ca cn cr cs da de el en es et fi fr he hr hu it ja ko lt lv nl no pl pt ro ru
+sk sl sv tr uk vi zh`) as bundled chunks, and any other value silently falls
+back to English. **`fa` (Persian) and `ar` (Arabic) are not in that set**, so
+they cannot be enabled by configuration at all — adding one means building a
+translation into a derived image, not editing anything on the host.
+
+#### Redis logs "Memory overcommit must be enabled!"
+
+Redis runs inside the `homarr` container (Homarr ships it and starts it on
+`:6379`), and on every start it logs *"Memory overcommit must be enabled! Without
+it, a background save or replication may fail under low memory condition."*
+
+`vm.overcommit_memory` is a **global** kernel parameter — it is not namespaced —
+so the container cannot set it. `sysctl -w vm.overcommit_memory=1` inside
+`monarch` fails with *"permission denied on key"*, and an `/etc/sysctl.d` file
+written there is inert. The setting belongs on the **Incus host that runs this
+container** — `i1`, `192.168.1.51` — where the platform stack tracks it:
+
+```bash
+# on i1
+install -m 0644 sysctl.d/60-redis-overcommit.conf /etc/sysctl.d/60-redis-overcommit.conf
+sysctl -p /etc/sysctl.d/60-redis-overcommit.conf      # -> vm.overcommit_memory = 1
+```
+
+That file lives at `ips/hosts/i1/sysctl.d/60-redis-overcommit.conf`. A value of
+`1` lets the kernel satisfy allocations beyond the commit limit, which is what
+Redis asks for so a background save cannot fail under memory pressure. Nothing in
+the dashboard breaks while it is `0` — the log line on every start is the whole
+symptom — and `drift-check` reports the value as `infra: vm.overcommit_memory`.
+
+#### `Failed to read integration cache generation` right after a restart
+
+Each `homarr` start logs this warning once per integration, all inside the same
+few milliseconds, next to `Redis connection readiness timed out`. Homarr runs
+Redis inside its own container and reads the integration caches through it, so
+the first reads race Redis's own start-up; the cache wrapper logs its
+`errorMessage` whenever a read throws, which is exactly what happens in that
+window. Once the first connection succeeds the warnings stop and do not return
+until the next restart — a burst at `T+6s` and then nothing.
+
+Check that before treating it as a fault: compare the warning timestamps with the
+container's start time (`docker inspect -f '{{.State.StartedAt}}' homarr`) and
+look at Redis itself (`redis-cli ping` inside the container, plus a non-zero
+`dbsize` — the app writes its own `integration-cache:payload:*` and
+`board-widget-queries-v1:*` keys). It is not a signal that the dashboard is
+degraded, and it cannot be silenced from configuration without patching the
+image.
+
 #### The dashboard (Homarr) shows a dead link, a duplicate, or the wrong layout
 Homarr v1 keeps boards in SQLite (`/docker/appdata/homarr/appdata/db/db.sqlite`),
 and `scripts/seed-homarr-board.py` **is** the design: the `DESIGN` list in it
@@ -2323,3 +2394,26 @@ and its `settings.json`:
    volumes or appdata, so this one is a hand step and stays documented here.
 4. Authentik: drop the `qbittorrent` application/provider if the media client
    was one client with a redirect list — the callback above is the whole change.
+
+## Repository access from the deployment host
+
+This host pulls and pushes its own repositories over **SSH with per-repository
+deploy keys**. There is no stored personal access token and no HTTPS credential
+helper on the box:
+
+| Repository | Remote | Key |
+|---|---|---|
+| `innotelinc/monarch` | `git@github.com:innotelinc/monarch.git` | `/root/.ssh/github_deploy` |
+| `innotelinc/innotel-platform-stack` | `git@github-ips:innotelinc/innotel-platform-stack.git` | `/root/.ssh/github_deploy_ips` |
+
+GitHub does not allow one deploy key to serve two repositories, which is why the
+platform stack has its own key and the `github-ips` alias in `/root/.ssh/config`
+(`HostName github.com` plus `IdentitiesOnly yes`) instead of a plain `github.com`
+remote. Both keys are registered **with write access**, because this host pushes
+the commits it makes; revoke them under each repository's *Settings → Deploy
+keys* if that stops being true.
+
+To rotate a key: `ssh-keygen -t ed25519 -f /root/.ssh/<name> -N ""`, add the
+`.pub` under *Settings → Deploy keys* with *Allow write access*, and leave
+`~/.ssh/config` pointing at it. `ssh -T git@github.com` (or `git@github-ips`)
+answers `Hi innotelinc/<repo>!` when the key is right.

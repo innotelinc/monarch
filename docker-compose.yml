@@ -268,7 +268,13 @@ services:
     container_name: homarr
     # Homarr v1 (homarr-labs rewrite; the old ajnart/homarr v0.16 line is
     # archived). v1 keeps everything under a single /appdata mount.
-    image: ghcr.io/homarr-labs/homarr:latest
+    # Pinned by digest, not `:latest`. watchtower runs every 6 h with --cleanup
+    # on this host, and a rotation deletes the old image and changes every
+    # /_next/static chunk hash - a browser still holding the previous page then
+    # asks for chunks that no longer exist and lands on the "This page couldn't
+    # load" error boundary. Set HOMARR_IMAGE to move deliberately instead
+    # (docs/operations.md, "Why the Homarr image is pinned by digest").
+    image: ${HOMARR_IMAGE:-ghcr.io/homarr-labs/homarr@sha256:025471efe0735b6bb89953ea4e141c984a171c1781bc8ca404163d3c26d0e26d}
     ports:
       - 7575:7575
     environment:

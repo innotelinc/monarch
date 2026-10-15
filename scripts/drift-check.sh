@@ -1484,6 +1484,17 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     fi
     say "ok: infra container $cname (restarts=$rc)"
   done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo transmission; echo jellyfin; echo jellyseerr; echo bazarr; echo homarr; echo nginx-proxy-manager; echo authentik-ldap; } | sort -u)
+
+  # 3. Memory overcommit. Redis (inside homarr) asks the kernel for it and logs
+  #    "Memory overcommit must be enabled!" on every start without it. The value
+  #    is global and not namespaced, so it cannot be set from this container:
+  #    what is read here is the Incus host's (i1). See docs/operations.md.
+  oc=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo "")
+  if [ "$oc" = "1" ]; then
+    say "ok: infra host vm.overcommit_memory=1 (redis background saves)"
+  else
+    fail "infra: host vm.overcommit_memory=${oc:-unknown} - redis cannot bgsave; set it on i1 (docs/operations.md)"
+  fi
 fi
 
 rm -f /tmp/drift-body.$$
