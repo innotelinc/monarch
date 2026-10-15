@@ -239,6 +239,12 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **The LDAP outpost tracks the Authentik server at `2026.8.4`.** Cerulean's
+  shared Authentik moved to `2026.8.4`, and `authentik-ldap` is a client of that
+  server, so it has to sit on the same version line: `ghcr.io/goauthentik/ldap`
+  moves from `2026.8.3` to `2026.8.4` in both files that carry it
+  (`docker-compose.yml` and the `ips` platform manifest). The server had been
+  reporting `outpost_outdated: true` while the two disagreed.
 - **Nothing listening on Jellyfin is its own situation, and it is waited for.**
   The `503` grace covers a server that is already listening and still starting; a
   *recreate* is not that. Watchtower pulled a new Jellyfin image and recreated the
