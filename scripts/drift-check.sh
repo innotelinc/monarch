@@ -322,6 +322,12 @@ FAIL_LINES=()
 # `npm-proxy-hosts.py` (the reconciler), NOT monarch-init — tracked here because
 # the two are fixed by different programs.
 NPM_DRIFT=0
+# Set when the LDAP outpost is running but cannot complete the bind flow because
+# it reaches Authentik on a host outside Authentik's session-cookie domain. The
+# healer is scripts/ldap-outpost-host.py: it pins the outpost to a name under
+# that domain and recreates it. This is not a bind credential, so monarch-init
+# (which only pins the password) cannot repair it.
+LDAP_HOST_DRIFT=0
 # There is deliberately no flag for the model-gateway check below: nothing in the
 # heal can fix a refused key (only a person with a new one can), so it is not a
 # thing for the heal to react to. It is reported, it counts as a failure, and it
@@ -948,6 +954,10 @@ ldap_path_out=$($ldap_probe 2>&1)
 ldap_path_code=$?
 if [ "$ldap_path_code" -eq 0 ]; then
   say "ok: Jellyfin's LDAP login path works end to end (outpost token + bind credential)"
+elif [ "$ldap_path_code" -eq 4 ]; then
+  LDAP_HOST_DRIFT=1
+  fail "jellyfin: the LDAP outpost cannot hold Authentik's bind-flow session - it reaches Authentik on a host outside Authentik's session-cookie domain, so the flow restarts and every bind returns LDAP 49 (HTTP 500 on the login form). 'scripts/drift-check.sh --heal' repoints it at a name under that domain and recreates it; by hand: python3 scripts/ldap-outpost-host.py --fix"
+  printf '%s\n' "$ldap_path_out" | indent >&2
 elif [ "$ldap_path_code" -eq 1 ]; then
   ldap_state=$(docker inspect authentik-ldap --format '{{.State.Status}}' 2>/dev/null || echo "")
   ldap_health=$(docker inspect authentik-ldap --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || echo "")
@@ -976,7 +986,20 @@ elif [ "$ldap_path_code" -eq 1 ]; then
     printf '%s\n' "$ldap_path_out" | indent >&2
   fi
 else
-  fail "jellyfin: the LDAP login path is broken (verify-ldap.py exit $ldap_path_code) - every Cerulean identity gets HTTP 500 from the login form; see docs/operations.md 'A Cerulean identity cannot sign in'"
+  # Exit 2 is "the outpost answered and refused". Usually that is the bind
+  # credential, but the outpost logs `exceeded stage recursion depth` when the
+  # failure is the session-cookie domain (the flow restarts between the
+  # challenge and the credentials). That signature is not a credential, so it
+  # gets the host repair instead of sending an operator to rotate a working
+  # token. The log is only read for this finding; a refused bind with no such
+  # line keeps the credential message below.
+  if docker logs authentik-ldap --since 10m 2>&1 \
+      | grep -q 'exceeded stage recursion depth'; then
+    LDAP_HOST_DRIFT=1
+    fail "jellyfin: the LDAP outpost is running but its bind flow keeps restarting ('exceeded stage recursion depth') - it reaches Authentik on a host outside Authentik's session-cookie domain, so every bind returns LDAP 49 (HTTP 500 on the login form). 'scripts/drift-check.sh --heal' repoints it and recreates it; by hand: python3 scripts/ldap-outpost-host.py --fix"
+  else
+    fail "jellyfin: the LDAP login path is broken (verify-ldap.py exit $ldap_path_code) - every Cerulean identity gets HTTP 500 from the login form; see docs/operations.md 'A Cerulean identity cannot sign in'"
+  fi
   printf '%s\n' "$ldap_path_out" | indent >&2
 fi
 
@@ -1622,6 +1645,15 @@ if [ "$FAILS" -gt 0 ] && [ "$HEAL" -eq 1 ]; then
         fi
       fi
     fi
+    # The LDAP outpost's session-cookie mismatch is not a credential and not
+    # something monarch-init can see: it is the outpost's AUTHENTIK_HOST. Repair
+    # it before init/compose so the re-check talks to an outpost that can hold
+    # the flow. --no-verify leaves the verdict to the post-heal check below.
+    if [ "$LDAP_HOST_DRIFT" -eq 1 ]; then
+      echo "drift-check: the LDAP outpost cannot hold Authentik's flow session - reconciling its host..." >&2
+      python3 scripts/ldap-outpost-host.py --fix --no-verify >&2 \
+        || echo "drift-check: LDAP outpost host repair failed (see scripts/ldap-outpost-host.py --fix)" >&2
+    fi
     # monarch-init only pins credentials; it does not bring a stopped or exited
     # service back, and the heal used to be nothing but that re-run. So a
     # service that was merely down - the LDAP outpost after a daemon restart,
@@ -1877,6 +1909,11 @@ echo "drift-check: all live-stack invariants OK"
 # to zero with it.
 if [ "$STAGED" -eq 0 ] && [ "${HEAL_COUNT:-0}" -gt 0 ] && [ -d "$STATE_DIR" ]; then
   echo "$heal_last 0 0" > "$HEAL_STATE" 2>/dev/null || true
+  # The file is what the *next* run reads, so this run's verdict has to agree
+  # with it: a heal that just re-checked clean is a streak of zero, and a
+  # recorded 1 makes `--status` and status.json report a survived attempt that
+  # did not survive.
+  HEAL_COUNT=0
 fi
 write_status ok
 exit 0

@@ -33,7 +33,8 @@ a missing reply is *unreachable* (exit 1) and a result code is a *credential*
 
 Exit codes: 0 the login path works; 1 the outpost is unreachable (including "no
 reply within the wait"); 2 the bind was refused; 3 the search failed or returned
-nobody.
+nobody; 4 the outpost's AUTHENTIK_HOST is outside Authentik's session-cookie
+domain, so the bind flow restarts forever and no credential can succeed.
 """
 
 from __future__ import annotations
@@ -46,6 +47,9 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -202,6 +206,68 @@ def _container_host() -> str | None:
     return None
 
 
+def _container_env(name: str, key: str) -> str | None:
+    """One environment value from a container, or None when docker cannot say."""
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", name, "--format",
+             "{{range .Config.Env}}{{println .}}{{end}}"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        name_, _, value = line.partition("=")
+        if name_ == key:
+            return value.strip()
+    return None
+
+
+def _session_cookie_domain(base_url: str, flow_slug: str, timeout: float = 5.0) -> str | None:
+    """The Domain= Authentik scopes `authentik_session` to, or None if unknown.
+
+    This is a preflight, not a login: it asks for the flow's first challenge and
+    reads the cookie the server sets. A host-only cookie returns the empty
+    string (every host can hold it); a server that cannot be reached returns
+    None and the bind is attempted as before - a check that cannot look must not
+    invent a finding.
+    """
+    url = f"{base_url.rstrip('/')}/api/v3/flows/executor/{flow_slug}/?query="
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            headers = response.headers.get_all("Set-Cookie") or []
+    except urllib.error.HTTPError as error:
+        headers = error.headers.get_all("Set-Cookie") if error.headers else []
+    except (OSError, ValueError):
+        return None
+    for header in headers:
+        name, _, rest = header.partition("=")
+        if name.strip().lower() != "authentik_session":
+            continue
+        for attribute in rest.split(";")[1:]:
+            key, _, value = attribute.strip().partition("=")
+            if key.lower() == "domain":
+                return value.strip().strip('"').lstrip(".")
+        return ""                      # host-only cookie: holds on any host
+    return None
+
+
+def _host_from_url(url: str) -> str:
+    """The hostname/address in a URL, or the value itself when it is not a URL."""
+    parsed = urllib.parse.urlsplit(url if "//" in url else f"//{url}")
+    return (parsed.hostname or "").strip().lower().rstrip(".")
+
+
+def _host_matches_cookie_domain(host: str, domain: str) -> bool:
+    """Whether a request to `host` will receive a cookie scoped to `domain`."""
+    host = host.lower().rstrip(".")
+    domain = domain.lower().lstrip(".").rstrip(".")
+    if not domain:
+        return True                     # host-only cookie
+    return host == domain or host.endswith("." + domain)
+
+
 def main(argv: list[str] | None = None) -> int:
     env = load_env(os.path.join(REPO_ROOT, ".env"))
     parser = argparse.ArgumentParser(description="Verify the Authentik LDAP outpost Jellyfin logs in through.")
@@ -245,6 +311,39 @@ def main(argv: list[str] | None = None) -> int:
         print("FAIL config: AUTHENTIK_LDAP_BIND_TOKEN is empty in .env.", file=sys.stderr)
         print("     fix: set it (no trailing comment) and re-run monarch-init.", file=sys.stderr)
         return 2
+
+    # The outpost runs the bind flow as two HTTP requests. Authentik ties them
+    # together with an `authentik_session` cookie scoped to its public domain
+    # (`.innotel.us` here). A cookie for that domain is never sent to an IP, so
+    # an outpost pointed at the LAN address loses the flow between the challenge
+    # and the credentials, restarts it, and logs `exceeded stage recursion
+    # depth`; every bind then returns 49 for the right password and the wrong one
+    # alike. That failure looks exactly like a drifted bind token, and the fix it
+    # used to print rotated a working secret - so say what it is and stop.
+    authentik_base = setting(env, "AUTHENTIK_BASE_URL")
+    # Judge a *running* outpost only. Falling back to AUTHENTIK_BASE_URL would
+    # report a config finding on a host where the container does not exist yet
+    # (a fresh stack, or after `docker compose down`) even though the compose
+    # file would start it on a name under the cookie domain; the reachability
+    # check below already reports an outpost that is not there.
+    outpost_auth = (os.environ.get("AUTHENTIK_HOST")
+                    or _container_env("authentik-ldap", "AUTHENTIK_HOST"))
+    if authentik_base and outpost_auth:
+        flow_slug = setting(env, "AUTHENTIK_LDAP_FLOW", "default-authentication-flow")
+        cookie_domain = _session_cookie_domain(authentik_base, flow_slug)
+        outpost_host = _host_from_url(outpost_auth)
+        if cookie_domain and outpost_host and not _host_matches_cookie_domain(
+                outpost_host, cookie_domain):
+            print(f"FAIL config: authentik-ldap reaches Authentik at {outpost_auth}, "
+                  f"but Authentik scopes its session cookie to .{cookie_domain}.", file=sys.stderr)
+            print("     That cookie is never sent to this host, so the bind flow restarts", file=sys.stderr)
+            print("     between the challenge and the credentials and loops until the outpost", file=sys.stderr)
+            print("     logs 'exceeded stage recursion depth'; every bind returns 49 regardless", file=sys.stderr)
+            print("     of the password. Point AUTHENTIK_HOST at a name under that domain", file=sys.stderr)
+            print("     (docker-compose.yml defaults to auth.cerulean.innotel.us with an", file=sys.stderr)
+            print("     extra_hosts entry) and recreate the outpost, or run:", file=sys.stderr)
+            print("       python3 scripts/ldap-outpost-host.py --fix", file=sys.stderr)
+            return 4
 
     print(f"Outpost {host}:{port}  bind {bind_dn}  group {bind_group}")
 

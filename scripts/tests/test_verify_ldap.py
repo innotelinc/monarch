@@ -21,8 +21,10 @@ anywhere — no Authentik, no container.
 """
 from __future__ import annotations
 
+import http.server
 import importlib.util
 import io
+import os
 import socket
 import sys
 import threading
@@ -31,6 +33,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "verify-ldap.py"
 
@@ -124,6 +127,37 @@ class FakeOutpost:
 
     def stop(self):
         self.socket.close()
+
+
+class FakeAuthentik:
+    """Just enough of the flow executor: one challenge and its session cookie."""
+
+    def __init__(self, domain: str = ".innotel.us"):
+        self.requests = 0
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                fake.requests += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header(
+                    "Set-Cookie",
+                    f"authentik_session=stub; Domain={domain}; HttpOnly; Path=/; SameSite=Lax")
+                self.end_headers()
+                self.wfile.write(b'{"component": "ak-stage-identification"}')
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 class VerifyLdapTests(unittest.TestCase):
@@ -232,6 +266,54 @@ class VerifyLdapTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("AUTHENTIK_LDAP_BIND_TOKEN is empty", err)
         self.assertEqual(outpost.connections, 0)
+
+    # ── the flow session the outpost cannot hold ───────────────────────────
+
+    def test_an_ip_outpost_is_exit_4_before_a_bind_is_attempted(self):
+        # The 2026-10-19 outage: Authentik scopes authentik_session to
+        # .innotel.us, the outpost dials 192.168.1.71, so the flow restarts and
+        # every bind returns 49. That is not a credential to rotate.
+        authentik = FakeAuthentik()
+        self.addCleanup(authentik.stop)
+        with open(self.env, "a", encoding="utf-8") as fh:
+            fh.write(f"AUTHENTIK_BASE_URL=http://127.0.0.1:{authentik.port}\n")
+        outpost = self.start()
+        with patch.dict(os.environ, {"AUTHENTIK_HOST": "http://192.168.1.71:9000"}):
+            code, _, err = self.run_script("--host", outpost.host, "--port", str(outpost.port))
+        self.assertEqual(code, 4, err)
+        self.assertIn("session cookie", err)
+        self.assertIn(".innotel.us", err)
+        self.assertIn("ldap-outpost-host.py --fix", err)
+        self.assertEqual(outpost.connections, 0)
+        self.assertEqual(authentik.requests, 1)
+
+    def test_an_absent_outpost_is_not_judged_on_the_cookie(self):
+        # A fresh stack has no container to inspect yet; compose will start the
+        # outpost on a name under the cookie domain, so the config finding must
+        # not be invented before the outpost exists. The bind still runs.
+        authentik = FakeAuthentik()
+        self.addCleanup(authentik.stop)
+        with open(self.env, "a", encoding="utf-8") as fh:
+            fh.write(f"AUTHENTIK_BASE_URL=http://127.0.0.1:{authentik.port}\n")
+        outpost = self.start()
+        with patch.dict(os.environ, {"AUTHENTIK_HOST": ""}), \
+                patch.object(ldap, "_container_env", return_value=None):
+            code, out, err = self.run_script("--host", outpost.host, "--port", str(outpost.port))
+        self.assertEqual(code, 0, err)
+        self.assertIn("ok bind: result code 0", out)
+        self.assertEqual(authentik.requests, 0)
+
+    def test_a_name_inside_the_cookie_domain_reaches_the_bind(self):
+        authentik = FakeAuthentik()
+        self.addCleanup(authentik.stop)
+        with open(self.env, "a", encoding="utf-8") as fh:
+            fh.write(f"AUTHENTIK_BASE_URL=http://127.0.0.1:{authentik.port}\n")
+        outpost = self.start()
+        with patch.dict(os.environ,
+                        {"AUTHENTIK_HOST": "http://auth.cerulean.innotel.us:9000"}):
+            code, out, _ = self.run_script("--host", outpost.host, "--port", str(outpost.port))
+        self.assertEqual(code, 0, out)
+        self.assertIn("ok bind: result code 0", out)
 
 
 if __name__ == "__main__":

@@ -702,7 +702,24 @@ answers `500` for a correct password exactly as it does for a wrong one:
 |---------|-------|-----|
 | `authentik-ldap` unhealthy; logs repeat `403 Forbidden (Token invalid/expired)` | The outpost's API token in the container no longer matches the key Authentik holds for the `jellyfin-ldap` outpost | Set the outpost token key to the value in `.env`, then recreate the container |
 | Outpost healthy but bind fails with LDAP `49` (`invalidCredentials`) | `AUTHENTIK_LDAP_BIND_TOKEN` and the bind user's password in Authentik have drifted | `set_password` the bind user to the `.env` value, re-write Jellyfin's `LDAP-Auth.xml`, restart Jellyfin |
+| Outpost healthy, every bind is LDAP `49`, and its log repeats `failed to execute flow … exceeded stage recursion depth` | The outpost reaches Authentik on a host outside Authentik's session-cookie domain. The bind flow's `authentik_session` cookie is scoped to `.innotel.us`; a cookie for that domain is never sent to `192.168.1.71`, so the challenge and the credentials land in different flow plans and the outpost restarts the flow until the recursion limit | Point `AUTHENTIK_HOST` at a name under the cookie domain, pinned to the LAN IP (`AUTHENTIK_LDAP_AUTHORITY` / `AUTHENTIK_LDAP_AUTHORITY_IP`; the compose default is `auth.cerulean.innotel.us`). `python3 scripts/ldap-outpost-host.py --fix` does it and recreates the outpost; `drift-check --heal` runs the same repair |
 | Log shows `LDAP-Auth, Version=23…` **and** `…Version=24…` with `InvalidCastException: …PluginConfiguration cannot be cast to …PluginConfiguration` | Two plugin folders hold `LDAP-Auth.dll`. Jellyfin loads both, and the plugin's own config type is cast across two load contexts, so *every* authentication throws — 500 for the right password and the wrong one alike | Retire the older folder (`.superseded-<date>`) so one copy remains, then restart Jellyfin |
+
+**A bind can fail for a reason that is not the bind credential.** The outpost
+runs a bind as a short Authentik flow (GET the identification challenge, POST the
+DN and password), and Authentik keeps that flow in an `authentik_session` cookie
+scoped to its public cookie domain — `.innotel.us` here. A cookie for that domain
+is never sent to `192.168.1.71`, so an outpost pointed at the LAN address loses
+the flow between the two requests, starts it again, and repeats until it logs
+`exceeded stage recursion depth`. The LDAP client only sees result code `49`, so
+this looks exactly like a drifted bind password; rotating the token cannot fix
+it. The outpost must use a *name* under the cookie domain, pinned to the server's
+LAN address with an `extra_hosts` entry. `docker-compose.yml` defaults to
+`auth.cerulean.innotel.us` + `AUTHENTIK_LDAP_AUTHORITY_IP`; `verify-ldap.py`
+reports this as `exit 4` (not a credential), and `scripts/ldap-outpost-host.py
+--fix` rewrites the two `.env` keys and recreates the outpost. `drift-check
+--heal` runs that repair for an `exit 4` or for a `49` with the recursion line in
+the outpost log, so the next timer tick clears it without a person.
 
 **An HTTP 500 also arrives through Seerr**, whose Jellyfin sign-in passes
 Jellyfin's status straight through as its own: `[Jellyfin API]: Something went
@@ -2168,8 +2185,9 @@ See [When a Cerulean identity cannot sign in](#when-a-cerulean-identity-cannot-s
 — three pieces have to agree with Authentik (the outpost's API token, the bind
 credential, and one copy of the LDAP plugin), and `python3 scripts/verify-ldap.py`
 tells them apart (`exit 1` unreachable, `2` bind refused, `3` search found
-nobody). `scripts/drift-check.sh` runs it, so the failure is reported before a
-subscriber finds it.
+nobody, `4` the outpost cannot hold the flow's session cookie). `scripts/drift-check.sh`
+runs it, so the failure is reported before a subscriber finds it; the `exit 4`
+case is repaired by `scripts/ldap-outpost-host.py --fix`, which the heal runs.
 
 The plugin *build* is `scripts/jellyfin-plugin-pin.py`'s job now, including the
 two-copies case: it counts the folders carrying each assembly, so v23 installed

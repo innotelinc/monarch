@@ -625,14 +625,25 @@ services:
   # AUTHENTIK_TOKEN is the outpost API token monarch-init
   # pins in Authentik (AUTHENTIK_LDAP_TOKEN); the bind user the plugin binds
   # with is provisioned by monarch-init too (password = AUTHENTIK_LDAP_BIND_TOKEN).
+  #
+  # AUTHENTIK_HOST is deliberately NOT AUTHENTIK_BASE_URL. Authentik ties a bind
+  # flow to an `authentik_session` cookie scoped to its public cookie domain
+  # (`.innotel.us` here). A cookie for that domain is never sent to an IP, so an
+  # outpost pointed at the LAN address loses the flow between the challenge and
+  # the credentials, restarts it, and loops until the outpost logs `exceeded
+  # stage recursion depth` and every bind returns LDAP 49 - for the right password
+  # and the wrong one alike. Name the server under that cookie domain and pin the
+  # name to the LAN address here; monarch-init keeps using AUTHENTIK_BASE_URL.
   authentik-ldap:
     <<: *common-keys
     container_name: authentik-ldap
     image: ghcr.io/goauthentik/ldap:2026.8.4
     environment:
-      AUTHENTIK_HOST: ${AUTHENTIK_BASE_URL}
-      AUTHENTIK_INSECURE: "true"          # AUTHENTIK_BASE_URL is plain http on the LAN
+      AUTHENTIK_HOST: http://${AUTHENTIK_LDAP_AUTHORITY:-auth.cerulean.innotel.us}:${AUTHENTIK_LDAP_AUTHORITY_PORT:-9000}
+      AUTHENTIK_INSECURE: "true"          # the authority is plain http on the LAN
       AUTHENTIK_TOKEN: ${AUTHENTIK_LDAP_TOKEN:-ak-ldap-outpost-2026}
+    extra_hosts:
+      - "${AUTHENTIK_LDAP_AUTHORITY:-auth.cerulean.innotel.us}:${AUTHENTIK_LDAP_AUTHORITY_IP:-192.168.1.71}"
     depends_on:
       - jellyfin
 

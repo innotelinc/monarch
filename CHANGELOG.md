@@ -239,6 +239,25 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **A Cerulean identity can sign in again: the LDAP outpost was talking to
+  Authentik on the wrong host.** The bind flow is two requests (the
+  identification challenge, then the DN and password), and Authentik ties them
+  together with an `authentik_session` cookie scoped to `.innotel.us`. The
+  outpost's `AUTHENTIK_HOST` was the LAN address, and a cookie for that domain is
+  never sent to `192.168.1.71`, so the flow restarted between the two requests and
+  looped until the outpost logged `exceeded stage recursion depth`; every bind
+  returned LDAP `49`, which reads exactly like a drifted bind password. Jellyfin
+  turned that into HTTP `500` on the login form for the right password and the
+  wrong one alike. `authentik-ldap` now reaches Authentik as
+  `auth.cerulean.innotel.us`, pinned to the LAN address with an `extra_hosts`
+  entry, and the three keys that decide it are in `.env` and both sample files.
+  `verify-ldap.py` reads the cookie domain from the server before it binds and
+  reports the mismatch as its own exit `4` instead of a credential, and
+  `scripts/ldap-outpost-host.py` is the check and the repair (`--fix` rewrites
+  `.env` from a backup, recreates the outpost, and re-runs the bind).
+  `drift-check --heal` runs that repair for an exit `4` or a `49` whose outpost log
+  carries the recursion line, so the failure that used to need a person clears on
+  the next tick.
 - **The LDAP outpost tracks the Authentik server at `2026.8.4`.** Cerulean's
   shared Authentik moved to `2026.8.4`, and `authentik-ldap` is a client of that
   server, so it has to sit on the same version line: `ghcr.io/goauthentik/ldap`
