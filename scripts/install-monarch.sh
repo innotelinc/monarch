@@ -53,13 +53,21 @@ is_live_session() {
 }
 
 install_docker() {
+  # sqlite3 is only a convenience for inspecting the Live TV monitor's state,
+  # but the monitor's documented commands use it and an operator should not have
+  # to discover the missing CLI while a channel is down. Install it even when
+  # Docker is already present.
+  if ! command -v sqlite3 >/dev/null 2>&1 && \
+     command -v apt-get >/dev/null 2>&1 && [ "${MONARCH_ALLOW_APT:-1}" = "1" ]; then
+    $SUDO apt-get install -y sqlite3 2>/dev/null || true
+  fi
   command -v docker >/dev/null 2>&1 && return 0
   if command -v apt-get >/dev/null 2>&1 && [ "${MONARCH_ALLOW_APT:-1}" = "1" ]; then
     $SUDO apt-get update
     # docker-compose-v2 is the Ubuntu-archive plugin; docker-compose-plugin is
     # the Docker-repo name. Try both so either distro works.
-    $SUDO apt-get install -y docker.io docker-compose-v2 curl rsync openssl python3 2>/dev/null || \
-      $SUDO apt-get install -y docker.io docker-compose-plugin curl rsync openssl python3
+    $SUDO apt-get install -y docker.io docker-compose-v2 curl rsync openssl python3 sqlite3 2>/dev/null || \
+      $SUDO apt-get install -y docker.io docker-compose-plugin curl rsync openssl python3 sqlite3
     $SUDO systemctl enable --now docker 2>/dev/null || true
   fi
   command -v docker >/dev/null 2>&1 || {
@@ -110,6 +118,7 @@ install_service() {
   # whenever the edge holds what the listener is already serving.
   for unit in monarch-livetv-guide.service monarch-livetv-guide.timer \
               monarch-livetv-dial.service monarch-livetv-dial.timer \
+              monarch-livetv-monitor.service monarch-livetv-monitor.timer \
               monarch-jellyfin-tls.service monarch-jellyfin-tls.timer \
               monarch-clipbucket-sync.service monarch-clipbucket-sync.timer; do
     $SUDO cp "$root$TARGET/systemd/$unit" "$root/etc/systemd/system/$unit" 2>/dev/null || \
@@ -122,8 +131,15 @@ install_service() {
   $SUDO sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$TARGET|" \
     "$root/etc/systemd/system/monarch-livetv-guide.service" \
     "$root/etc/systemd/system/monarch-livetv-dial.service" \
+    "$root/etc/systemd/system/monarch-livetv-monitor.service" \
     "$root/etc/systemd/system/monarch-jellyfin-tls.service" \
     "$root/etc/systemd/system/monarch-clipbucket-sync.service"
+  # The dial and monitor units read LIVETV_M3U_URL / LIVETV_EXTRA_M3U /
+  # LIVETV_MONITOR_DB from the deployment's .env; the sample path is /opt/monarch,
+  # so rewrite it when TARGET differs.
+  $SUDO sed -i "s|^EnvironmentFile=-.*|EnvironmentFile=-$TARGET/.env|" \
+    "$root/etc/systemd/system/monarch-livetv-dial.service" \
+    "$root/etc/systemd/system/monarch-livetv-monitor.service"
   # Local Nginx Proxy Manager is opt-in via the "npm" compose profile. When
   # NPM_MODE=remote (MONARCH_NPM_LOCAL=0) drop the --profile flag so the unit
   # never starts a local NPM container.
@@ -152,6 +168,7 @@ install_service() {
     # at all. The certificate timer is enabled for the same reason — an un-renewed
     # certificate is only noticed when a client refuses to connect.
     for timer in monarch-livetv-guide.timer monarch-livetv-dial.timer \
+                 monarch-livetv-monitor.timer \
                  monarch-jellyfin-tls.timer monarch-clipbucket-sync.timer; do
       $SUDO systemctl --root "$sysroot" enable "$timer" 2>/dev/null || \
         $SUDO ln -sf "/etc/systemd/system/$timer" "$sysroot/etc/systemd/system/timers.target.wants/$timer"
@@ -162,6 +179,7 @@ install_service() {
       $SUDO systemctl start monarch-drift-check.timer 2>/dev/null || true
       $SUDO systemctl start monarch-livetv-guide.timer 2>/dev/null || true
       $SUDO systemctl start monarch-livetv-dial.timer 2>/dev/null || true
+      $SUDO systemctl start monarch-livetv-monitor.timer 2>/dev/null || true
       $SUDO systemctl start monarch-jellyfin-tls.timer 2>/dev/null || true
       $SUDO systemctl start monarch-clipbucket-sync.timer 2>/dev/null || true
     fi
@@ -171,12 +189,23 @@ install_service() {
       $SUDO ln -sf /etc/systemd/system/monarch.service /etc/systemd/system/multi-user.target.wants/monarch.service
     $SUDO systemctl enable monarch-drift-check.timer 2>/dev/null || \
       $SUDO ln -sf /etc/systemd/system/monarch-drift-check.timer /etc/systemd/system/timers.target.wants/monarch-drift-check.timer
+    # The Live TV timers are part of the install path too: an in-place update
+    # must leave the guide, the dial, and the channel monitor running.
+    for timer in monarch-livetv-guide.timer monarch-livetv-dial.timer \
+                 monarch-livetv-monitor.timer; do
+      $SUDO systemctl enable "$timer" 2>/dev/null || \
+        $SUDO ln -sf "/etc/systemd/system/$timer" "/etc/systemd/system/timers.target.wants/$timer"
+    done
     $SUDO systemctl enable monarch-jellyfin-tls.timer 2>/dev/null || \
       $SUDO ln -sf /etc/systemd/system/monarch-jellyfin-tls.timer /etc/systemd/system/timers.target.wants/monarch-jellyfin-tls.timer
     $SUDO systemctl enable monarch-clipbucket-sync.timer 2>/dev/null || \
       $SUDO ln -sf /etc/systemd/system/monarch-clipbucket-sync.timer /etc/systemd/system/timers.target.wants/monarch-clipbucket-sync.timer
     $SUDO systemctl start monarch.service 2>/dev/null || true
     $SUDO systemctl start monarch-drift-check.timer 2>/dev/null || true
+    for timer in monarch-livetv-guide.timer monarch-livetv-dial.timer \
+                 monarch-livetv-monitor.timer; do
+      $SUDO systemctl start "$timer" 2>/dev/null || true
+    done
     $SUDO systemctl start monarch-jellyfin-tls.timer 2>/dev/null || true
     $SUDO systemctl start monarch-clipbucket-sync.timer 2>/dev/null || true
   fi

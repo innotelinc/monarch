@@ -7,9 +7,9 @@ playlist order — no channel numbers, no News/Sports/Movies split, and the ABC
 stations, the CBS stations and the NBC stations are not gathered together, which
 is the shape a viewer expects from a cable box.
 
-This reads the same playlist Jellyfin is tuned to and the Comcast Springfield
-lineup in `data/comcast-springfield-lineup.yml` (channel numbers with their
-provenance) and writes:
+This reads the playlist(s) and the Comcast Springfield lineup in
+`data/comcast-springfield-channels.tsv` (channel numbers with their provenance)
+and writes:
 
   * `comcast-springfield.m3u` — the dial. A stream whose network has a cable
     number takes that number, and the playlist is ordered by it, so channel 5
@@ -29,11 +29,35 @@ provenance) and writes:
     `<lcn>` set to its number, so "what's on now" appears against the dial rather
     than against the playlist's alphabetical order.
 
+Two details make the dial survive contact with Jellyfin:
+
+  * Every stream gets a **unique** `tvg-id` (`<guide-id>.<number>`) and a unique
+    playback URL (a second row for the same feed gets `?monarch=<number>`, which
+    the origin ignores), and the guide duplicates that channel's programmes
+    under the same id. Jellyfin keeps only one channel per `tvg-id`
+    (jellyfin/jellyfin#6527) and also collapsed rows sharing a URL, so a
+    network's SD and HD rows — 42 CNN / 842 CNN HD, 35 USA / 835 USA HD —
+    otherwise became the last one and the low number silently disappeared.
+  * `data/livetv-extra.m3u` is read **first** when it exists. Its streams take
+    the primary number for their network, which is how a working feed replaces a
+    dead upstream one without renumbering the dial; the upstream entries become
+    sub-feeds beside it. Set `LIVETV_EXTRA_M3U` to use a different file, or pass
+    `--no-extra` to ignore it.
+  * `--health-db` reads the state written by `livetv-monitor.py`. A feed the
+    monitor has marked dead is dropped only when another stream on the same guide
+    channel is alive, so the live one takes the primary number. With no database
+    (or no state for a URL) every row is kept.
+
 Usage:
 
     python3 scripts/livetv_lineup.py --plan                  # the taxonomy + lineup coverage
     python3 scripts/livetv_lineup.py --out /opt/epg          # write the playlists and guide
     python3 scripts/livetv_lineup.py --m3u FILE_OR_URL --guide /opt/epg/guide.xml --out /opt/epg
+    python3 scripts/livetv_lineup.py --m3u PRIMARY --m3u FALLBACK --out /opt/epg
+    python3 scripts/livetv_lineup.py --health-db /var/lib/monarch/livetv-monitor.sqlite --out /opt/epg
+
+`--m3u` may be repeated; sources are merged in the order given, and the first
+stream of a network takes its primary dial number.
 
 Writing into `/opt/epg` is the deployment: the `iptv` container serves that
 directory at `http://iptv:3000/<name>`, which is how Jellyfin reaches each file
@@ -45,8 +69,10 @@ are the Comcast-ordered ones.
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import re
+import sqlite3
 import sys
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -54,6 +80,10 @@ from pathlib import Path
 
 DEFAULT_M3U = os.environ.get(
     "LIVETV_M3U_URL", "https://iptv-org.github.io/iptv/countries/us.m3u")
+# A small operator-maintained playlist of feeds that work when the upstream one
+# does not (see the module docstring). Read first, so its streams own the
+# primary dial number and the upstream entry becomes the fallback.
+DEFAULT_EXTRA_M3U = Path(__file__).resolve().parent.parent / "data" / "livetv-extra.m3u"
 # The dial itself, exactly as the operator supplied it: one `number<TAB>name` per
 # line. This is the authoritative source for a channel number, so it is stored
 # verbatim rather than transcribed into a second format that could disagree with
@@ -486,6 +516,63 @@ def read_source(source: str) -> str:
     return Path(source).read_text(encoding="utf-8", errors="replace")
 
 
+def read_health_db(path: str | None) -> dict[str, str]:
+    """``url -> ok|fail`` from the monitor's SQLite database.
+
+    Missing or unreadable state is not an error: a host that has never run
+    `livetv-monitor.py` must still build a dial. Unknown URLs are simply absent
+    from the mapping, and the caller keeps every row it cannot judge.
+    """
+    if not path:
+        return {}
+    database = Path(path)
+    if not database.is_file():
+        return {}
+    try:
+        # Read-only: a timer may be writing the database, and the generator has
+        # no business changing probe state.
+        conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=15)
+        try:
+            rows = conn.execute("SELECT url, status FROM channels").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+    return {str(url): str(status) for url, status in rows if url and status}
+
+
+def drop_dead_duplicates(entries: list[dict], health: dict[str, str]) -> list[dict]:
+    """Remove a dead feed only when the same guide channel has a live one.
+
+    The dial deliberately carries several streams for one network — a primary
+    and the sub-feeds beside it. When the monitor has confirmed that the primary
+    is dead and a sibling answers, dropping the dead row lets the live sibling
+    take the primary number (and `simulcast_rows` fills the other row). A
+    network whose every feed is down is left alone: a missing channel is worse
+    than a channel that may recover, and the monitor will try again next run.
+    """
+    if not health:
+        return entries
+    groups: dict[str, list[dict]] = {}
+    for entry in entries:
+        upstream = ((entry.get("attrs") or {}).get("tvg-id") or "").strip()
+        url = (entry.get("url") or "").strip()
+        if upstream and url:
+            groups.setdefault(upstream, []).append(entry)
+
+    dropped: set[int] = set()
+    for rows in groups.values():
+        if not any(health.get((entry.get("url") or "").strip()) == "ok" for entry in rows):
+            continue
+        for entry in rows:
+            url = (entry.get("url") or "").strip()
+            if health.get(url) == "fail":
+                dropped.add(id(entry))
+    if not dropped:
+        return entries
+    return [entry for entry in entries if id(entry) not in dropped]
+
+
 def plan(entries: list[dict], lineup: list[dict]) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
     """``(by_category, by_network)`` — networks only when they repeat."""
     by_category: dict[str, list[dict]] = {}
@@ -563,6 +650,70 @@ def order_for_dial(entries: list[dict], numbers: dict[int, str]) -> list[int]:
     return sorted(range(len(entries)), key=sort_key)
 
 
+def guide_id(entry: dict, number: str) -> str:
+    """A guide id unique to this dial position.
+
+    Jellyfin keeps one channel per `tvg-id` (jellyfin/jellyfin#6527), so a
+    network's SD and HD rows both carrying `CNN.us@SD` imported as a single
+    channel — the HD one, because it came later — and channel 42 was not there
+    at all. The number is part of the id so both rows survive. The shape keeps
+    the upstream id readable: `CNN.us@SD.42`.
+    """
+    upstream = ((entry.get("attrs") or {}).get("tvg-id") or "").strip()
+    # A dot, not `~`: Jellyfin's XMLTV parser discarded ids carrying a tilde,
+    # which silently took the numbered channels (and their programmes) with it.
+    return f"{upstream or 'monarch'}.{number}"
+
+
+def assign_guide_ids(entries: list[dict], numbers: dict[int, str]) -> None:
+    """Give every entry its unique `guide_id` (render and the guide share it)."""
+    for index, entry in enumerate(entries):
+        entry["guide_id"] = guide_id(entry, numbers[index])
+
+
+def assign_stream_urls(entries: list[dict], numbers: dict[int, str]) -> None:
+    """Make the playback URL unique per dial position without changing the feed.
+
+    The dial deliberately lists one feed on two numbers (42 CNN / 842 CNN HD,
+    35 USA / 835 USA HD), and Jellyfin imported only one of a pair even after
+    the ids were made unique: it keys the channel rows by the stream URL as
+    well. A harmless query parameter the origin ignores makes the rows distinct;
+    the first occurrence keeps the pristine URL, so a provider with a signed URL
+    is not rewritten unless it actually appears twice.
+    """
+    seen: dict[str, int] = {}
+    for index, entry in enumerate(entries):
+        url = (entry.get("url") or "").strip()
+        if not url:
+            continue
+        count = seen.get(url, 0)
+        seen[url] = count + 1
+        if count == 0:
+            entry["stream_url"] = url
+            continue
+        separator = "&" if "?" in url else "?"
+        entry["stream_url"] = f"{url}{separator}monarch={numbers[index]}"
+
+
+def guide_mapping(entries: list[dict], numbers: dict[int, str]) -> dict[str, list[tuple[str, str]]]:
+    """``upstream tvg-id -> [(unique guide id, number)]``, in playlist order.
+
+    One upstream id can legitimately map to two numbers (the SD and HD rows of
+    one network), which is exactly what the guide has to duplicate.
+    """
+    mapping: dict[str, list[tuple[str, str]]] = {}
+    for index, entry in enumerate(entries):
+        upstream = ((entry.get("attrs") or {}).get("tvg-id") or "").strip()
+        unique = entry.get("guide_id") or guide_id(entry, numbers[index])
+        if not upstream or not entry.get("url"):
+            continue
+        bucket = mapping.setdefault(upstream, [])
+        pair = (unique, numbers[index])
+        if pair not in bucket:
+            bucket.append(pair)
+    return mapping
+
+
 def render(entries: list[dict], numbers: dict[int, str], order: list[int], group) -> str:
     """An M3U over ``order``; ``group`` is a label or a callable per entry."""
     lines = ["#EXTM3U"]
@@ -572,46 +723,80 @@ def render(entries: list[dict], numbers: dict[int, str], order: list[int], group
         name = entry["name"]
         label = group(entry) if callable(group) else group
         bits = [
-            f'tvg-id="{attrs.get("tvg-id", "")}"',
+            f'tvg-id="{entry.get("guide_id") or attrs.get("tvg-id", "")}"',
             f'tvg-name="{name}"',
             f'tvg-chno="{numbers[index]}"',
             f'group-title="{label}"',
         ]
         if attrs.get("tvg-logo"):
             bits.append(f'tvg-logo="{attrs["tvg-logo"]}"')
+        # The upstream file may need these to answer at all (p13, for example,
+        # only serves CNN with a referrer). Dropping them while renumbering is
+        # how a channel that plays in the source playlist stops playing here.
+        for key in ("http-user-agent", "http-referrer"):
+            if attrs.get(key):
+                bits.append(f'{key}="{attrs[key]}"')
         lines.append(f'#EXTINF:-1 {" ".join(bits)},{name}')
-        lines.append(entry["url"])
+        lines.append(entry.get("stream_url") or entry["url"])
     return "\n".join(lines) + "\n"
 
 
-def renumber_guide(xml_text: str, numbers: dict[str, str]) -> str:
-    """The guide with each channel named and numbered, programmes untouched.
+def renumber_guide(xml_text: str, mapping: dict[str, list[tuple[str, str]]]) -> str:
+    """The guide with each channel named and numbered, programmes duplicated.
 
-    ``numbers`` maps a guide channel id (the playlist's `tvg-id`) to the dial
-    number. A channel with no number keeps its name: it is in the playlist, so
-    it is in the guide, and dropping it would make the guide disagree with the
-    dial. `<lcn>` is the XMLTV element a client reads for a logical channel
-    number; the display name carries it too, because Jellyfin shows names.
+    ``mapping`` maps a guide channel id (the playlist's upstream `tvg-id`) to
+    every (unique id, dial number) that stream occupies. Upstream ids with no
+    entry keep their name: they are in the guide, so dropping them would make
+    the guide disagree with the dial. `<lcn>` is the XMLTV element a client
+    reads for a logical channel number; the display name carries it too,
+    because Jellyfin shows names.
+
+    A network with two dial rows is two guide channels after this, each with its
+    own copy of the programmes — the guide's own programme data, not invented —
+    so "what's on now" appears on 42 and 842 alike.
     """
     root = ET.fromstring(xml_text)
-    for channel in root.findall("channel"):
-        channel_id = channel.get("id") or ""
-        number = numbers.get(channel_id)
-        if not number:
+    channels = root.findall("channel")
+    programmes = root.findall("programme")
+    for element in channels + programmes:
+        root.remove(element)
+
+    numbered: list[tuple[tuple[float, str], ET.Element]] = []
+    for channel in channels:
+        upstream = channel.get("id") or ""
+        variants = mapping.get(upstream)
+        if not variants:
+            numbered.append(((float("inf"), upstream), channel))
             continue
         names = [el for el in channel.findall("display-name")]
-        base = (names[0].text or channel_id) if names else channel_id
-        for element in names[len(names) - 1:]:
-            channel.remove(element)
-        first = ET.SubElement(channel, "display-name")
-        first.text = f"{number} {base}"
-        lcn = ET.SubElement(channel, "lcn")
-        lcn.text = number
-    ordered = sorted(root.findall("channel"), key=lambda c: _number_key(numbers.get(c.get("id") or "")))
-    for channel in ordered:
-        root.remove(channel)
-    for offset, channel in enumerate(ordered):
-        root.insert(offset, channel)
+        base = (names[0].text or upstream) if names else upstream
+        for unique, number in variants:
+            clone = copy.deepcopy(channel)
+            clone.set("id", unique)
+            clone_names = [el for el in clone.findall("display-name")]
+            if clone_names:
+                clone_names[0].text = f"{number} {base}"
+            else:
+                ET.SubElement(clone, "display-name").text = f"{number} {base}"
+            for stale in clone.findall("lcn"):
+                clone.remove(stale)
+            ET.SubElement(clone, "lcn").text = number
+            numbered.append((_number_key(number), clone))
+
+    numbered.sort(key=lambda item: item[0])
+    for _, channel in numbered:
+        root.append(channel)
+
+    for programme in programmes:
+        variants = mapping.get(programme.get("channel") or "")
+        if not variants:
+            root.append(programme)
+            continue
+        for unique, _number in variants:
+            clone = copy.deepcopy(programme)
+            clone.set("channel", unique)
+            root.append(clone)
+
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode")
 
 
@@ -653,11 +838,17 @@ def report(entries: list[dict], by_category: dict[str, list[dict]],
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--m3u", default=DEFAULT_M3U,
-                        help="tuner playlist (URL or path; default LIVETV_M3U_URL)")
+    parser.add_argument("--m3u", action="append", default=None,
+                        help="playlist URL or path; repeat to merge sources "
+                             "(default: LIVETV_M3U_URL, after data/livetv-extra.m3u)")
+    parser.add_argument("--no-extra", action="store_true",
+                        help="ignore data/livetv-extra.m3u")
     parser.add_argument("--xml", help="an iptv-org channels.xml to read names from instead")
     parser.add_argument("--guide", help="an XMLTV file to renumber (the iptv container's guide.xml)")
     parser.add_argument("--lineup", default=str(LINEUP_PATH), help="the lineup dataset")
+    parser.add_argument("--health-db", default=os.environ.get("LIVETV_MONITOR_DB"),
+                        help="livetv-monitor SQLite state; dead feeds with a live "
+                             "sibling are dropped so the live one takes the number")
     parser.add_argument("--out", help="directory to write the playlists into")
     parser.add_argument("--plan", action="store_true", help="print the taxonomy, write nothing")
     args = parser.parse_args()
@@ -679,10 +870,30 @@ def main() -> int:
             entries.append({"name": (channel.text or "").strip(), "attrs": attrs,
                             "url": "", "group": ""})
     else:
-        entries = parse_m3u(read_source(args.m3u))
+        extra = Path(os.environ.get("LIVETV_EXTRA_M3U", str(DEFAULT_EXTRA_M3U)))
+        sources = list(args.m3u or [DEFAULT_M3U])
+        if not args.no_extra and extra.exists():
+            # First, not last: the first stream of a network takes its primary
+            # number, so a tested replacement feed owns 35/42 while the
+            # upstream one becomes a sub-feed beside it.
+            sources.insert(0, str(extra))
+        entries = []
+        for source in sources:
+            parsed = parse_m3u(read_source(source))
+            for entry in parsed:
+                entry["source"] = source
+            entries.extend(parsed)
     if not entries:
         print("livetv-lineup: no channels found", file=sys.stderr)
         return 1
+
+    health = read_health_db(args.health_db)
+    if health:
+        kept = drop_dead_duplicates(entries, health)
+        if len(kept) != len(entries):
+            print(f"livetv-lineup: dropped {len(entries) - len(kept)} dead feed(s) "
+                  "with a live sibling on the same guide channel")
+        entries = kept
 
     by_category, by_network = plan(entries, lineup)
     # Added after `plan` on purpose: the simulcasts belong on the dial, which is
@@ -690,6 +901,8 @@ def main() -> int:
     # would just be a longer list of the same thing.
     entries = entries + simulcast_rows(entries, lineup)
     numbers = dial_numbers(entries)
+    assign_guide_ids(entries, numbers)
+    assign_stream_urls(entries, numbers)
     order = order_for_dial(entries, numbers)
 
     report(entries, by_category, by_network, lineup, numbers)
@@ -732,14 +945,10 @@ def main() -> int:
 
     if args.guide:
         guide_path = Path(args.guide)
-        by_id: dict[str, str] = {}
-        for index, entry in enumerate(entries):
-            tvg_id = entry["attrs"].get("tvg-id")
-            if tvg_id and tvg_id not in by_id and entry["url"]:
-                by_id[tvg_id] = numbers[index]
-        xml = renumber_guide(guide_path.read_text(encoding="utf-8", errors="replace"), by_id)
+        mapping = guide_mapping(entries, numbers)
+        xml = renumber_guide(guide_path.read_text(encoding="utf-8", errors="replace"), mapping)
         (out / "comcast-springfield.xml").write_text(xml, encoding="utf-8")
-        written.append(("comcast-springfield.xml", len(by_id)))
+        written.append(("comcast-springfield.xml", sum(len(v) for v in mapping.values())))
 
     print(f"\nlivetv-lineup: wrote {len(written)} files into {out}")
     for name, count in written:

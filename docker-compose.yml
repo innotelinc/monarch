@@ -54,6 +54,16 @@ x-sso-env: &sso-env
   OAUTH2_PROXY_COOKIE_DOMAINS: ${SSO_COOKIE_DOMAIN:-.innotel.us}
   OAUTH2_PROXY_COOKIE_SECURE: "true"
   OAUTH2_PROXY_COOKIE_SAMESITE: lax
+  # CSRF cookies are named after the cookie name, and every gateway in this
+  # stack deliberately shares ONE session cookie (`_innotel_sso` on
+  # `.innotel.us`) so a single Authentik sign-in covers all of them. With the
+  # default (false) the CSRF cookie is shared too: a page that fires several
+  # parallel requests - Sonarr's UI does - starts more than one sign-in flow,
+  # each overwriting the others' CSRF cookie, and the callback that loses the
+  # race dies with `CSRF token mismatch, potential attack` (HTTP 403). Naming
+  # the CSRF cookie per request removes that collision and leaves the session
+  # cookie shared, so cross-gateway sign-in is unchanged.
+  OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST: "true"
   OAUTH2_PROXY_EMAIL_DOMAINS: "*"
   # Two flags without which nobody can sign in at all, both measured live on the
   # edge gateway (see npm/docs/stack.md):
@@ -576,7 +586,9 @@ services:
     # Built from ./clipbucket (nginx + PHP-FPM + MariaDB runtime, app source
     # git-cloned on first boot) - the upstream oxygenz image is amd64-only.
     # The release workflow publishes amd64 + arm64 to GHCR.
-    image: ghcr.io/innotelinc/monarch-clipbucket:latest
+    # Pinned by tag: :latest upstream still carries PHP 8.5.11 (php2shell),
+    # and watchtower updates every container from its upstream tag.
+    image: ${CLIPBUCKET_IMAGE:-ghcr.io/innotelinc/monarch-clipbucket:php8512}
     build: ./clipbucket
     ports:
       # Loopback only: tube.innotel.us is fronted by clipbucket-sso, which
@@ -762,10 +774,13 @@ services:
       MONARCH_USERNAME: ${MONARCH_USERNAME:-admin}
       MONARCH_PASSWORD: ${MONARCH_PASSWORD:-monarch8}
       TZ: ${TZ:-America/New_York}
-      # Live TV - Jellyfin-native M3U tuner + XMLTV guide. monarch-init adds the
-      # tuner/guide to Jellyfin and writes the EPG channel list to /opt/epg.
+      # Live TV - Jellyfin tunes the Comcast dial (channel numbers + groups +
+      # unique ids), not the raw upstream playlist. LIVETV_M3U_URL is the
+      # upstream source the dial is built from; the tuner and guide URLs are
+      # the files scripts/livetv_lineup.py writes into /opt/epg.
       LIVETV_M3U_URL: ${LIVETV_M3U_URL:-https://iptv-org.github.io/iptv/countries/us.m3u}
-      LIVETV_GUIDE_URL: ${LIVETV_GUIDE_URL:-http://iptv:3000/guide.xml}
+      LIVETV_TUNER_URL: ${LIVETV_TUNER_URL:-http://iptv:3000/comcast-springfield.m3u}
+      LIVETV_GUIDE_URL: ${LIVETV_GUIDE_URL:-http://iptv:3000/comcast-springfield.xml}
       # Authentik connection (LDAP outpost provisioning + Jellyfin LDAP-Auth
       # plugin wiring). Points at the SHARED Authentik bundled with Cerulean
       # (auth.cerulean.innotel.us) — there is ONE identity instance for the
@@ -804,8 +819,12 @@ services:
     volumes:
       - ./init:/init:ro
       - /docker/appdata:/docker/appdata
-      # lets monarch-init drop /opt/epg/channels.xml for the iptv EPG grabber
+      # lets monarch-init drop /opt/epg/channels.xml for the iptv EPG grabber,
+      # and build the Comcast dial on a host whose /opt/epg is still empty
       - /opt/epg:/opt/epg
+      - ./scripts:/scripts:ro
+      - ./data/comcast-springfield-channels.tsv:/data/comcast-springfield-channels.tsv:ro
+      - ./data/livetv-extra.m3u:/data/livetv-extra.m3u:ro
 
   ###############################################
   # NGINX PROXY MANAGER - Reverse proxy + wildcard SSL

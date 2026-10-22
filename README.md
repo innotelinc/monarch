@@ -57,7 +57,7 @@ release artifacts on every tagged release.
 | 🩺 **Library health** | `monarch-health`: missing/duplicate/orphan detection, per-library stats, disk usage, recently-added & most-played | 
 | 🔐 **Cerulean Authentik SSO** | Users & passwords live in Cerulean Authentik; Jellyfin logins resolve via the LDAP outpost — disable a user and their login dies instantly | 
 | 🎯 **Media automation** | Sonarr / Radarr / Lidarr / Whisparr / Prowlarr / Transmission / Bazarr, all configured and cross-wired by `monarch-init` | 
-| 📡 **Live TV** | Native M3U tuner + XMLTV guide (iptv-org) — zero TVHeadend setup; bring your own playlist via `LIVETV_M3U_URL` | 
+| 📡 **Live TV** | Native M3U tuner + XMLTV guide on a **Comcast Springfield dial** — numbered channels, category groups, and programmes renumbered onto the same numbers; a channel monitor fails over dead feeds; bring your own upstream playlist via `LIVETV_M3U_URL` |
 | 🌐 **Proxy & SSL** | Nginx Proxy Manager auto-configured via API with a wildcard Let's Encrypt cert (DNS challenge) | 
 | 🛡️ **Self-healing** | `monarch-drift-check` verifies the running stack hourly (systemd timer) and auto-repairs drift by re-running init | 
 | 💾 **Delivery** | One-command installer, offline bundle, bootable live/install ISO — install with or without internet | 

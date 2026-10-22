@@ -1,0 +1,22 @@
+#EXTM3U
+# Operator-maintained replacement feeds for the Comcast dial.
+#
+# `scripts/livetv_lineup.py` reads this file before the upstream playlist, so a
+# stream here owns its network's primary dial number (for example 35/835) and
+# the upstream entry becomes a sub-feed beside it. Keep it small: one entry per
+# number that needs a working replacement, not a second whole playlist.
+#
+# USA Network: both US streams iptv-org publishes (190.197.41.183 and
+# 200.32.231.178) stopped answering in October 2026. These are the feeds that
+# still serve video; their schedule and audio differ from the US feed, which is
+# why they are listed here rather than silently substituted in the generator.
+# 35/835 use the 1080p Latin American feed; 835.1 is a lower-resolution backup
+# from a different host, so one dead origin no longer takes the channel away.
+# livetv-monitor.py promotes a live sibling automatically when one of these
+# stops answering; keep the backup here so it has somewhere to fail over to.
+#EXTINF:-1 tvg-id="USANetwork.us@East" tvg-name="USA Network" group-title="Entertainment",USA Network
+http://138.121.15.230:9002/USA/index.m3u8
+#EXTINF:-1 tvg-id="USANetwork.us@East" tvg-name="USA Network HD" group-title="Entertainment",USA Network HD
+http://138.121.15.230:9002/USA/index.m3u8
+#EXTINF:-1 tvg-id="USANetwork.us@East" tvg-name="USA Network HD (backup)" group-title="Entertainment",USA Network HD (backup)
+https://tvsen6.aynaott.com/usa/index.m3u8

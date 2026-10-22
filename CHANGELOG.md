@@ -12,6 +12,30 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **Live TV now repairs itself when a feed dies or a source changes.** A new
+  `monarch-livetv-monitor.timer` runs `scripts/livetv-monitor.py` every 30
+  minutes: it probes every stream in the Comcast dial in parallel, records the
+  result in SQLite at `/var/lib/monarch/livetv-monitor.sqlite` (plus a small
+  `livetv-monitor.json` for monitoring), and fingerprints the upstream playlist,
+  `data/livetv-extra.m3u` and the lineup file. A feed has to fail **twice in a
+  row** before it is called dead, and the first run is only a baseline, so one
+  timeout cannot renumber the dial. When a feed is dead and another stream on
+  the same guide channel is alive, the monitor rebuilds the dial with
+  `livetv_lineup.py --health-db`; the dead row is dropped, the live one takes the
+  primary number, and the paired SD/HD row is filled by the existing simulcast
+  rule. A dropped feed stays on a watchlist and is probed again, so a recovered
+  feed is re-added (and promoted back if the live sibling later dies); a channel
+  whose every feed is down is left in place, and a changed source playlist or
+  lineup triggers a rebuild even when every current stream is fine. `--deep` follows the first variant and segment
+  for a stronger check; the default reads the manifest so a full pass fits the
+  timer. The dial service also runs `refresh-livetv-guide.py` as an
+  `ExecStartPost`, and the monitor runs it after a rebuild, so the XMLTV cache is
+  cleared and Jellyfin re-reads the tuner and guide without a manual Refresh
+  Guide click. That script now leaves the cache alone while a Refresh Guide task
+  is already running and waits for that task instead, so the timer and the
+  monitor cannot race over the same file. No extra container is needed: like the
+  guide and dial jobs, this is a host systemd oneshot, because it reads `/opt/epg`
+  and needs the host's Jellyfin URL and appdata path.
 - **One screen for "is the stack drifted right now?".** The verdict, the heal
   clock and streak, and what the last standing-down alert carried are three files
   under `MONARCH_STATE_DIR`, and answering the question meant knowing all three -
@@ -239,6 +263,28 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **Jellyfin Live TV now actually uses the Comcast dial, and channel 42 is back.**
+  The dial existed in `/opt/epg`, but `monarch-init` still added the raw
+  iptv-org tuner and `guide.xml`, so Jellyfin imported both and showed every
+  channel twice. Worse, the dial gave a network's SD and HD rows the same
+  `tvg-id` (`CNN.us@SD` on 42 *and* 842); Jellyfin keeps one channel per id
+  (jellyfin/jellyfin#6527), kept the later row, and channel 42 was absent —
+  “CNN is missing” was a dedupe, not a dead stream. Every dial row now gets a
+  unique id (`CNN.us@SD.42`, `CNN.us@SD.842`) and unique playback URL (a
+  second row for the same feed gets `?monarch=<number>`, which the origin
+  ignores), and the guide duplicates its own programmes under each id, so
+  42/842 and 35/835 both list and both show “what's on”. `monarch-init` builds
+  the playlist on a host whose `/opt/epg` is empty, points Jellyfin at the
+  Comcast files, and removes the
+  raw tuner/provider on an existing install. Both USA Network streams iptv-org
+  published stopped answering in October 2026, so `data/livetv-extra.m3u` is
+  read first and supplies the working Latin American feed on 35/835; the
+  upstream entries become sub-feeds beside it. `--m3u` may be repeated to merge
+  another source, and the dial now preserves `http-user-agent`/`http-referrer`
+  attributes that a source may need in order to answer at all.
+  `refresh-livetv-guide.py` also clears Jellyfin's downloaded XMLTV cache before
+  it starts the task: Jellyfin reuses that file, so the documented regenerate →
+  refresh step was re-parsing the previous guide.
 - **A Cerulean identity can sign in again: the LDAP outpost was talking to
   Authentik on the wrong host.** The bind flow is two requests (the
   identification challenge, then the DN and password), and Authentik ties them

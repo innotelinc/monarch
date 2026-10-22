@@ -15,6 +15,8 @@ Run: python3 -m unittest discover -s scripts/tests -t scripts/tests -v
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -239,18 +241,54 @@ class Rendering(unittest.TestCase):
         entries = [entry("A&E Crime 360", "AETV.us@SD")]
         lineup_mod.plan(entries, LINEUP)
         numbers = lineup_mod.dial_numbers(entries)
+        lineup_mod.assign_guide_ids(entries, numbers)
         text = lineup_mod.render(entries, numbers, [0], "Cable channels")
         self.assertIn('tvg-chno="37"', text)
         self.assertIn('group-title="Cable channels"', text)
-        self.assertIn('tvg-id="AETV.us@SD"', text)
+        self.assertIn('tvg-id="AETV.us@SD.37"', text)
         self.assertTrue(text.endswith("http://stream.test/x\n"))
 
     def test_a_callable_group_labels_each_entry(self) -> None:
         entries = [entry("A&E Crime 360")]
         lineup_mod.plan(entries, LINEUP)
         numbers = lineup_mod.dial_numbers(entries)
+        lineup_mod.assign_guide_ids(entries, numbers)
         text = lineup_mod.render(entries, numbers, [0], lambda e: e["category"])
         self.assertIn('group-title="Entertainment"', text)
+
+    def test_streams_with_the_same_upstream_id_get_distinct_ids(self) -> None:
+        # The bug this prevents: Jellyfin imported only the last of these two,
+        # so channel 42 was absent even though the dial listed it.
+        entries = [entry("CNN", "CNN.us@SD"), entry("CNN HD", "CNN.us@SD")]
+        lineup_mod.plan(entries, LINEUP)
+        numbers = lineup_mod.dial_numbers(entries)
+        lineup_mod.assign_guide_ids(entries, numbers)
+        self.assertEqual([e["guide_id"] for e in entries],
+                         ["CNN.us@SD.42", "CNN.us@SD.842"])
+
+    def test_the_same_feed_on_two_numbers_gets_distinct_playback_urls(self) -> None:
+        # Jellyfin also collapses rows that share a URL. The second occurrence
+        # gets a query parameter the origin ignores; the first is untouched.
+        entries = [entry("CNN", "CNN.us@SD"), entry("CNN HD", "CNN.us@SD")]
+        lineup_mod.plan(entries, LINEUP)
+        numbers = lineup_mod.dial_numbers(entries)
+        lineup_mod.assign_guide_ids(entries, numbers)
+        lineup_mod.assign_stream_urls(entries, numbers)
+        self.assertEqual(entries[0]["stream_url"], "http://stream.test/x")
+        self.assertEqual(entries[1]["stream_url"], "http://stream.test/x?monarch=842")
+
+    def test_playback_attributes_survive_a_rewrite(self) -> None:
+        # A source may only answer with a referrer/user agent; the rendered dial
+        # has to keep carrying it.
+        stream = entry("CNN", "CNN.us@SD")
+        stream["attrs"]["http-referrer"] = "https://usnewson.com"
+        stream["attrs"]["http-user-agent"] = "Monarch/1"
+        lineup_mod.plan([stream], LINEUP)
+        numbers = lineup_mod.dial_numbers([stream])
+        lineup_mod.assign_guide_ids([stream], numbers)
+        text = lineup_mod.render([stream], numbers, [0], "News")
+        self.assertIn('http-referrer="https://usnewson.com"', text)
+        self.assertIn('http-user-agent="Monarch/1"', text)
 
 
 GUIDE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -270,7 +308,11 @@ GUIDE = """<?xml version="1.0" encoding="UTF-8"?>
 
 class Guide(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = ET.fromstring(lineup_mod.renumber_guide(GUIDE, {"AETV.us@SD": "37", "QVC.us@SD": "58"}))
+        self.mapping = {
+            "AETV.us@SD": [("AETV.us@SD.37", "37")],
+            "QVC.us@SD": [("QVC.us@SD.58", "58")],
+        }
+        self.root = ET.fromstring(lineup_mod.renumber_guide(GUIDE, self.mapping))
 
     def test_programmes_are_left_exactly_as_they_were(self) -> None:
         before = ET.fromstring(GUIDE)
@@ -279,10 +321,10 @@ class Guide(unittest.TestCase):
         self.assertIn("Forensic Files", titles)
         self.assertIn("Football Team Shop", titles)
         channels = {p.get("channel") for p in self.root.findall("programme")}
-        self.assertEqual(channels, {"AETV.us@SD", "QVC.us@SD"})
+        self.assertEqual(channels, {"AETV.us@SD.37", "QVC.us@SD.58"})
 
     def test_a_numbered_channel_shows_its_number(self) -> None:
-        channel = next(c for c in self.root.findall("channel") if c.get("id") == "QVC.us@SD")
+        channel = next(c for c in self.root.findall("channel") if c.get("id") == "QVC.us@SD.58")
         self.assertEqual(channel.findtext("display-name"), "58 QVC")
         self.assertEqual(channel.findtext("lcn"), "58")
 
@@ -293,7 +335,88 @@ class Guide(unittest.TestCase):
 
     def test_channels_are_ordered_by_number(self) -> None:
         ids = [c.get("id") for c in self.root.findall("channel")]
-        self.assertEqual(ids, ["AETV.us@SD", "QVC.us@SD", "Unmatched.us@SD"])
+        self.assertEqual(ids, ["AETV.us@SD.37", "QVC.us@SD.58", "Unmatched.us@SD"])
+
+    def test_two_dial_rows_for_one_network_are_two_guide_channels(self) -> None:
+        """Jellyfin keeps one channel per tvg-id, so 42 and 842 need distinct ids."""
+        guide = """<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="CNN.us@SD"><display-name>CNN</display-name></channel>
+  <programme start="20260919200000 +0000" stop="20260919210000 +0000" channel="CNN.us@SD">
+    <title>CNN Newsroom</title>
+  </programme>
+</tv>
+"""
+        root = ET.fromstring(lineup_mod.renumber_guide(
+            guide, {"CNN.us@SD": [("CNN.us@SD.42", "42"), ("CNN.us@SD.842", "842")]}))
+        channels = root.findall("channel")
+        self.assertEqual([c.get("id") for c in channels], ["CNN.us@SD.42", "CNN.us@SD.842"])
+        self.assertEqual([c.findtext("lcn") for c in channels], ["42", "842"])
+        self.assertEqual([c.findtext("display-name") for c in channels],
+                         ["42 CNN", "842 CNN"])
+        # The same programme, on both numbers: the guide data is not invented,
+        # it is the one programme the upstream guide already had.
+        programmes = root.findall("programme")
+        self.assertEqual([p.get("channel") for p in programmes],
+                         ["CNN.us@SD.42", "CNN.us@SD.842"])
+        self.assertEqual([p.findtext("title") for p in programmes],
+                         ["CNN Newsroom", "CNN Newsroom"])
+
+    def test_the_same_upstream_programme_is_not_duplicated_twice(self) -> None:
+        # One number, one programme: the mapping is a list, not a licence to
+        # repeat a stream that the playlist listed once.
+        self.assertEqual(len(self.root.findall("programme")), 2)
+
+
+class HealthDatabase(unittest.TestCase):
+    def test_reads_url_status_and_tolerates_a_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "monitor.sqlite"
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE channels (number TEXT, url TEXT, status TEXT)")
+            conn.executemany("INSERT INTO channels VALUES (?, ?, ?)",
+                             [("35", "http://a", "ok"), ("835", "http://b", "fail")])
+            conn.commit()
+            conn.close()
+            self.assertEqual(lineup_mod.read_health_db(str(db)),
+                             {"http://a": "ok", "http://b": "fail"})
+            self.assertEqual(lineup_mod.read_health_db(str(Path(tmp) / "absent.sqlite")), {})
+            self.assertEqual(lineup_mod.read_health_db(None), {})
+
+
+class HealthFailover(unittest.TestCase):
+    """A dead feed is dropped only when the same guide channel has a live one."""
+
+    def test_a_dead_primary_is_dropped_when_the_backup_is_live(self) -> None:
+        primary = entry("USA Network", "USANetwork.us@East", "http://primary.test/usa")
+        backup = entry("USA Network HD (backup)", "USANetwork.us@East",
+                       "http://backup.test/usa")
+        health = {"http://primary.test/usa": "fail", "http://backup.test/usa": "ok"}
+        kept = lineup_mod.drop_dead_duplicates([primary, backup], health)
+        self.assertEqual(kept, [backup])
+
+    def test_a_dead_channel_with_no_live_sibling_is_left_alone(self) -> None:
+        # A missing channel is worse than one that may recover; the monitor will
+        # try again on its next run.
+        primary = entry("USA Network", "USANetwork.us@East", "http://primary.test/usa")
+        backup = entry("USA Network HD (backup)", "USANetwork.us@East",
+                       "http://backup.test/usa")
+        health = {"http://primary.test/usa": "fail", "http://backup.test/usa": "fail"}
+        self.assertEqual(len(lineup_mod.drop_dead_duplicates([primary, backup], health)), 2)
+
+    def test_an_unconfirmed_feed_is_not_dropped(self) -> None:
+        # The monitor's first run records `unknown`, not `fail`, so a baseline
+        # run cannot renumber the dial.
+        feed = entry("USA Network", "USANetwork.us@East", "http://primary.test/usa")
+        self.assertEqual(lineup_mod.drop_dead_duplicates([feed], {"http://primary.test/usa": "unknown"}), [feed])
+
+    def test_a_feed_without_a_guide_id_is_never_dropped(self) -> None:
+        feed = entry("Some FAST channel", "", "http://fast.test/x")
+        self.assertEqual(lineup_mod.drop_dead_duplicates([feed], {"http://fast.test/x": "fail"}), [feed])
+
+    def test_no_health_state_is_a_no_op(self) -> None:
+        feed = entry("USA Network", "USANetwork.us@East")
+        self.assertEqual(lineup_mod.drop_dead_duplicates([feed], {}), [feed])
 
 
 if __name__ == "__main__":
