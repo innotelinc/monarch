@@ -1,0 +1,21 @@
+[Unit]
+Description=Run the Monarch ClipBucket catalogue sync on a short interval
+Documentation=https://github.com/innotelinc/monarch
+
+[Timer]
+# Every two minutes. Short on purpose: this is what makes the catalogue catch up
+# with a Jellyfin add/delete without a person, and a run that finds nothing has
+# changed costs one directory walk plus one query (the fingerprint gate in
+# scripts/clipbucket-sync.py keeps ffprobe and the import out of it).
+#
+# Not `OnUnitActiveSec=`: a calendar schedule is what the estate's other timers
+# use, it survives a restart without drifting, and `Persistent` catches up after
+# downtime. AccuracySec is tightened from the 1-minute default so "every two
+# minutes" is not silently "every two-to-three".
+OnCalendar=*-*-* *:0/2:00
+AccuracySec=15s
+Persistent=true
+Unit=monarch-clipbucket-sync.service
+
+[Install]
+WantedBy=timers.target

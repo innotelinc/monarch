@@ -1,0 +1,2526 @@
+# Monarch — Operations Reference
+
+## Shared initial credentials
+
+Edit `.env` (it is gitignored, so your credentials never get committed) — the
+two most important variables are:
+
+```
+MONARCH_USERNAME=admin        # your username
+MONARCH_PASSWORD=monarch8     # your password
+```
+
+Those same credentials are applied automatically to **every service that
+requires a login**: Jellyfin, Jellyseerr, Sonarr, Radarr, Lidarr, Whisparr,
+Prowlarr, Bazarr, Transmission, the Authentik bootstrap admin
+(email `admin@innotel.us`) and the subscription platform's `/admin` panel.
+Anything you change in `.env` later is picked up by the automation on the
+next `docker compose up -d` (the init containers re-run and only touch
+services that still have default/no credentials).
+
+
+## Everything is wired for you on first boot
+
+Two one-shot containers do the wiring so you do **not** have to click through
+the manual setup:
+
+| Container    | When            | What it does |
+|--------------|-----------------|--------------|
+| `monarch-seed` | before Transmission starts | writes Transmission's `settings.json` (download dir `/data/torrents`, RPC whitelists off, no local login) so the first boot is already correct |
+| `monarch-init` | after the stack is up | wires the whole stack (below) |
+
+`monarch-init` automatically:
+
+* **Jellyfin** - completes the first-run wizard (creates the admin user with
+  your credentials), adds Media libraries (`/data/media/movies`, `tv`,
+  `music`, `xxx`), logs in and exports the admin token to
+  `/docker/appdata/init/jellyfin-api-key.txt`
+* **Jellyfin LDAP-Auth plugin** - installs the plugin and writes its config so
+  Jellyfin logins authenticate against the Authentik LDAP outpost (see the
+  dedicated section below)
+* **Jellyfin Live TV** - adds the iptv-org M3U playlist as a native tuner and
+  the iptv EPG container's guide as the XMLTV provider, and writes the EPG
+  channel list to `/opt/epg/channels.xml` (see the Live TV section below)
+* **Sonarr / Radarr / Lidarr / Whisparr** - sets Forms authentication with
+  your credentials, adds the correct root folder, adds the **Transmission**
+  download client (category `tv` / `movies` / `music` / `xxx`), enables
+  hardlinks + extra-file import, and writes the shared `AllowedHosts` list
+  (`init/arr-allowlist.txt`) so Prowlarr can reach it over the compose network
+* **Prowlarr** - sets Forms authentication, adds **Transmission** as the
+  download client, registers Radarr, Sonarr, Lidarr and Whisparr as
+  **Apps** (full sync) - so indexers added in Prowlarr flow to all *arr apps -
+  writes the same `AllowedHosts` list for itself (the *arrs call it back at
+  `http://prowlarr:9696`), and adds a **FlareSolverr proxy** (tag an indexer
+  `cloudflare` to route it through the proxy). **Adding the indexers themselves
+  is a separate, explicit step** - `scripts/prowlarr-indexers.py`, below - and
+  it is the only part of this wiring that talks to public trackers.
+* **Transmission** - verifies the RPC keeps no local login and pins the
+  download dir to `/data/torrents`; the `movies`, `tv`, `music` and `xxx`
+  folders are Servarr's category subfolders there (Transmission has no
+  categories of its own)
+* **Bazarr** - sets basic authentication with your credentials and connects
+  Sonarr + Radarr so subtitle syncing works
+* **Jellyseerr** - initializes the request manager against **Jellyfin**,
+  connects Radarr + Sonarr, and enables **Jellyfin sign-in** (Settings >
+  Users) so subscribers can log in with their Jellyfin accounts
+
+Watch it work / check for problems:
+
+```
+sudo docker logs monarch-init
+sudo cat /docker/appdata/init/status.json      # per-service result, issues, last drift verdict
+```
+
+Everything is idempotent - `monarch-init` re-runs safely on every `up -d` and
+only touches services that are still unconfigured.
+
+
+## Services & ports
+
+| Service    | URL                   | Notes |
+|------------|-----------------------|-------|
+| Homarr (dashboard) | http://localhost:7575 | `app.monarch.innotel.us` |
+| Jellyfin   | http://localhost:8097 | `https://media.magnate.innotel.us`; Authentik LDAP users; admin = your `.env` credentials |
+| Jellyseerr | http://localhost:5055 | `req.monarch.innotel.us`; requests; connected to Jellyfin + Radarr/Sonarr |
+| Prowlarr   | http://localhost:9696 | indexers; all *arr apps pre-registered |
+| Radarr     | http://localhost:7878 | movies |
+| Sonarr     | http://localhost:8989 | tv |
+| Lidarr     | http://localhost:8686 | music |
+| Whisparr   | http://localhost:6969 | xxx |
+| Bazarr     | http://localhost:6767 | subtitles; connected to Sonarr/Radarr |
+| Transmission | http://localhost:9091 | main downloader; no local login (Cerulean is the only door), torrent port 51413 |
+| SABnzbd    | http://localhost:8082 | Usenet (optional); host port = `SABNZBD_PORT` (compose default 8082) |
+| Deluge     | http://localhost:8112 | optional; default WebUI password is `deluge` on first login |
+| autobrr    | http://localhost:7474 | optional; manual setup |
+| Authentik  | http://localhost:9000 | `auth.monarch.innotel.us`; SSO + `paid_users` group = user management |
+| Authentik LDAP | localhost:389 / 636 | LDAP outpost - Jellyfin logins authenticate against it |
+| **Monarch AI** | http://localhost:8002 | `monarch-recs` - AI recommendations + smart search (internal API) |
+| **Monarch Health** | http://localhost:8003 | `monarch-health` - media health analytics (internal API) |
+| Nginx Proxy Manager | http://localhost:2081 | `admin.monarch.innotel.us`; reverse proxy + wildcard SSL (container `:81`) |
+| Clipbucket | http://localhost:8098 | `https://tube.innotel.us`, gated by `clipbucket-sso`; installed with `scripts/clipbucket-install.py`, and its catalogue holds the media library with `scripts/clipbucket-library.py` — see [ClipBucket's library](#clipbuckets-library) |
+| IPTV guide | http://localhost:3011 | `tv.monarch.innotel.us`; XMLTV guide files for Jellyfin Live TV — the grabber writes `/guide.xml`, the dial renumbers it to `/comcast-springfield.xml` (host 3011 → container 3000) |
+| TVHeadend / NextPVR / Dispatcharr | 9981 / 8866 / 9191 | optional legacy live-TV backends (Jellyfin Live TV uses a native M3U tuner, so these are not required) |
+
+
+## Completed media migration from the legacy `.72` server
+
+> **This section is the `.72` → `.46` record, and the stack has since moved.**
+> Monarch runs on **`192.168.1.56`** (2026-09-16); `.46` kept Cerulean, Atlas,
+> Distro, Magnate, Signara, ONYX and Rizz Aura. Read the plain `.46` and
+> `localhost` below as "the media host at the time", and trust the route table
+> over the prose — the four media names were re-pointed at the `.56` gateways on
+> 2026-09-17, which is also why every target in it is now a port on `.56`.
+
+The Jellyfin media and user migration to the Monarch instance on `.46`
+(`192.168.1.46`) is complete. The active service is published on host port
+`8097` (container port `8096`) because `.46:8096` belongs to the dashboard.
+The public endpoint is:
+
+```
+https://media.magnate.innotel.us
+```
+
+The new instance contains four canonical libraries and the migrated
+Authentik-backed profiles. The media host is `.56` now and the edge followed it:
+`media.innotel.us` and `media.magnate.innotel.us` both answer from the `.56`
+Jellyfin — measured 2026-09-22, each is a `302` to its own `/web/` route, with
+the sign-in page served by the app rather than by a gateway redirect. The
+migration-era note that `media.innotel.us` was still the original Jellyfin on
+`.72:8096` is no longer true and is not repeated here; the route table below
+carries the current targets.
+
+| Library | Path | Current items |
+|---------|------|---------------|
+| Movies | `/data/media/movies` | 4 |
+| TV Shows | `/data/media/tv` | 4 |
+| Music | `/data/media/music` | 94 |
+| Other | `/data/media/xxx` | 1 |
+
+The migrated profiles are `cola` and `dhunter`, plus the local `admin`
+account. `cola` is a regular paid user; `dhunter` is also in
+`jellyfin_admins`. Jellyfin authentication flows through the Authentik LDAP
+outpost and the LDAP-Auth plugin. The source `.72` media files were copied
+before cutover; the real source Jellyfin database was preserved while the
+obsolete zero-byte `library.db` artifact was removed.
+
+The legacy `.72` machine still hosts unrelated services (including
+databases and TV/download services). The billing-api and Clipbucket
+on `.72` are retired (Magnate handles billing). Do not remove that compose
+project or shared `/docker/appdata` until each remaining service has been
+separately migrated or decommissioned — and in Clipbucket's case, see the
+schema note below before treating its data as migrated.
+
+### Legacy `.72` migration boundary
+
+The old host is still an active `arr` Compose project. The following services
+are duplicated on `.46` and should not be cut over or removed until their
+individual configs and queues are compared:
+
+- Jellyfin, Seerr, Sonarr, Radarr, Lidarr, Whisparr, Prowlarr,
+  Bazarr, and IPTV.
+
+The following remain unique or have not yet been verified on `.46`:
+
+- Dispatcharr, TVHeadend, NextPVR, jfa-go, Requestarr, Deluge,
+  SABnzbd, and autobrr.
+
+Clipbucket is staged at host port `8098` and its public route is
+`https://tube.innotel.us`, gated by `clipbucket-sso` (the name answers `302` to
+Cerulean Authentik with `client_id=monarch-media`, measured 2026-09-22).
+
+**Its schema was empty — the "80 database tables" this paragraph used to claim was
+not what was on disk, and finishing the install is a command now instead of a
+browser wizard.** Measured 2026-09-22: `monarch_clipbucket_db` held a
+`clipbucket/` directory whose only entry was `db.opt` (no tables) while
+`monarch_clipbucket_files` held the freshly cloned application source, so the name
+served its installer — `302 → /cb_install`.
+
+`scripts/clipbucket-install.py` replays what `upload/cb_install/ajax.php` does,
+so the install is repeatable, reportable and safe to re-run:
+
+```bash
+python3 scripts/clipbucket-install.py --check   # 0 installed, 1 not, 2 cannot tell
+python3 scripts/clipbucket-install.py --apply   # finish the install
+```
+
+Applied and verified on `.46` (2026-09-22): 87 tables, login `302 → /`, the site
+`200` with `<title>Monarch Clips</title>`, the admin area `200` with the
+Administration Panel, and `includes/config.php` + `files/temp/install.me.not` in
+place. **`.56` needed that same one command and has now had it** — measured
+there on 2026-09-22: `--check` reports `installed — 87 tables, config.php
+present, base_url https://tube.innotel.us, admin 'admin', installer locked`, the
+same shape as `.46`. The admin password went into that host's `.env` rather than
+into a terminal, for the reason below.
+
+Two steps the wizard gets for free and neither is optional:
+
+- **The version row.** The app gates columns and queries on
+  `Update::IsCurrentDBVersionIsHigherOrEqualTo()`, which reads `cb_version`. With
+  that table empty, every *logged-in* page answered **HTTP 500**
+  (`array_key_exists(): Argument #2 ($array) must be of type array, false given`,
+  inside `User->get()`) while anonymous pages were fine — a symptom that reads
+  like a broken session, not a missing row.
+- **The lock.** `cb_install/ajax.php` runs while `files/temp/install.me` exists,
+  so leaving it behind keeps the browser installer reachable on a finished site.
+  `--apply` removes it and writes `install.me.not`.
+
+Nothing from `.72` was carried across: its documented rollback source answers on
+no port at all as of 2026-09-22, so the old videos are either in a dump taken
+while it still ran or nowhere. "Clipbucket is migrated" was true of the
+application files and false of the content, and the prose above is not what to
+book a retention decision on. The NPM database was backed up on `.71` before
+edge repair, and stale generated NPM files were retained under
+`/usr/src/proxy/backups/generated-pre-clipbucket-20260904164122`.
+
+### ClipBucket's library
+
+**The catalogue is the media library, not a migration of the old site.** What
+Jellyfin serves on this host (`/data/media/movies`, `/data/media/tv`) is what
+tube.innotel.us lists, put there by `scripts/clipbucket-library.py`:
+
+```bash
+python3 scripts/clipbucket-library.py --check   # 0 in sync, 1 behind, 2 cannot tell
+python3 scripts/clipbucket-library.py --apply   # import what is missing
+python3 scripts/clipbucket-library.py --apply --only tv --limit 2   # a first look
+python3 scripts/clipbucket-library.py --serve-check   # does the site serve it?
+```
+
+It is idempotent and reads the library read-only. An item's identity is its
+**path**, so a re-run converges instead of duplicating, editing a title in the
+admin area is not undone, and renaming nothing orphans a file.
+
+That command is **not** the thing that runs on its own. `scripts/clipbucket-sync.py`
+is, on `monarch-clipbucket-sync.timer` (every two minutes, installed by
+`install-monarch.sh`), for two reasons the import cannot cover by itself: it is a
+command somebody has to remember, and it only asks one direction of drift — it
+never examines a row whose source is *gone*, so a film deleted in Jellyfin stays
+listed here and `--check` still says `in sync`. The sync also **deletes** those
+items — rows, thumbnails and the media copy, which matters because the media is a
+hardlink and would otherwise keep a deleted film's bytes alive — and gates the
+import on a fingerprint of the library, so a run that changed nothing costs a
+directory walk.
+
+```bash
+python3 scripts/clipbucket-sync.py --check   # drift in BOTH directions, writes nothing
+python3 scripts/clipbucket-sync.py --apply   # converge, if anything changed
+python3 scripts/clipbucket-sync.py --apply --force    # import even if unchanged
+python3 scripts/clipbucket-sync.py --apply --hide     # hide a vanished item instead
+```
+
+Three things have to be true for a video to be visible, and each fails
+invisibly on its own — which is why one tool owns all three rather than leaving
+them to hand-editing:
+
+- **A `cb_video` row** in the state the browse query requires
+  (`status='Successful'`, `active='yes'`, `broadcast='public'`,
+  `subscription_email='pending'`), filed under **Movies** or **TV Shows**, with
+the show name as a tag so a series is reachable as a set. An mp4 on disk with no
+row is invisible.
+- **A playable file** at `files/videos/imported/<file_name>-<quality>.mp4` with
+  `video_files` set to that quality. The name is not decoration: `get_video_files()`
+  *builds* it from the row and `update_video_files()` parses the quality back out
+  of the directory listing, so a bare `<file_name>.mp4` is read as a resolution
+  and the player then asks for a file that was never written.
+- **The card's thumbnails** — the five `num_thumbs` frames the app itself would
+  generate, at the five resolutions `VideoThumbs` declares, with the app's own
+  ffmpeg command and `cb_video_image`/`cb_video_thumb` rows behind them. A row
+  without them renders a broken image.
+
+`--serve-check` is the end-to-end half, and the only check that asks the
+*application* rather than this tool's model of it: it fetches every item's watch
+page, takes the `<source>` URLs the page emits, and requires a file behind each
+one that the web server will actually return bytes from. Everything else here
+can pass while the site plays nothing — that is exactly how the first import's
+`<name>-<hash>.mp4` rows looked complete under every filesystem check and had no
+playable source at all, and byte-serving is the half `ls` cannot see (a file the
+container user cannot read is listed fine and answered 403). It needs no
+`ffmpeg`, so the media host is judged on what it actually serves; `drift-check`
+runs it after the catalogue check.
+
+**Nothing is ever re-encoded.** Measured over the library as it stood on
+2026-09-22 — 2 H.264/AAC MP4, 8 H.264-in-MKV, 5 HEVC on `.46`; 24 H.264 and 8
+HEVC on `.56` — an MP4 that is already web-playable is **hardlinked** (no copy
+at all: the media root and the docker volume share a filesystem, so this costs
+no space and no time), an MKV is remuxed with `-c:v copy` and its audio
+converted to stereo AAC, and HEVC is remuxed the same way. A hardlinked file has
+**two names**, which is the trade the free copy makes: deleting the video in
+ClipBucket removes one name and leaves the library's file intact, while anything
+that rewrote the catalogue's file *in place* would rewrite the library's too —
+which is why nothing may be asked to modify `files/videos/imported/`, and why
+the tool only ever replaces a file it wrote itself.
+
+**A stream copy is an invariant, not an intention.** The copy keeps the
+source's video codec, and a copy whose codec is not the one a stream copy would
+carry is drift: `--apply` rebuilds it from the source. That rule is what makes
+"we do not transcode" checkable rather than a promise — an earlier version of
+this tool *did* offer a HEVC→H.264 transcode as an opt-in flag, and it was used
+on this estate (7 items on `.56`, 5 on `.46`, hours of CPU); those copies now
+read as converted and are re-remuxed back to HEVC in seconds. The one case that
+still re-encodes is a source codec no browser decodes at all, where there is no
+cheaper way to make it playable, and no item in either library is in it.
+
+**The consequence is worth stating plainly:** HEVC items play where the client
+decodes HEVC (Chrome/Safari/Edge on modern hardware) and **not in Firefox**, and
+that is accepted rather than bought off with a transcode. Both `--check` and
+`--apply` end by naming how many items carry HEVC — measured 8 on `.56` and 5 on
+`.46` — so it is a recorded number rather than a surprise, and `drift-check`
+reports it on a clean run as well as a drifted one.
+
+The library root is deployment state, named by `CLIPBUCKET_MEDIA_ROOT`
+(`--media-root`), and defaults to `/data/media` — the same path Jellyfin reads.
+
+### The media host's order of operations
+
+The two tools run **on the host, not in the container** — they read
+`/data/media` and the file volume directly, and reach the database through
+`docker exec` — so they need `ffmpeg` and `ffprobe` on the *host's* `PATH`.
+Having them inside the app image is not enough, and a host without them stops at
+`ffprobe: command not found` rather than doing something clever:
+
+```bash
+apt-get install -y ffmpeg            # Ubuntu 24.04 ships 6.1.1; the media host
+                                     # had none until 2026-09-22
+python3 scripts/clipbucket-install.py --apply    # first: schema, config, admin
+python3 scripts/clipbucket-library.py --apply    # then: the library
+```
+
+Both are idempotent and safe to re-run; on a host whose install is already
+finished, `--check` on each says so and `--apply` is a no-op. The measured first
+run on `.56` (2026-09-22): 12 films + 10 episodes, 4 remuxed and 2 hardlinked in
+the first four minutes, 25 thumbnails per item.
+
+Set `CLIPBUCKET_ADMIN_PASSWORD` in `.env` before the install where the host is
+built from that file. Left unset, the installer generates one and prints it once
+— which is fine for a one-off and wrong for a host that is rebuilt from `.env`,
+because the printed value goes with the terminal. `.56`'s is set there now.
+
+An interrupted import is not a silent one: a part-written MP4 is detected by its
+own duration against the source's and replaced, because "the file exists and is
+not empty" would otherwise catalogue a video that stops in the middle.
+
+The legacy billing API on `.72` is **RETIRED** — do not migrate it. Magnate
+subscribe.innotel.us is the single billing platform for the entire Innotel
+ecosystem. All Stripe keys, webhook endpoints, and subscription logic live in
+Magnate. The old `api.monarch.innotel.us` route has been removed. Do not
+copy or reuse its live Stripe credentials in a new deployment.
+
+The `.72` targets this table used to list are no longer current. What the edge
+forwards to now, and what each name actually answered on **2026-09-22** (driven
+from `.46`, so the status is the caller-visible one rather than the config's
+intent):
+
+| Name | Edge forwards to (`192.168.1.56`) | Measured 2026-09-22 |
+|------|-----------------------------------|---------------------|
+| `media.innotel.us`, `media.magnate.innotel.us` | `14010` (`jellyfin-sso`) → `jellyfin:8096` | `302` to its own `/web/` — Jellyfin's page, no gateway redirect |
+| `tube.innotel.us` | `14011` (`clipbucket-sso`) → `clipbucket:80` | `302` to Cerulean Authentik (`client_id=monarch-media`) |
+| `tv.monarch.innotel.us` | `14012` (`iptv-sso`) → `iptv:3000` | `302` to Cerulean Authentik |
+| `requestrr.monarch.innotel.us` | `14013` (`requestrr-sso`) → `requestrr:4545` | `302` to Cerulean Authentik |
+| `dl.`, `movies.`, `mp3.`, `xxx.`, `index.innotel.us` | the *arr gateways in `14001`–`14009` | `302` to Cerulean Authentik |
+| `req.innotel.us`, `req.monarch.innotel.us` | Jellyseerr | `307` to `/login` — Seerr's own page |
+| `brr.innotel.us`, `accounts.innotel.us`, `portainer.innotel.us` | — | `502`: nothing answers behind them. Decide whether to retire the names or restore their targets |
+| `api.monarch.innotel.us` | retired | Billing-api decommissioned — Magnate handles all billing |
+| `subscribe.monarch.innotel.us` | repurposed | Now the shared subscribe portal (public page on :3040); billing still via Magnate |
+
+The migration rule is: copy/configure first, verify the replacement and its
+public DNS/TLS/dependencies, then switch the route, and only later remove the
+source service after an explicit retention decision.
+
+### Remaining .72 service migration checklist
+
+Enable one service at a time with `MONARCH_LEGACY=1` in `.env` (or
+`docker compose --profile legacy up -d <service>`). Verify on the media host
+(now `.56`), then cut the DNS route and remove from `.72`.
+
+| Service | .72 port | Verified on the media host | DNS cut | .72 removed |
+|---------|----------|---------------|--------|-------------|
+| Dispatcharr | 9191 | ☐ | ☐ | ☐ |
+| TVHeadend | 9981/9982 | ☐ | ☐ | ☐ |
+| NextPVR | 8866 | ☐ | ☐ | ☐ |
+| Transmission | 9091 | ☐ | ☐ | ☐ |
+| Deluge | 8112 | ☐ | ☐ | ☐ |
+| autobrr | 7474 | ☐ | ☐ | ☐ |
+
+After all services are migrated, retire `media.innotel.us` and remove
+the .72 host from the compose project.
+
+
+## Subdomains & Nginx Proxy Manager (automatic)
+
+`scripts/npm-proxy-hosts.py` (invoked by `setup.sh`) configures Nginx Proxy
+Manager entirely through its API. Two modes (`.env`):
+
+- `NPM_MODE=local` (default) - the stack runs its own `nginx-proxy-manager`
+  container (compose profile `npm`, admin UI on **:81**) and setup drives it
+  at `http://localhost:81`.
+- `NPM_MODE=remote` - reuse an existing NPM server: the NPM container is
+  **not** started, and setup drives the remote server's API
+  (`NPM_BASE_URL`, e.g. `http://192.168.1.46:81` - the LAN address of the
+  NPM host; do **not** point it at the public admin UI
+  `https://proxy.innotel.us`, which is Authentik-gated and would 302 the
+  API calls to the SSO sign-in). The remote server
+  forwards to this host, so set `NPM_FORWARD_HOST` to the address it can
+  reach this host at - a LAN IP (e.g. `192.168.1.46`), public IP, or
+  hostname (instead of `container`). The ports in `npm-hosts.conf` are
+  this host's published ports, so they work in both modes.
+
+Either way the script creates (or reconciles) one proxy host per entry. `@`
+is the **apex** — the base domain itself, which is the **main interface**
+users log into (the Homarr dashboard). Everything else is a subdomain.
+
+A row's port is this host's published port, and it may be written as
+`${VAR:-default}`: use the **same variable and default the compose file
+publishes from** and one `.env` value drives both files. `sabnzbd` does this
+(`SABNZBD_PORT`); `scripts/check-proxy-ports.py` parses `docker-compose.yml`
+and the map with the deployer's own loader and **fails when a row cannot
+work** — it is a CI step and part of `monarch-drift-check`, and it is what
+catches a wrong port even when the live NPM matches the map perfectly
+(that is how `tv` forwarded to the Zeus portal's `:3001` while the IPTV guide
+published `3011`). Rows naming a service outside `docker-compose.yml`
+(`authentik-server` is the shared Cerulean stack) are reported as unverified,
+not as failures.
+
+**One row may name its own upstream.** `admin` does: `admin ${NPM_HOST_IP} 81`
+forwards to the NPM admin UI *on the NPM host*, because the admin UI does not
+run on this Docker host. A dotted hostname or an IP in the forward column wins
+over `NPM_FORWARD_HOST` (compose service names never contain a dot, so the two
+forms cannot be confused). This is not cosmetic: with the old
+`nginx-proxy-manager 2081` row the request path was *SSO gate answers, then the
+upstream fails*, because this stack's own optional `npm` profile is not running
+and nothing listens on :2081 — `https://admin.monarch.innotel.us` was dead while
+every other host worked. `NPM_HOST_IP` must be set in `.env`; the row resolves
+to `192.168.1.46:81` here, the same upstream `admin.zeus.innotel.us` uses.
+
+| Subdomain | Service | Port | WebSockets |
+|-----------|---------|------|------------|
+| `monarch.innotel.us` (apex, `@`) | Homarr dashboard — main login | 7575 | yes |
+| `app.monarch.innotel.us` | Homarr dashboard | 7575 | yes |
+| `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
+| `media.magnate.innotel.us` | Jellyfin via Magnate edge | 8097 → container 8096 | yes |
+| `tv.monarch.innotel.us` | IPTV/EPG guide | 3011 → container 3000 | - |
+| `admin.monarch.innotel.us` | Nginx Proxy Manager admin (SSO-gated) | `NPM_HOST_IP`:81 | - |
+| `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
+| `subscribe.monarch.innotel.us` | shared subscribe portal (public landing page) | 3040 | - |
+
+(`api.monarch.innotel.us` was removed - **Magnate** at `subscribe.innotel.us`
+is the source billing platform for all projects. `subscribe.monarch.innotel.us`
+was later repointed at the shared subscribe portal - a public marketing page
+served by nginx on :3040, one page per service picked by Host header - and is a
+managed row in `npm-hosts.conf`, not a leftover.)
+
+The mapping lives in `scripts/npm-hosts.conf` — add/remove lines freely; the
+script reconciles the proxy hosts on every run (idempotent). For a local NPM
+you can also forward to host-published ports with
+`NPM_FORWARD_HOST=host.docker.internal`.
+
+Deleting a line is deliberately **not** enough to delete a host: a typo in the
+conf must never take a live service down. The host becomes **drift** —
+`npm-proxy-hosts.py --check` fails and `drift-check` reports it — and is
+removed explicitly:
+
+```
+python3 scripts/npm-proxy-hosts.py --prune --dry-run   # preview
+python3 scripts/npm-proxy-hosts.py --prune             # delete
+```
+
+`--prune` only touches names inside `MONARCH_DOMAIN`, so the other products
+sharing `proxy.innotel.us` can never be removed from here. It is how the
+retired `subscribe.monarch.innotel.us` host above was cleaned up, and why
+`--check` no longer lets a host linger just because the conf stopped naming it.
+
+#### Wildcard SSL (automatic)
+
+The script requests one **Let's Encrypt wildcard certificate** for
+`*.monarch.innotel.us` (+ the apex) using a **DNS challenge**, then attaches
+it to every proxy host and forces HTTPS. Configuration in `.env`:
+
+```
+MONARCH_DOMAIN=monarch.innotel.us
+SSL_EMAIL=admin@innotel.us
+NPM_ADMIN_EMAIL=admin@innotel.us
+NPM_ADMIN_PASSWORD=change-me          # set once in the NPM UI on first login
+NPM_DNS_PROVIDER=cloudflare
+NPM_DNS_CREDENTIALS={"auth_token":"your-cloudflare-api-token"}
+```
+
+One-time DNS prerequisite (outside the script): a wildcard A record plus the
+apex A record:
+
+```
+*.monarch.innotel.us   A   <this host's public IP>
+monarch.innotel.us     A   <this host's public IP>
+```
+
+#### DNS records (Cerulean's service bridge)
+
+**Cerulean owns the DNS plane and it is Technitium over HTTP** — "no SSH, no
+TSIG, no nsupdate" (`cerulean` → docs/stack.md). When
+`NPM_FORWARD_HOST` is an IP and `CERULEAN_API_URL` + `CERULEAN_SERVICE_KEY`
+are set, `npm-proxy-hosts.py` keeps records in sync itself through Cerulean's
+service bridge:
+
+* a subdomain with **no** record gets an `A` (TTL 300) — the case this exists
+  for, a newly added line in `npm-hosts.conf`;
+* a name that **already resolves** is left exactly as it is. Monarch's hosts are
+  CNAMEs to the apex (`tv.monarch.innotel.us CNAME innotel.us`), which is where
+  the A record lives, and Technitium refuses an `A` alongside a `CNAME` — so the
+  script reports `already resolves (...) - left as is` rather than fighting it.
+
+Auth: a `ceru_...` service key carrying the `dns:write` scope
+(`CERULEAN_SERVICE_KEY`), minted on Cerulean by a platform admin:
+
+```
+POST /api/service/keys {"name":"monarch-dns","scopes":["dns:write"]}
+```
+
+Point `CERULEAN_API_URL` at Cerulean's app (`http://192.168.1.71:3003`) and
+`CERULEAN_ZONE` at the zone that owns the names (`innotel.us`). This is the
+path every other product uses. Cerulean's Technitium console is bound off the
+LAN (`127.0.0.1` + docker0), so the LAN address this section used to name
+cannot be reached from another host; `TECHNITIUM_URL`/`TECHNITIUM_TOKEN` and
+the legacy `DNS_TSIG_*` path remain only as fallbacks.
+
+The legacy `DNS_TSIG_*` / `nsupdate` path still works for a host that runs its
+own BIND, and prints a warning naming Technitium when it is used. The old
+standalone BIND at `192.168.1.80` is decommissioned: it no longer answers on
+:53, which is why the previous TSIG-based automation silently stopped writing
+records.
+
+For Cloudflare the API token needs **Zone:DNS:Edit** permission on the zone.
+Other DNS providers are supported via `NPM_DNS_PROVIDER` (route53, godaddy,
+vultr, ovh, hetzner, ...) — credentials always go in `NPM_DNS_CREDENTIALS`
+as JSON (or set `CLOUDFLARE_API_TOKEN` for the Cloudflare convenience path).
+
+First-time NPM admin (local mode) needs no manual step: current NPM images
+boot **without** a default account, and the script bootstraps the admin from
+`NPM_ADMIN_EMAIL` / `NPM_ADMIN_PASSWORD` automatically. If your NPM still has
+the legacy `admin@example.com` / `changeme` default, the configured admin is
+created alongside it. In remote mode make sure `NPM_ADMIN_EMAIL` /
+`NPM_ADMIN_PASSWORD` are the existing server's real credentials. The script
+prints clear guidance if the API login fails.
+
+> The proxy hosts are created with `client_max_body_size 0;`, exploit
+> blocking and HTTPS-forcing enabled; `monarch-recs` and `monarch-health`
+> stay internal (not exposed by default).
+
+
+## Authentication & user management (Authentik)
+
+**User management is Authentik-first.** Authentik boots with a bootstrap
+admin (no setup wizard to click through):
+
+| What | Value |
+|------|-------|
+| Admin UI | `https://auth.monarch.innotel.us` (or `http://localhost:9000`) |
+| Username | `akadmin` |
+| Password | your `MONARCH_PASSWORD` from `.env` |
+| Email | `admin@innotel.us` |
+
+Bootstrap credentials are applied **only on first boot**. Changing
+`MONARCH_PASSWORD` later does **not** reset the admin password — change it in
+the admin UI instead (Directory -> Users -> `akadmin`).
+
+**The `paid_users` group is the source of truth for who has access.**
+Payments made through **Magnate** (the source billing platform, at
+`subscribe.innotel.us`) are mirrored into `paid_users`, and subscribers are
+given access in Authentik — there is no separate Jellyfin user store for
+subscribers.
+
+#### Authentik LDAP -> Jellyfin (login gate)
+
+Jellyfin logins authenticate against Authentik directly through the bundled
+**LDAP outpost** and the Jellyfin **LDAP-Auth plugin**. Disabling a user in
+Authentik blocks their Jellyfin login (the LDAP bind fails).
+
+| Piece | Who sets it up | What it is |
+|-------|----------------|------------|
+| `authentik-ldap` container | `docker-compose.yml` | LDAP outpost, plain LDAP on 3389 / LDAPS on 6636 inside the network |
+| LDAP provider + outpost + app | Magnate provisioning | base DN `dc=innotel,dc=us`; provider/outpost named `jellyfin-ldap` |
+| Bind service account | Magnate provisioning | `authentik-ldap` service account + pinned token |
+| Groups | Magnate provisioning | `paid_users` (subscribers) and `jellyfin_admins` (Jellyfin admins - auto-created) |
+| Jellyfin LDAP-Auth plugin | `monarch-init` | installs the plugin and writes its config, then restarts Jellyfin |
+
+The full access chain: **Magnate checkout -> subscriber added to `paid_users`
+-> LDAP bind succeeds -> Jellyfin login works.** Subscription cancels -> user
+set inactive -> LDAP bind fails -> Jellyfin login blocked.
+
+**User profiles & watch history are native Jellyfin features.** Each Authentik
+account maps to a Jellyfin profile (created automatically on first LDAP
+login), with its own watch history, resume state, ratings and per-profile
+Continue Watching rows. Profiles are managed in Authentik
+(Directory -> Users); admins are granted via the `jellyfin_admins` group.
+
+##### The Authentik LDAP outpost version (bumping `authentik-ldap`)
+
+`authentik-ldap` is a **client** of the Cerulean Authentik, and goauthentik keeps
+an outpost and its server on one version line: the outpost speaks the server's
+API and report schema, so the two are bumped together. The compose comment says
+"bump both together" — this is the procedure that sentence is about, and
+`drift-check` now fails the run when the two have drifted apart. On 2026-09-19
+the outpost sat at `2026.8.2` against a `2026.8.3` server and nothing noticed.
+
+**Ask the server what version it is.** Its own API answers, so nothing has to be
+read out of the Cerulean repo or guessed:
+
+```bash
+cd 3-media/monarch
+set -a; source .env; set +a
+curl -s -H "Authorization: Bearer $AUTHENTIK_BOOTSTRAP_TOKEN" \
+  "${AUTHENTIK_BASE_URL%/}/api/v3/admin/version/" \
+| python3 -c 'import sys,json; d=json.load(sys.stdin); print("server:", d["version_current"], "outpost_outdated:", d["outpost_outdated"])'
+```
+
+`version_current` is the version to track. `outpost_outdated` is the server's
+verdict across **every** outpost on the shared Authentik, not just this one — so
+it corroborates a problem but is not the thing to test.
+
+**Compare it with what actually runs here, then set both files to that version**
+— the running stack *and* the `ips` platform manifest, which must not disagree:
+
+```bash
+docker inspect authentik-ldap --format '{{.Config.Image}}'
+# image: ghcr.io/goauthentik/ldap:<version_current>   (in both files below)
+#   3-media/monarch/docker-compose.yml
+#   ips/groups/3-media.yml
+```
+
+**Pull and recreate the outpost.** The tag is resolved when the container is
+created, so a `restart` would keep running the old image:
+
+```bash
+docker compose pull authentik-ldap
+docker compose up -d --force-recreate --no-deps authentik-ldap
+```
+
+**Prove it** — the outpost re-registers with the server on start, so the flag
+should flip, and the login path must still work end to end:
+
+```bash
+curl -s -H "Authorization: Bearer $AUTHENTIK_BOOTSTRAP_TOKEN" \
+  "${AUTHENTIK_BASE_URL%/}/api/v3/admin/version/" \
+| python3 -c 'import sys,json; print("outpost_outdated:", json.load(sys.stdin)["outpost_outdated"])'
+python3 scripts/verify-ldap.py     # binds, then runs the paid_users search the plugin runs
+scripts/drift-check.sh             # "ok: authentik LDAP outpost image tracks the server"
+```
+
+`drift-check` compares the container's tag against `version_current` and names
+this procedure in the failure, so a bump that forgets either side surfaces on the
+next run instead of at the next Jellyfin login.
+
+##### When docker compose will not bring the stack up
+
+`monarch.service` runs `docker compose up -d --wait --remove-orphans`, so when a
+compose call fails the **whole** stack stays down and every symptom downstream of
+it is a red herring: `authentik-ldap` never starts, so Jellyfin answers `500` on
+the login form, and `drift-check` reports the LDAP outpost as though the outpost
+were the fault.
+
+The failure to look for is `docker compose` exiting `1` with
+
+```
+Error response from daemon: No such container: <id>
+```
+
+while `docker ps -a` shows a row with an empty name and the status `Dead`. A
+container whose removal did not finish — a daemon restart is the usual way — keeps
+a `Dead` entry that compose reads as part of the project, and then *every* compose
+call for that project fails: `up`, `ps`, even `down`. On 2026-09-30 the entry was
+`monarch-init`'s own one-shot container; `monarch.service` had looped 2253 times,
+creating the *arr containers without ever starting them, and the media stack was
+down for ten hours.
+
+`docker rm` cannot clear it — it reports the same `No such container`, because the
+daemon's in-memory entry has lost the container it names. Only a daemon restart
+rebuilds the state; the stale directory is removed first because that is what the
+daemon re-reads on start. `drift-check --heal` now does all of this itself; by hand
+it is:
+
+```sh
+docker ps -a --filter status=dead
+rm -rf /var/lib/docker/containers/<id>
+systemctl restart docker
+systemctl reset-failed monarch.service && systemctl restart monarch.service
+bash scripts/drift-check.sh                     # expect: all live-stack invariants OK
+```
+
+`drift-check` catches this as its own `infra:` finding, and `--heal` handles it: it
+removes each `Dead` container's stale directory, restarts the Docker daemon, waits for
+it to answer, and then reconciles the stack with `docker compose up` (printing a
+compose failure instead of swallowing it with `|| true`). A service that is merely
+*stopped* rather than `Dead` is brought back by the same reconcile.
+
+The daemon restart is the one heal that reaches outside Monarch's own stack, so a host
+that would rather have a person decide can set `DRIFT_HEAL_DOCKER_RESTART=0`; the
+finding then stays an alert and the commands above are the fix.
+
+##### When a Cerulean identity cannot sign in (HTTP 500 from the login form)
+
+There are three independent pieces in this chain and **all of them must match
+Authentik**, or sign-in breaks in a way that looks like a Jellyfin bug — the form
+answers `500` for a correct password exactly as it does for a wrong one:
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `authentik-ldap` unhealthy; logs repeat `403 Forbidden (Token invalid/expired)` | The outpost's API token in the container no longer matches the key Authentik holds for the `jellyfin-ldap` outpost | Set the outpost token key to the value in `.env`, then recreate the container |
+| Outpost healthy but bind fails with LDAP `49` (`invalidCredentials`) | `AUTHENTIK_LDAP_BIND_TOKEN` and the bind user's password in Authentik have drifted | `set_password` the bind user to the `.env` value, re-write Jellyfin's `LDAP-Auth.xml`, restart Jellyfin |
+| Outpost healthy, every bind is LDAP `49`, and its log repeats `failed to execute flow … exceeded stage recursion depth` | The outpost reaches Authentik on a host outside Authentik's session-cookie domain. The bind flow's `authentik_session` cookie is scoped to `.innotel.us`; a cookie for that domain is never sent to `192.168.1.71`, so the challenge and the credentials land in different flow plans and the outpost restarts the flow until the recursion limit | Point `AUTHENTIK_HOST` at a name under the cookie domain, pinned to the LAN IP (`AUTHENTIK_LDAP_AUTHORITY` / `AUTHENTIK_LDAP_AUTHORITY_IP`; the compose default is `auth.cerulean.innotel.us`). `python3 scripts/ldap-outpost-host.py --fix` does it and recreates the outpost; `drift-check --heal` runs the same repair |
+| Log shows `LDAP-Auth, Version=23…` **and** `…Version=24…` with `InvalidCastException: …PluginConfiguration cannot be cast to …PluginConfiguration` | Two plugin folders hold `LDAP-Auth.dll`. Jellyfin loads both, and the plugin's own config type is cast across two load contexts, so *every* authentication throws — 500 for the right password and the wrong one alike | Retire the older folder (`.superseded-<date>`) so one copy remains, then restart Jellyfin |
+
+**A bind can fail for a reason that is not the bind credential.** The outpost
+runs a bind as a short Authentik flow (GET the identification challenge, POST the
+DN and password), and Authentik keeps that flow in an `authentik_session` cookie
+scoped to its public cookie domain — `.innotel.us` here. A cookie for that domain
+is never sent to `192.168.1.71`, so an outpost pointed at the LAN address loses
+the flow between the two requests, starts it again, and repeats until it logs
+`exceeded stage recursion depth`. The LDAP client only sees result code `49`, so
+this looks exactly like a drifted bind password; rotating the token cannot fix
+it. The outpost must use a *name* under the cookie domain, pinned to the server's
+LAN address with an `extra_hosts` entry. `docker-compose.yml` defaults to
+`auth.cerulean.innotel.us` + `AUTHENTIK_LDAP_AUTHORITY_IP`; `verify-ldap.py`
+reports this as `exit 4` (not a credential), and `scripts/ldap-outpost-host.py
+--fix` rewrites the two `.env` keys and recreates the outpost. `drift-check
+--heal` runs that repair for an `exit 4` or for a `49` with the recursion line in
+the outpost log, so the next timer tick clears it without a person.
+
+**An HTTP 500 also arrives through Seerr**, whose Jellyfin sign-in passes
+Jellyfin's status straight through as its own: `[Jellyfin API]: Something went
+wrong while authenticating with the Jellyfin server: Request failed with status
+code 500`. Fixing Jellyfin fixes Seerr; `401` there means the path is healthy and
+the password was simply wrong.
+
+**The usual root cause is an inline comment — and it can be inside the stored
+value.** `AUTHENTIK_LDAP_TOKEN=…` and `AUTHENTIK_LDAP_BIND_TOKEN=…` must each sit
+on a line of their own. Docker Compose strips a trailing `# comment` from an
+unquoted value, so the outpost container boots with a truncated token while the
+value `monarch-init` pinned in Authentik keeps the rest of the line — the two can
+never match. Comments belong on the line **above** the value.
+
+On 2026-09-18 that failure had gone one layer deeper: the *store* held the
+placeholder text itself (`ak-ldap-outpost-2026    # outpost API token (monarch
+stack)`, quotes and all) for both keys, migrated there from a `.env` whose lines
+carried comments, so `.env`, Vault, the bind user and the plugin config all
+agreed on a value that no Authentik token had ever been minted from. Comment
+stripping cannot catch that — the comment is *inside* the value. The check that
+would have is `scripts/check-vault-refs.py` in the `ips` repo (it flags a stored
+value that looks like a comment or a placeholder), and the repair is to
+regenerate both secrets and write them to all four places that must agree:
+Authentik, Vault, `.env`, and Jellyfin's `LDAP-Auth.xml`.
+
+A rebuild does not fix a drifted token, because Compose reads `.env` fresh but
+the outpost token in Authentik is whatever was last pinned. After changing
+either value:
+
+```bash
+cd 3-media/monarch
+# The outpost picks up AUTHENTIK_LDAP_TOKEN from .env:
+docker compose up -d --force-recreate --no-deps authentik-ldap
+# Jellyfin re-reads LDAP-Auth.xml (the plugin only reloads its config on restart):
+docker restart jellyfin
+```
+
+Then prove the path the plugin uses — bind, then the `paid_users` search — with
+the standard-library checker (it resolves the outpost's address from Docker, so
+it runs from the host or from inside any container on the network):
+
+```bash
+python3 scripts/verify-ldap.py
+#   PASS the Jellyfin LDAP login path works end to end.
+#   FAIL bind: result code 49 (invalidCredentials).
+```
+
+`monarch-init` is the supported way to re-pin both: with clean `.env` values it
+sets the outpost token key and the bind user's password from them and rewrites
+Jellyfin's config.
+
+#### Cerulean SSO for the media apps
+
+The platform standard — Authentik as the only login, the two conforming
+patterns, the required scope mappings, the one issuer mode and the shared session
+store — is
+[`ips/docs/sign-in-posture.md`](../../../ips/docs/sign-in-posture.md).
+Every gateway in this stack is **pattern B**: one `oauth2-proxy` per app sharing
+the stack's single `monarch-media` Authentik provider and one `_innotel_sso`
+cookie, with the app bound to loopback so the gateway is the only door.
+The stack's `SSO_SESSION_REDIS_HOST` must be the store's **routable** address
+(`192.168.1.46`); this host does not run the store, so `172.17.0.1` here is this
+host's own empty docker0 and every sign-in 500s on `/oauth2/callback`.
+
+The media management apps (**Radarr, Sonarr, Lidarr, Whisparr, Bazarr,
+Prowlarr, Transmission, Sabnzbd**), the `req.` Jellyseerr alias, **Jellyfin**
+(`media.*` — its sign-in page, not its API), **Clipbucket** (`tube.innotel.us`),
+the **IPTV guide** (`tv.<domain>`) and the **requestrr console**, plus the **NPM
+admin UI** itself, do not speak OIDC - they only ship a local username/password
+form. "Sign in with Authentik" for them is an **oauth2-proxy SSO gateway**: it
+runs the browser through a real OIDC code flow against Cerulean Authentik and
+only then proxies the app. There is no nginx `auth_request` and no outpost
+anywhere in the path, and every gateway shares one `.innotel.us` session
+cookie, so there is exactly **one** prompt across every host.
+
+| Piece | Where | What it is |
+|-------|-------|------------|
+| SSO gateway | an `oauth2-proxy` sidecar deployed with each app | a real OIDC client registered in Authentik, sharing the `_innotel_sso` cookie |
+| Proxy host | `scripts/npm-proxy-hosts.py` | forwards the host at the gateway's port instead of the app's |
+| App login | `monarch-init` (`set_monarch_app_auth`) | `authenticationMethod=external` ("a reverse proxy authenticated this user"), so the app's own form is gone |
+
+Because those apps trust the proxy for identity, the gateway has to be the *only*
+path in. Each app's host port is therefore bound to `127.0.0.1`
+(`radarr` `7878`, `sonarr` `8989`, `lidarr` `8686`, `whisparr` `6969`, `bazarr`
+`6767`, `prowlarr` `9696`, `transmission` `9091`, `sabnzbd` `8082`, `jellyseerr`
+`5055`, `jellyfin` `8097`, `clipbucket` `8098`, `iptv` `3011`, `requestrr`
+`4545`): the LAN address answers nothing, and the gateway reaches the app over the
+compose network by container name. Transmission's peer port (`51413`) is the one
+deliberate exception — it has to stay reachable.
+
+The four most recent additions were the apps that had a public name and no gate
+at all until 2026-09-16. Two of them are **published rather than gated**, and
+that is a decision with a reason worth knowing before reading a log:
+
+- **Jellyfin and Seerr serve their own sign-in pages** (`media.innotel.us`,
+  `media.magnate.innotel.us`, `req.innotel.us`, `req.monarch.innotel.us`). Until
+  2026-09-18 the *pages* were gated, with the Jellyfin API passed through for
+  native clients — which turned out to be the wrong half: a TV client that opens
+  `…/web/#/login` in a webview was sent to Authentik, a flow it cannot complete,
+  and Quick Connect had no page to enter its code on. Their proxies now carry
+  `OAUTH2_PROXY_SKIP_AUTH_ROUTES: "^/.*$"` and gate nothing, and the identity is
+  enforced where the app already enforces it: Jellyfin's login page offers its
+  **Cerulean Authentik** SSO button and native clients bind against the LDAP
+  outpost, while Seerr has no password of its own and signs in with the Jellyfin
+  account. The app ports stay loopback-only, so the proxy is still the only door
+  on this host. `scripts/verify-sso.py` asserts both directions — the gated names
+  still `302` to the IdP, these four answer `200` with the app's own page and
+  never redirect to it. Re-opening `8097` on the LAN is not the fix if a client
+  breaks; that skip line is.
+
+  **The SSO button is three halves that fail silently** — a plugin config pointing
+  at an issuer nobody signs in against (the button renders and dies inside
+  Authentik), a provider that never got the callback URI registered (it dies
+  at the redirect with `invalid_request: redirect_uri does not match`), and a
+  Jellyfin that does not **trust its proxy** (the button renders, the client
+  cannot follow it — see below).
+  `python3 scripts/jellyfin-oidc-sso.py --check` reads the first two and reports
+  the installed plugin's version; it is run by `scripts/drift-check.sh`. The plugin
+  binary is **pinned** in `init/jellyfin-plugins.json` (release plus the sha256 of
+  the zip *and* of the assembly inside it): `monarch-init` installs it, so a
+  rebuilt host comes back with the button, and
+  `python3 scripts/jellyfin-plugin-pin.py --check` judges the installed build
+  against the pin. The callback URIs
+  (`https://media[.magnate].innotel.us/sso/OIDC/Callback/authentik`) are part of
+  `MONARCH_SSO_REDIRECT_URIS`, because a provider refresh takes that list verbatim.
+
+##### Signing in from a phone or TV app (the third half)
+
+Jellyfin's login page is not the only consumer of the SSO button. The plugin
+also serves `/sso/OIDC/Providers`, and a native client reads that endpoint to
+discover the provider and then opens the `StartUrl` in a webview. Jellyfin
+builds that URL from the **request scheme**, and it honours `X-Forwarded-Proto`
+only when the caller is in its own `KnownProxies` — with that list empty it
+forwards nothing at all (`ForwardedHeaders.None`), so the endpoint answered
+`200` while advertising
+
+```
+http://media.magnate.innotel.us/sso/OIDC/Start/authentik      # on an https-only name
+```
+
+A desktop browser rides the `80 -> 443` redirect without noticing, which is how
+this went unseen through several hand-run login tests. An iOS/Android webview
+refuses the cleartext request, and "I cannot sign in from the app" is the whole
+symptom. `monarch-init` records the gateway (its name *and* its current address)
+from `jellyfin_ensure_known_proxies`, and **the list is read at Jellyfin's
+startup**, so init reports the restart instead of taking the media server down:
+
+```
+# after monarch-init reports it:
+sudo docker restart jellyfin
+PASS=$(python3 scripts/verify-sso.py)   # step [2c] asserts the https start URL
+```
+
+The app half of the flow itself is **Quick Connect**, not the login button:
+the app shows a code, you open the server's sign-in page in a browser, sign in
+with Cerulean Authentik, and enter the code. The button on the login page is for
+the browser client (the plugin's own changelog says so) — a code, not a new
+password, is what an app can complete.
+
+`scripts/verify-sso.py` is the committed regression test for all of this: it
+creates a throwaway Authentik identity, drives a real OIDC flow through every
+gateway above, asserts the session opens the app, asserts an identity outside
+`SSO_REQUIRED_GROUP` is refused, checks that each app port answers on loopback
+and refuses on the LAN, and asserts that each published Jellyfin name advertises
+an **https** SSO start URL. Exit codes: 0 pass, 1 fail, 2 cannot run.
+
+##### The four recent names, as deployed (2026-09-17)
+
+Each is now a gateway with an edge forward pointing *at the gateway*, verified by
+driving the name: `media.innotel.us`, `media.magnate.innotel.us`, `tube.innotel.us`
+and `tv.monarch.innotel.us` all answer `302` to
+`auth.cerulean.innotel.us/application/o/authorize/` with `client_id=monarch-media`,
+and the provider holds a redirect URI for every one of them plus
+`requestrr.monarch.innotel.us` (16 in total). Before the change the first three
+were `502` — the edge still forwarded to `.56:8097` / `.56:8098`, which are
+loopback-only now.
+
+**Two steps of that change are not this repo's to make, and both bit once:**
+
+- **The `media.*` and `tube.*` forwards live in the edge** (Magnate owns the
+  media names, the archive side the tube one). They are NPM proxy hosts, not
+  `npm-hosts.conf` rows, so `scripts/npm-proxy-hosts.py` cannot manage them — and
+  its `--prune` deliberately refuses to touch anything outside
+  `MONARCH_DOMAIN`. Changing them is an NPM API change (or the admin UI) on the
+  edge host; `tv.*` and `requestrr.*` *are* this zone's rows and are handled by
+  the script.
+- **A proxy host's TLS is part of its state, and the script used to drop it.**
+  `--hosts-only` does no certificate work, and the update body carried
+  `certificate_id: 0` — which NPM writes as a value rather than reading as "leave
+  it alone". One run therefore stripped the wildcard certificate (id 48) and
+  `ssl_forced` from all sixteen hosts in this domain, including the dashboard and
+  the auth host. It is fixed in two places: the script now carries an existing
+  host's certificate over when a run resolves none, and `--check` flags
+  `serves no TLS certificate (certificate_id=0)` as drift (suppressed by
+  `--skip-ssl`, which is what a genuinely cert-less zone checks with). If it ever
+  happens again, the pre-change values are in the 02:00 NPM backup
+  (`backups/npm-backup-<date>-020000.tar.gz`, table `proxy_host`).
+
+#### The login screen's splash (Jellyfin branding)
+
+The obsidian/champagne splash in `assets/` is **Jellyfin's login screen**, and it
+is the one page every Cerulean identity sees before they have a session. It is not
+configuration, and nothing in the app's own UI can set it:
+
+- Jellyfin *generates* the splash. `SplashscreenPostScanTask` builds a collage
+  from up to 30 posters and 30 thumbnails and writes it to
+  `{DataPath}/splashscreen.png` after **every** library scan — so a hand-copied
+  image put in that file is overwritten by the next scan, which is why the
+  branded splash is a script and not a `cp`.
+- The custom image is `SplashscreenLocation` in the `branding` configuration
+  store (`/docker/appdata/jellyfin/branding.xml`). The API deliberately cannot
+  set it — `BrandingOptionsDto` omits the field, "prevents it from being updated
+  via API" (jellyfin/jellyfin#13744) — so the file is the only way to point a
+  deployment at its own image.
+- That image's data directory is `{config}/data/data` (the same directory
+  `jellyfin.db` and the generated collage live in), so inside the container the
+  installed file is `/config/data/data/monarch-splash.png`. A location naming a
+  path that is **not there** is not an error the server reports — it serves the
+  generated collage instead. The first version of the script recorded
+  `/config/data/monarch-splash.png` while installing one directory lower, and
+  the measurement that caught it was putting a *different* image where the
+  collage goes and watching which one came back from `/Branding/Splashscreen`.
+
+`python3 scripts/jellyfin-splash.py --check` judges all of it (asset committed
+and 1920×1080, file installed and identical, `SplashscreenEnabled=true`, the
+recorded location equal to the one it installs to, and a file that exists where
+that location maps back through the appdata mount). `--apply` installs the
+committed PNG, replaces the generated collage, and points `branding.xml` at the
+custom path while **preserving the keys it does not own** (`LoginDisclaimer`,
+`CustomCss` — a wholesale rewrite drops them); `--apply --variant light` does the
+same with the cream variant, and `--render` regenerates the asset from
+`DESIGN` (needs Pillow, which is why the PNG is committed). Exit codes: 0 fine,
+1 a finding, 2 cannot run (no appdata, no asset and no Pillow).
+
+`scripts/drift-check.sh` runs `--check` read-only on the timer, and reports exit 2
+as a skip so a host running part of the group is not a drifted host. The design
+test (`scripts/tests/test_jellyfin_splash.py`) reads
+`assets/monarch-splash.svg`/`-light.svg` back and fails when `DESIGN` has drifted
+from the art, so changing the splash means changing both.
+
+```bash
+python3 scripts/jellyfin-splash.py --check          # the drift check's half
+sudo python3 scripts/jellyfin-splash.py --apply     # install + point branding
+sudo docker restart jellyfin                        # branding is read at startup
+```
+
+#### The certificate Jellyfin serves (its own HTTPS listener)
+
+`media.innotel.us` is published at the edge, and the edge terminates TLS for it
+with the Cerulean-issued certificate for that name. Jellyfin is *also* asked to
+serve that same material on its own HTTPS listener (8920), so anything reaching
+the app directly — the compose network, a client on the LAN, an operator
+following a redirect — sees our certificate rather than a self-signed one. Three
+things about it are worth knowing before touching it, because **none of them is
+reported by the server**:
+
+- **The file must be PKCS#12.** `CertificatePath` in
+  `/docker/appdata/jellyfin/network.xml` was first pointed at the PEM Cerulean
+  hands out. Jellyfin started,
+  logged nothing, and never opened 8920 — `Connection refused` and no error
+  anywhere. Converting the material to a `.pfx` (with an empty password, matching
+  the empty `CertificatePassword`) brought it up on the same restart.
+- **The file must be readable by the user Jellyfin runs as.** The container runs
+  as uid 1000 here, so a root-owned `600` file reproduces the same closed port
+  and the same silence. `--apply` chowns the bundle to the container's user for
+  exactly this reason.
+- **The certificate is a snapshot.** Cerulean renews it on a timer (90 days,
+  announced as Let's Encrypt's shorter lifetime) and pushes the result to the
+  edge automatically; nothing pushes it *into* this filesystem. The file on disk
+  is the certificate that was current the day it was installed, so the renewal is
+  a step here and not something that happens by itself.
+
+`python3 scripts/jellyfin-tls.py --check` judges the configuration file and then
+the listener itself — the second half is what makes the first trustworthy, since
+neither failure above is visible in the file. It reads `network.xml`
+(`EnableHttps`, `CertificatePath`, and that the path maps through the appdata
+mount to a PKCS#12 file its user can read), then asks the container for the
+certificate it actually serves: a 200 on `/System/Info/Public`, a *verified*
+chain (`ssl_verify_result` 0 — an expired or self-signed certificate is a
+finding, not a warning), SAN coverage of the name, the same fingerprint as the
+`.pem` installed beside it, and an expiry further away than 30 days. Exit codes:
+0 fine, 1 a finding, 2 cannot run (no appdata, no docker, no container, or a
+container with no curl/openssl). `scripts/drift-check.sh` runs `--check`
+read-only on the timer and reports exit 2 as a skip.
+
+`--apply` installs PEM material (certificate + key, the shape Cerulean's
+certificate page hands out) as the PKCS#12 file, gives it to the container's
+user, and points `network.xml` at it while **preserving every setting it does not
+own** (`KnownProxies`, the ports, the published-URI rules). It does not restart
+Jellyfin unless asked: the certificate is read at startup, so `--restart` (which
+runs `docker restart`) is the last step of the install.
+
+```bash
+python3 scripts/jellyfin-tls.py --check                     # the drift check's half
+sudo python3 scripts/jellyfin-tls.py --apply --pem /tmp/media.innotel.us.pem --restart
+# then re-read the check: it reports the certificate the listener now returns
+python3 scripts/jellyfin-tls.py --check
+```
+
+**Renewing it** is one command, because the renewal already lands somewhere this
+stack holds the credentials for. Cerulean renews `media.innotel.us` on its timer
+and pushes the result to the edge (NPM) and nowhere else — so the edge is where
+the current material always is, and `--renew` reads it back from there rather
+than asking an operator to fetch it by hand. It authenticates with the same
+`NPM_BASE_URL` / `NPM_ADMIN_EMAIL` / `NPM_ADMIN_PASSWORD` that
+`npm-proxy-hosts.py` drives the remote NPM with, picks the certificate covering
+the name (an exact match before a covering wildcard, newest expiry first), writes
+it to `ssl/media.innotel.us.pem` — the file `--check` compares the listener
+against — and installs it:
+
+```bash
+python3 scripts/jellyfin-tls.py --renew --restart
+python3 scripts/jellyfin-tls.py --check      # the listener now serves the new one
+```
+
+It is a **no-op when there is nothing to do**, which is what makes that safe to
+run on a schedule: renewing is a stream of the same material until the estate
+actually renews, so `--renew` compares what the edge holds against what the
+listener is serving and, when they are the same, says *already current* and
+installs — and restarts — nothing. Only a positive "the listener is serving
+this" skips; a listener that cannot be reached leaves the question open and the
+material is installed anyway. A restart docker refuses is a **finding** (exit 1),
+not a successful install that changed nothing, because `--check` compares the
+listener against the `.pem` on disk and an un-restarted app is exactly the
+mismatch it reports.
+
+If the edge holds nothing covering the name, `--renew` says so instead of
+installing nothing: issue it in Cerulean first (`Certificates` →
+`media.innotel.us` → *Issue*). Material that is not on the edge yet still takes
+the manual path — save it as PEM (certificate + key, one file), run `--apply`
+with `--pem`, and restart.
+
+**The schedule** is `monarch-jellyfin-tls.timer`, which runs `--renew --restart`
+on Mondays at 04:17 (plus a randomised delay), installed and enabled by
+`install-monarch.sh` alongside the drift-check and Live TV timers. Weekly is
+ahead of the 30-day warning window `--check` uses, so a renewal Cerulean performs
+is picked up within a week of it happening rather than at the expiry; a run that
+finds nothing to do costs one API call.
+
+```bash
+systemctl list-timers monarch-jellyfin-tls.timer
+journalctl -u monarch-jellyfin-tls.service   # last run, and what it decided
+```
+
+That the renewal is a step *here* at all is the point of the check: a renewal
+performed only in Cerulean reaches the edge and never this filesystem, so the day
+the certificate expires the listener starts serving an expired one — which
+`--check` reports before the expiry rather than after.
+
+#### The apps' own sign-in methods
+
+The gateway proves a Cerulean session for the *name*. It says nothing about the
+credential form behind it, and two of these apps keep a store of their own — a
+way in that no gateway covers, and the reason a user disabled in Authentik could
+still sign in:
+
+| App | What it keeps | Check | Repair |
+|-----|---------------|-------|--------|
+| Jellyseerr | `main.localLogin` — "Enable Local Sign-In": email and password, in Seerr's own store | `python3 scripts/seerr-login-methods.py --check` | `--apply` |
+| Jellyfin | accounts in Jellyfin's own database rather than the LDAP outpost | `python3 scripts/jellyfin-login-methods.py --check` | `--apply`, or declare it (`JELLYFIN_LOCAL_ACCOUNTS`) |
+
+Neither is configuration in this repo, which is why the two scripts exist rather
+than `.env` keys: Seerr re-enables local sign-in on a settings import, and
+Jellyfin's first-run wizard (or an administrator in its UI) creates a local
+account. `scripts/drift-check.sh` runs both as checks and fails on drift.
+
+What each one deliberately leaves alone:
+
+- **Seerr's Jellyfin sign-in stays on.** Turning it off too would leave a gateway
+  that authenticates nobody *into Seerr*: the proxy proves a session for the name,
+  but Seerr still needs its own, and the Jellyfin account is how a user gets one
+  without a second password. The password is what is removed, not the sign-in.
+- **Jellyfin's break-glass `admin`.** It is one of the local accounts Monarch
+  wants (`jellyfin-admin-password.py` keeps its password in step with
+  `MONARCH_PASSWORD` and mints the durable API key the services use), so the check
+  passes when the declared accounts are the only ones left and `--apply` never
+  touches it. Everything else local is *disabled* rather than deleted: the login
+  is refused, the watch history and the account id survive, and the account can be
+  handed back to the LDAP provider by enabling it again. Because it signs in
+  against Jellyfin's own store it never passes through the provider, so the OIDC
+  role mapping never reaches it — `monarch-init` grants it the `jellyfin_admins`
+  rights itself (`EnableContentDeletion`, `EnableLiveTvManagement`), and the
+  latter is what puts a delete action on a recording. Without it the Recordings
+  library only grows and the only way to clear it is a shell on the host.
+- **Any account the deployment declares in `JELLYFIN_LOCAL_ACCOUNTS`** (`.env`,
+  comma-separated, beside `JELLYFIN_ADMIN_USER`). Appointing `media.*` to serve
+  its own sign-in page cost it the gate, and a TV or mobile client that can
+  complete neither the browser flow nor an LDAP bind signs in against Jellyfin's
+  own store — a real second password, and one that looks identical to a stray.
+  Declaring it is the difference between "we keep this deliberately" and "nobody
+  noticed": declared accounts are never reported and never disabled, the count is
+  printed on every run, and dropping a name makes it a stray again. The names live
+  in the operator's `.env`, not here, because which person keeps a local login is
+  deployment state that changes — the repo would be describing last month's
+  deployment, and `drift-check` runs the same script either way.
+
+#### Seerr's Owner is a row id, not a permission
+
+Seerr has exactly one Owner, and the server decides it by row: in
+`server/routes/user/index.ts` (image `ghcr.io/seerr-team/seerr`, v3.5.0)
+`canMakePermissionsChange()` refuses to let anybody but `user.id === 1` grant
+admin, and `PUT /:id` refuses to let anybody but row 1 modify row 1. So the
+**badge, and the right to hand out admin, belong to whichever account completed
+setup first** — usually the break-glass Jellyfin admin, which nobody signs in as,
+and which `main.localLogin: false` can make unreachable outright. No endpoint
+moves it; `permissions` is a bitfield and `Owner` is derived from the row.
+
+`scripts/seerr-owner.py` **swaps the two accounts** rather than renumbering
+either: every `user` column except `id`, every foreign key onto `user.id`
+(discovered from the schema, so a table a future release adds follows too) and
+the live sessions all change sides. Nothing is deleted, so the displaced account
+keeps its id, its data and its admin bit.
+
+```
+python3 scripts/seerr-owner.py --check      # who owns Seerr (the default)
+python3 scripts/seerr-owner.py --apply      # hand it to the manifest's account
+```
+
+The account is named once, in the invariants manifest (`jellyseerr.owner`, from
+`MONARCH_SEERR_OWNER`, default `dhunter`), which is what `monarch-init` writes,
+what the script reads and what `drift-check` judges. Swap it back by running
+`--apply --account <other>`. Sign in again afterwards: sessions are re-pointed to
+follow their identity, which is a deliberate change of who they are.
+
+Setup (the gateway deploys with the app on this host; this repo's script
+reconciles the proxy hosts and supports `--check`/`--dry-run`):
+
+```
+python3 scripts/npm-proxy-hosts.py          # proxy hosts -> the gateways
+```
+
+Nothing here writes a forward-auth gate, and nothing can: the snippet
+machinery and the `NPM_FORWARD_AUTH*` switches were removed. The way back in
+when Authentik is unreachable is the LAN admin port with `BREAKGLASS_LOGIN=1`
+on the NPM host - not a gate exemption.
+
+The **sign-in host is never fronted by a gateway**: a signed-out browser is
+sent to `auth.$MONARCH_DOMAIN`, so putting it behind one would loop onto
+itself and make every other host unreachable.
+
+#### Subscription platform + billing
+
+**Magnate** (`subscribe.innotel.us`) is the **portal landing page and the
+subscribing page** for the ecosystem: visitors land there, pick a plan and pay
+through Stripe Checkout, and Magnate provisions the subscriber into Authentik
+(`paid_users`) — which is the group Monarch's SSO gate and Jellyfin LDAP login
+check. Monarch hosts no payment path, no pricing page and no plan copy; every
+"Subscribe" link in the stack (the Homarr board's **Subscribe** tile and the
+landing page) points at `SUBSCRIBE_URL` (`https://subscribe.innotel.us`), and CI
+fails if either entry point drops it. `req.innotel.us` is the
+subscriber-facing request portal (Jellyseerr) — it fronts the app through the
+`jellyseerr-sso` gateway like `req.monarch.innotel.us`, so it needs an Authentik
+session too; its callback is registered on the `monarch-media` provider. It is a
+**manual** proxy host (outside `MONARCH_DOMAIN`), so no run of
+`npm-proxy-hosts.py` maintains it. `ACCOUNT_PORTAL_URL` is the
+**Authentik self-service** page (password reset) — a different thing from the
+subscribe page. See `.env.sample` for `SUBSCRIBE_URL` / `APP_URL`,
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `JELLYFIN_URL` /
+`JELLYFIN_API_KEY` and `ACCOUNT_PORTAL_URL` / `REQUEST_URL`.
+
+#### Entitlements — Magnate's decision, Monarch's policy
+
+`paid_users` gates *access*; it does not constrain how a tier plays. That gap is
+closed by **`scripts/magnate-entitlements.py`** with
+**`scripts/magnate-tiers.json`** as the tier → playback table:
+
+| Piece | What it is |
+|-------|------------|
+| Decision | Magnate `GET /api/entitlements?plan=<slug>&user=<username\|email>` → `{entitled, reason, plan, slug, status, expires_at}`; `Authorization: Bearer $ENTITLEMENTS_API_TOKEN` when Magnate sets one |
+| Policy | `magnate-tiers.json`: `streams`, `quality_kbps` (0 = uncapped), `profiles` (advisory), `downloads` per plan slug (`basic` / `standard` / `premium` / `agents` / `magnate`, the slugs Magnate seeds) |
+| Applied to | Jellyfin `MaxActiveSessions` (when the build has the field), `RemoteClientBitrateLimit`, `EnableContentDownloading` |
+
+```
+python3 scripts/magnate-entitlements.py --check   # report only (drift-check runs this)
+python3 scripts/magnate-entitlements.py           # converge the policies
+python3 scripts/magnate-entitlements.py --disable-unentitled   # opt-in lockout
+```
+
+Two deliberate rules: an **unentitled user is reported, never silently
+disabled** (the local Jellyfin admin is not a Magnate subscriber — locking them
+out would be self-inflicted), and `exempt_users` in the tier file is skipped
+entirely. `profiles` is recorded rather than enforced, because Jellyfin has no
+per-user profile limit — it is what Magnate/Authentik are asked to allow.
+Jellyfin auth for this script is the `MediaBrowser Token=` header (the pinned
+v12 image answers 401 to `?api_key=` and `X-Emby-Token`), read from
+`JELLYFIN_API_KEY` or `/docker/appdata/init/jellyfin-api-key.txt`.
+
+`JELLYFIN_API_KEY` should be a **durable API key**, not a session token: a
+password change revokes every session token the admin holds, which is exactly
+how this credential went stale once, and an API key survives it. `monarch-init`
+exports a session token on first boot (enough to get the stack up), and
+`scripts/jellyfin-admin-password.py --set` replaces it with a durable API key
+called `monarch-admin` and writes both places it is read from:
+`/docker/appdata/init/jellyfin-api-key.txt` and `JELLYFIN_API_KEY` in `.env`.
+`monarch-recs` and `monarch-health` read the same file automatically.
+
+#### The Jellyfin admin password
+
+`MONARCH_PASSWORD` sets the Jellyfin `admin` password on a fresh install, and
+Jellyfin refuses to change an existing one without the current password — so an
+operator changing it by hand desynchronises the shared credential, and no
+`monarch-init` re-run can put it back.
+**`scripts/jellyfin-admin-password.py`** aligns it through Jellyfin's own
+forgot-password flow, which needs no old password:
+
+```
+python3 scripts/jellyfin-admin-password.py --check   # drift only, changes nothing
+python3 scripts/jellyfin-admin-password.py --set     # align, then refresh the API key
+```
+
+Two traps in that flow are worth knowing before running it by hand: the PIN is
+written to a `passwordreset*.json` file **inside the container** (the API only
+returns the path, so the call looks like it did nothing), and redeeming the PIN
+makes **the PIN itself** the account password — log in with the PIN, not with an
+empty password. `--set` handles both, then sets `MONARCH_PASSWORD` through
+`POST /Users/{id}/Password`, which is why the account ends up matching `.env`
+instead of drifting again. Subscribers never use this account: they sign in
+through the Authentik LDAP outpost.
+
+#### Homarr's encryption key (and the Jellyfin key it holds)
+
+Homarr encrypts every integration secret it stores — the Jellyfin API key
+included — with `SECRET_ENCRYPTION_KEY` from `.env` (see the rotation table
+below for the exact scheme). The key and `/docker/appdata/homarr/appdata/db`
+are **one artifact**: the ciphertext only means anything to the key that made
+it. Two consequences worth stating plainly, because neither failure looks like
+a key problem from the outside:
+
+- **Back them up and restore them together.** A restored Homarr DB without its
+  key is a dashboard that boots and answers, with integrations that silently
+  fail.
+- **Never rotate it on a host whose DB already exists.** Changing the key
+  orphans every stored secret at once; the container stays healthy and the
+  tiles just stop working. If `.env` and the running container ever disagree,
+  put `.env` back to the **container's** value — that is the one the ciphertext
+  was made with — do not generate a new one.
+- **Restart `homarr` after replacing `db.sqlite`.** SQLite is opened by
+  inode, not by path: copy a DB in under a *running* container and the process
+  keeps the old file, which the copy just unlinked. Restore a database this way
+  — a migration, a backup — and Homarr carries on against the deleted inode,
+  which after a restart-free swap looks like a brand-new install: it answers
+  every route with a redirect to `/init`, the "Welcome to Homarr" wizard. On an
+  SSO-only deployment that wizard is a dead end (there is no username/password
+  form to finish it with), so the instance simply cannot be entered. Measured
+  after this stack's move to `.56`: the on-disk DB held the user, the board and
+  its 44 items, while `lsof` showed the server holding
+  `/appdata/db/db.sqlite (deleted)`. `docker restart homarr` reopens the file
+  on disk and the login page comes back with its **Login with Cerulean** button.
+  When a restore is the reason, stop `homarr` first and copy the file in while it
+  is down — the ordering hazard is the whole trap.
+
+`monarch-drift-check` asserts `.env` and the running container carry the same
+key, and `jellyfin-admin-password.py --check-apps` then proves the *decrypted*
+key still authenticates against Jellyfin. Together those two cover both halves:
+the key Homarr is handed, and the secret it can actually read with it.
+
+#### Rotating a Jellyfin API key
+
+Mint one with `POST /Auth/Keys?app=<name>` (204) and read it back from
+`GET /Auth/Keys` — the list lags the create by a moment on this build. Delete one
+with `DELETE /Auth/Keys/<token>`. The order that never breaks a consumer is
+**mint → update the consumer → verify → delete the old key**: deleting first
+leaves the app locked out for however long the rest takes.
+
+| Consumer | Where its copy lives | How to update it |
+|---|---|---|
+| `monarch-admin` | `/docker/appdata/init/jellyfin-api-key.txt` + `JELLYFIN_API_KEY` in `.env` | `scripts/jellyfin-admin-password.py --set` |
+| Jellyseerr | `settings.json` → `jellyfin.apiKey` (plaintext) | edit it and restart the container |
+| Homarr | its own DB (`integrationSecret`, integration kind `jellyfin`) | **encrypted**: AES-256-CBC, key = `hex(SECRET_ENCRYPTION_KEY)`, 16-byte random IV, stored `hex(ciphertext).hex(iv)`. Set it in the Homarr UI, or re-encrypt with that scheme and restart |
+
+`monarch-admin` is the key Monarch's own services use (AI recommendations, health
+analytics, entitlements). The other two belong to the apps themselves and only
+need rotating if their value is exposed. There is no endpoint that "tests" a key:
+call any admin endpoint with it and expect 200 — which is what
+`scripts/jellyfin-admin-password.py --check-apps` does for both app copies, and
+`drift-check` runs it, so a rotation that stopped halfway cannot sit unnoticed.
+
+
+## AI recommendations & smart search (monarch-recs)
+
+`monarch-recs` (port 8002, internal API) is a content-based recommendation
+engine over your Jellyfin library — **fully local, no external AI required**:
+
+| Endpoint | What it does |
+|----------|--------------|
+| `GET /api/recommendations?user_id=<id>` | personalized picks from that profile's watch history (falls back to trending) |
+| `GET /api/recommendations?item_id=<id>` | "more like this" for one title |
+| `GET /api/trending` | most-played titles across all profiles |
+| `GET /api/search?q=inception&genre=action&year=2010` | ranked smart search over name/genre/year/cast/overview with filters |
+| `GET /api/describe?item_id=<id>` | LLM-generated blurb (when configured) |
+
+How it works: each item is tokenized (name weighted, plus genres, tags,
+cast, overview) into a sparse TF-IDF vector; recommendations are cosine
+similarity in pure Python (no numpy/sklearn dependency). The index refreshes
+every `REFRESH_INTERVAL` seconds (default 900) so new additions are picked
+up. Auth: the admin token exported by `monarch-init`.
+
+**Optional "AI" blurbs:** set `OPENAI_API_KEY` (and optionally
+`OPENAI_BASE_URL` / `OPENAI_MODEL`) in `.env` to enable `/api/describe` with
+any OpenAI-compatible endpoint — OpenAI, Ollama, vLLM, llama.cpp, etc.
+
+```
+curl "http://localhost:8002/api/recommendations?user_id=<uid>&limit=5"
+curl "http://localhost:8002/api/search?q=night of the living dead"
+```
+
+
+## Media health analytics (monarch-health)
+
+`monarch-health` (port 8003, internal API) periodically scans the Jellyfin
+library + the `/data/media` volume and publishes a JSON report:
+
+| Endpoint | What it does |
+|----------|--------------|
+| `GET /api/analytics` | latest report from the periodic scan |
+| `POST /api/analytics/scan` | run a scan on demand |
+| `GET /api/services` | reachability of Jellyfin, Authentik, recs, health |
+| `GET /health` | service status + last scan time |
+
+The report includes **per-library stats** (item counts by type),
+**missing files** (items whose file vanished from disk), **duplicates**
+(same filename within a library), **orphan files** (media on disk not
+registered in Jellyfin), **disk usage** for the media volume, **recently
+added** (30 days) and **most-played** titles. It is written to
+`/docker/appdata/monarch-health/analytics.json` after every scan and served
+through the API so dashboards can read a consistent snapshot.
+
+```
+curl http://localhost:8003/api/analytics | python3 -m json.tool
+```
+
+
+## Live-stack drift check (monarch-drift-check)
+
+`scripts/drift-check.sh` probes the running stack and verifies it still
+matches what `monarch-init` is supposed to maintain. It never writes
+anything — it only reads API keys from `/docker/appdata` and issues checks
+against the services:
+
+| Checked service | Invariants verified |
+|-----------------|---------------------|
+| Sonarr / Radarr / Lidarr / Whisparr | API reachable, `authenticationMethod=external` (the Cerulean SSO gate is the only login), expected media root folder, Transmission download client |
+| Prowlarr | Transmission download client, Sonarr/Radarr/Lidarr/Whisparr apps registered |
+| Transmission | RPC reachable, download dir `/data/torrents`, and no local WebUI login (Cerulean is the only door) |
+| Jellyfin | admin API access — the shared credentials when they still match, otherwise the durable admin API key (`/docker/appdata/init/jellyfin-api-key.txt`; when the local admin password has diverged the check says so and names the repair, `scripts/jellyfin-admin-password.py --set`) — plus media libraries (Movies / TV Shows / Music / Other) |
+| Jellyfin API keys held by the apps | Jellyseerr's copy in `settings.json` and Homarr's encrypted copy in its database still authenticate — the state a half-finished rotation leaves behind, which nothing else catches since the container and its own UI stay up (`jellyfin-admin-password.py --check-apps`). Only a **verdict** counts: a `401`/`403` is a rejected key, while a Jellyfin that does not answer (`0`, or the `503` its setup server returns for the whole ~40s boot after `/System/Restart`) is reported as *unverified* — a key cannot be rejected by a server that never read it |
+| Jellyseerr | initialized, Jellyfin sign-in enabled, owned by the account the manifest names (`seerr-owner.py --check`) |
+| Bazarr | API key readable, no local login (the Cerulean SSO gate is the login) |
+| ClipBucket | the install is *finished*, not merely serving: schema present, `version` row populated, admin user with an owner profile, `base_url` matching `MONARCH_BASE_URL`, and the installer locked (`scripts/clipbucket-install.py --check`; skipped when the container isn't reachable) |
+| ClipBucket playback | every catalogue item's watch page emits a `<source>` with a file behind it that the web server returns bytes from (`scripts/clipbucket-library.py --serve-check`; skipped when the container isn't reachable) |
+| Authentik (optional) | LDAP outpost provisioned (only when `AUTHENTIK_BASE_URL` is set) |
+| Cerulean Vault | `.env` holds materialized values with no unresolved `vault://` reference — the drift-check greps for leftovers (read-only; `scripts/vault-migrate.py --dry-run` shows which plaintext values are not in the store yet) |
+| Magnate (when `MAGNATE_URL` is set) | every managed user's Jellyfin policy matches its Magnate tier (`scripts/magnate-entitlements.py --check`, read-only; skipped when no Jellyfin API key) |
+| Nginx Proxy Manager (static) | `scripts/check-proxy-ports.py` — every `npm-hosts.conf` row forwards to a port `docker-compose.yml` publishes (or the container port); needs no credentials, runs in both NPM modes |
+| Nginx Proxy Manager (live) | live proxy hosts match `scripts/npm-hosts.conf` — subdomain, forward host/port, websocket support and the SSO gate — and no host in `MONARCH_DOMAIN` is live that the conf no longer lists (`npm-proxy-hosts.py --check`; remove a retired host with `--prune`); skipped when the NPM container isn't running and `NPM_MODE!=remote` / no `NPM_ADMIN_*` credentials |
+| Infra (host) | `/data` + `/docker/appdata` disk usage below 90%, probed containers not crash-looping (restart count), no stale images (recreate needed) |
+
+> **Jellyfin on the pinned build.** It reads the MediaBrowser header from
+> `Authorization`; the `X-Emby-*` spellings answer HTTP 400
+> (`Value cannot be null. (Parameter 'request.App')`) or 401 regardless of the
+> credentials — which is why `init/init.py`, `scripts/drift-check.sh` and
+> `scripts/magnate-entitlements.py` all send `Authorization: MediaBrowser …`.
+> Its local `admin` password is set by the first-run wizard and init cannot
+> re-sync it for an existing user (the password endpoints need the *current*
+> password), so it can diverge from `MONARCH_PASSWORD` after a change; for
+> host-side automation the exported admin token
+> (`/docker/appdata/init/jellyfin-api-key.txt`) is the credential to trust, and
+> subscribers sign in through the Authentik LDAP outpost rather than as `admin`.
+
+**Single source of truth:** what to check comes from
+`/docker/appdata/init/invariants.json`, which `monarch-init` emits from the
+same constants it configures with (`init/init.py` → `build_invariants()`).
+The check therefore can never diverge from what init actually sets up — if
+an app, root folder, category or library is added there, it is checked here
+automatically. The fresh-install CI check builds that manifest from `init.py`
+and validates it against `drift-check --check-manifest` on every PR, so the
+lockstep is enforced before merge.
+
+Each failure is printed as a `DRIFT-FAIL:` line and the script **exits
+non-zero**, so it can be run from cron or a systemd timer to alert on drift:
+
+```
+## check once, human-readable
+./scripts/drift-check.sh
+
+## quiet (only DRIFT-FAIL lines on stderr) - for cron/timers
+./scripts/drift-check.sh --quiet
+
+## when drift is found, re-run monarch-init automatically, then re-verify
+./scripts/drift-check.sh --quiet --heal
+
+## the last recorded verdict - 0 clean, 1 drift, 2 nothing recorded yet
+./scripts/drift-check.sh --status
+```
+
+`install-monarch.sh` also installs a **systemd timer** that runs the check
+quietly every 6 hours (with a randomized delay; `Persistent=true` catches up
+after downtime), **auto-healing**: the service runs with `--heal`, so a
+drifted stack repairs itself by re-running `monarch-init` and only alerts
+(Telegram) if the re-verify still finds problems:
+
+```
+sudo systemctl status monarch-drift-check.timer
+journalctl -u monarch-drift-check.service      # last run + any DRIFT-FAIL lines
+./scripts/drift-check.sh --status              # the verdict, without the journal
+```
+
+**The verdict is a file.** A timer's run is only readable in the journal, which
+needs a shell on the host and the right time window, so every completed run also
+records what it found in `/docker/appdata/init/drift-last` — `verdict=`, `at=`,
+`host=`, `manifest=`, `issues=`, `heal_streak=`, `heal=` and one `finding=` line
+per finding — and `--status` prints it, exiting `0` if that verdict was clean, `1`
+if drift and `2` if no run has recorded one. A staged run records nothing: the
+verdict is this host's, and a rehearsal of someone else's manifest would make the
+file lie.
+
+`heal=` is what this run did about the findings, which the verdict alone cannot
+say: `none` (nothing was tried), `healed` (a repair ran and its re-check was
+clean), `recheck` (a repair ran and its re-check still found drift), `suppressed`
+(the rate limit held the repair back) or `stood_down` (the streak above did).
+`monarch-init` folds this whole file into `status.json` under `drift`, so
+`sudo cat /docker/appdata/init/status.json` — the file that already says what init
+did — also says whether the live stack is drifted, and its SUMMARY log gains a
+`drift` line. init only reads the check's file; it never judges the stack itself,
+because `init says everything is configured` and `the live stack is healthy` are
+different claims and only the check probes the services.
+
+**One screen instead of three files.** The verdict, the heal clock and streak, and
+what the last standing-down alert carried are three files in that directory, and an
+operator asking "is anything wrong right now, and is the repair getting anywhere?"
+should not have to know that:
+
+```
+./scripts/drift-status.py            # one screen, exit 0 clean / 1 drift / 2 cannot judge
+./scripts/drift-status.py --json     # the same facts, for a dashboard
+```
+
+It answers like a read-only check, so it can be used like one, and it names the way
+out when the heal has stood down. `2` means it *cannot judge* rather than that it
+found nothing: either no run has recorded a verdict against this state directory, or
+the newest one is older than `--stale-after` (default 13h: two ticks of the six-hour
+timer, its jitter, and a margin) — a verdict that old is a memory of the stack, not
+a reading of it, and usually means the timer stopped, which is the finding.
+
+**Heal rate limit and streak:** a heal attempt is recorded in
+`/docker/appdata/init/drift-heal-last` as one line, `<epoch> <count> <standdown>`;
+if drift is still present and the last attempt was less than
+`DRIFT_HEAL_MIN_INTERVAL` (default 3600s) ago, the check skips healing and
+escalates straight to an alert instead of looping `monarch-init` on every tick.
+The count is how many attempts in a row have **not** cleared the drift — it goes up
+on each attempt and back to zero on a clean run — and the alert says it (`this has
+survived 3 heal attempt(s) in a row`, or `this is heal attempt 4 in a row that has
+not cleared it` after a re-check), because "the timer heals this" is only
+reassurance the first time. A file from before this holds just the epoch and reads
+as a streak of zero.
+
+**The heal stands down after `DRIFT_HEAL_MAX_STREAK`** attempts in a row (default
+5) that did not clear the drift. Repeating a repair that has failed five times is
+not a plan, so the check stops healing (`heal standing down - 5 attempt(s) in a row
+have not cleared this`), says so in an alert that names the repair it will not make
+again, and then alerts at most once per `DRIFT_STANDDOWN_ALERT_REPEAT_SEC` (default
+86400s) so a stack already known to be in that state does not page every six hours.
+The runs in between print `no alert - the heal stood down … ago and already said
+so` on stderr, so a quiet timer is still distinguishable from a timer that found
+nothing; `--status` has the verdict either way.
+
+**A repeat of that alert has to carry news.** The first one already said "it
+reconciled the stack N times in a row and this survived every one", so being handed
+that same page again a day later is not information — it is a page nobody can act
+on differently. The findings each standing-down alert carried are kept in
+`/docker/appdata/init/drift-standdown-alert`, and when the interval comes round the
+check compares them with what it finds now: a difference is what the repeat leads
+with (`what changed since:` then `new since then: …` / `no longer reported since
+then: …` — drift that shrank is a repair working on part of the stack, which is not
+the same as nothing happening), and no difference means no alert, with
+`no alert - the standing-down alert went out … ago and these are the findings it
+already carried` on stderr. Nothing is being silenced: a person is paged again as
+soon as the situation they were paged about is not the situation any more, and
+`--reset-streak` (below) re-arms the first alert regardless.
+
+After looking at why, a person says
+"go ahead" on the host:
+
+```
+sudo /opt/monarch/scripts/drift-check.sh --reset-streak
+```
+
+That keeps the heal clock (the rate limiter still needs it) and zeroes the count
+and the stand-down alert clock; the next tick heals again. Set
+`DRIFT_HEAL_MAX_STREAK=0` to never stand down.
+
+**The heal waits for Jellyfin before it re-verifies.** `monarch-init` restarts
+Jellyfin through its own `POST /System/Restart`, which is asynchronous: the old
+process keeps answering for a few seconds, then the new one boots for ~40s with
+its setup server listening first and answering `503` the whole time. The
+re-check that follows a heal is the next reader after all of that, so it used to
+read a half-started Jellyfin and report `libraries missing: … (have: '')` beside
+`an app's stored API key no longer authenticates` — a library finding and a
+credential finding about a server that had simply not finished starting, both
+gone by the next tick. It now polls one authenticated call (`GET /Users`, which
+only the wired server can answer) until it returns 200, for up to
+`DRIFT_READY_TIMEOUT_SEC` (default 300s), and says so if that elapses. Set
+`DRIFT_READY_WAIT=0` to skip the wait.
+
+**And `monarch-init` now restarts Jellyfin only when something actually moved.** It
+checks the LDAP-Auth plugin config before writing it (a rotated bind token has to
+be noticed — the plugin reads its config only at startup), but it compared the
+whole file. That file is shared: the plugin owns `<LdapUsers>` — the Jellyfin
+accounts it has linked to LDAP identities — and rewrites the file in its own shape,
+including an `encoding="utf-8"` XML declaration. So the comparison was true on
+every run and init restarted Jellyfin, ~40s of outage, whether or not anything had
+changed; measured on 2026-10-06 with every managed value byte-identical. It now
+compares the values it manages and carries the plugin's `<LdapUsers>` across when
+it does rewrite, so the links survive and the file converges. It also does not
+*write* on a run where nothing moved — the write itself used to be unconditional,
+which is what handed the plugin a file in init's shape to rewrite every time. The
+OIDC config is judged the same way, and that comparison is deep, so a rotated
+client secret at `/Providers/OidcProviderConfig/ClientSecret` is still noticed. A
+run that finds nothing to do logs `<plugin> plugin config already says what this
+deployment sets - left as is`.
+
+**A scheduled run gets the same benefit, shorter.** Something other than the heal
+can restart Jellyfin — its own dashboard, a plugin install — and a six-hourly
+tick could land inside that boot. So the library probe reads the status code and,
+when the server is not serving, waits `DRIFT_JELLYFIN_GRACE_SEC` (default 60s, one
+boot; `0` judges the first read) before calling it drift. A run that still cannot
+read the libraries reports *the server is not serving* rather than *the libraries
+are missing* — see [Troubleshooting](#jellyfin-is-not-serving-a-restart-versus-its-libraries-being-gone).
+
+**And a Jellyfin that is not there at all is waited for too, if it is young.**
+Nothing listening on the port is a different situation from listening-but-not-
+serving, and it lasts far longer: a *recreate* means a container to start and a
+server to bind before anything answers. One happens without anybody asking here —
+watchtower pulls a new image and recreates the container — and it was measured on
+2026-10-07: the recreate started at 22:16:54, the port refused connections for
+about nine minutes, and the check that landed at 22:19:31 read `000`, waited its
+60s, still read `000`, and reported the libraries unreadable. A finding about an
+image update is a page nobody can act on. So when nothing answers at all, Docker
+is asked when the `jellyfin` container was started: younger than
+`DRIFT_JELLYFIN_BOOT_SEC` (default 900s, comfortably inside the unit's
+`TimeoutStartSec=1800s`) and the run waits the rest of the boot out and says so;
+older than that, or a host where Docker cannot answer, and the read is judged as
+before. The finding itself says which of the two it was — `it is still starting
+Ns after the container came up`, or `the container has been up Ns without
+answering, so this is a stopped or wedged server`. `DRIFT_JELLYFIN_BOOT_SEC=0`
+turns the wait off.
+
+Infra thresholds are tunable via `DRIFT_DISK_MAX_PCT` (default 90),
+`DRIFT_MAX_RESTARTS` (default 10), `DRIFT_HEAL_MIN_INTERVAL`,
+`DRIFT_READY_TIMEOUT_SEC` / `DRIFT_READY_WAIT` (the post-heal readiness wait),
+`DRIFT_JELLYFIN_GRACE_SEC` (how long a run waits for a restarting Jellyfin to
+answer), `DRIFT_JELLYFIN_BOOT_SEC` (how long it waits for a container that was
+just recreated to answer at all) and `DRIFT_GATEWAY_URL` (see below) in `.env`.
+
+**State lives in one directory**, `MONARCH_STATE_DIR` (default
+`/docker/appdata/init`): the manifest the run judges, the heal clock, streak and
+stand-down alert clock, the findings the last standing-down alert carried, and the
+verdict. Leave it unset on a host — pointing it elsewhere is how the check
+runs against a host's state that is not this one, which is what
+`scripts/tests/test_drift_check_alerts.py` and the `drift-alerts` CI job do (and
+it is what "staged" means: a run whose manifest is not the one under that
+directory does not alert and records no verdict).
+
+#### Model gateway: a provider key that stopped being accepted
+
+The estate runs one OmniRoute for every product and it lives on the proxy host,
+not here — and nothing in this stack *needs* it. That is exactly how a refused key
+went unnoticed: the gateway went on answering on `:20128`, refused the work with a
+401, and the failure surfaced somewhere else entirely as *every model in the chain
+failed*. Nothing was watching the gateway's own idea of its credentials.
+
+Set `DRIFT_GATEWAY_URL` (e.g. `http://192.168.1.71:20128`) in `.env` and the check
+reads the gateway's connection list and reports a connection whose key it refused.
+`DRIFT_GATEWAY_TOKEN` is optional — it is sent as a bearer when set, for a gateway
+that gates its management API too — and this estate does not need it: the endpoint
+answers the same fields either way, which was checked both ways rather than
+assumed, so no credential is put on this host for the check.
+
+**What counts is the authentication classes only** — a 401 or a 403, in either
+shape the gateway reports a status (`401`, and `"401.0"`, because the column is a
+float behind the API), or by `lastErrorType`. A 429, a 402, a 404 or a 503 is a
+quota, an exhausted balance, a missing model or an upstream having a bad day: all
+of those are true of this gateway most of the time, and a check that fires on them
+is one nobody reads by the second day. **A connection somebody switched off is not
+drift** — switching a provider off is the documented answer for one that is out of
+credit, so judging it would make the fix itself raise the alarm.
+
+A gateway that cannot be read is a *note* rather than a finding, the same posture
+every other check that needs somewhere else to be reachable takes: this stack does
+not depend on the gateway, so its being down is not this stack's drift. Re-keying
+is a person's work, so **nothing in the heal touches a refused key** — the finding
+repeats, on the timer, until the connection is re-keyed or switched off:
+
+```
+DRIFT-FAIL: gateway: meta-muse/main refused its key (HTTP 401) - re-key it or switch it off
+```
+
+The classification lives in `scripts/gateway-provider-keys.py` (`--check`; and
+`--from-file` to classify a saved payload with no gateway to point at). It exits
+`0` clean, `1` for a refused key and `2` when the gateway could not be read — the
+same convention as `verify-ldap.py`, so the caller tells the cases apart rather
+than reading prose. Covered by `scripts/tests/test_gateway_provider_keys.py`,
+including that a quota error is *not* a finding.
+
+The **full-stack CI workflow** (`.github/workflows/full-stack-drift.yml`)
+boots the real stack (jellyfin, *arrs, prowlarr, Transmission, bazarr,
+jellyseerr, Nginx Proxy Manager) + `monarch-init` on a disposable runner,
+provisions the NPM proxy hosts for the test domain, and runs the actual
+drift check against it — so the proxy-host verification is exercised for
+real on every run. It runs on PRs touching `init/`, `docker-compose.yml`,
+the drift check, or the fresh-install check; nightly; and on demand
+(`workflow_dispatch`):
+
+```
+./scripts/fresh-install-check.sh --full-stack     # boot + init + real drift check
+```
+
+#### Telegram alerts (optional)
+
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (create the bot
+with @BotFather, get your chat id with @userinfobot) and the timer sends a
+Telegram message listing every `DRIFT-FAIL` line when drift is found:
+
+```
+./scripts/drift-check.sh --test-telegram      # send a test message
+```
+
+**The alert says which failure it is.** Both cases used to arrive as the same nine
+words, and the reader had to remember that the timer runs with `--heal` to tell
+them apart:
+
+```
+⚠️ Monarch drift check failed on monarch AFTER A HEAL
+  a heal reconciled the stack and re-ran monarch-init, and this re-check still finds drift - the repair did not take, so this one needs a person
+  ...
+```
+
+versus a run that only looked (the same alert without `AFTER A HEAL`, opening with
+`this run only checked - nothing was repaired`). The first is the one to act on:
+the stack was already reconciled and the finding survived it. The re-check the heal
+executes is marked for exactly this reason.
+
+**A staged run does not alert.** `MONARCH_INVARIANTS=<path>` points the check at a
+manifest other than this host's own — that is what CI does
+(`fresh-install-check.sh --full-stack`, `drift-check --check-manifest`) and what an
+operator does to rehearse a change — so its findings are the thing being looked at
+rather than an alarm. Such a run still reports every `DRIFT-FAIL` line and still
+exits non-zero; only the push notification is withheld (it says so: `no alert -
+this run reads the manifest at <path> rather than this host's, so it is staged`).
+Note that `drift-check` re-sources `.env` itself, so blanking `TELEGRAM_*` in your
+shell does **not** keep a staged run from notifying — that is what this is for.
+
+The timer's own runs are never staged, so real drift always reaches you.
+
+**Testing the alerts** does not need a bot: `DRIFT_TELEGRAM_CMD` replaces the send
+(the same seam as `MONARCH_LDAP_PROBE`), with the subject and body in
+`DRIFT_TELEGRAM_SUBJECT` / `DRIFT_TELEGRAM_BODY`. The `drift-alerts` CI job uses it
+to assert both rules — a staged run reports and stays silent, an un-staged failure
+notifies with the right subject — so no request reaches `api.telegram.org` from
+there, and `scripts/tests/test_drift_check_alerts.py` exercises the same ground in
+the unit suite (`MONARCH_STATE_DIR` pointed at a temp directory, every probed port
+a closed one), so a wording change that crossed the two rules fails a normal test
+run rather than a review.
+
+Drift happens when a container is recreated without the seed (e.g. an app
+reset its own config, or a volume was restored from a stale backup). Re-run
+`monarch-init` to repair it (the timer's `--heal` mode does this
+automatically):
+
+```
+sudo docker start monarch-init        # re-runs the one-shot init container
+```
+
+
+## Watch parties & offline downloads
+
+Both are **native Jellyfin features**, enabled out of the box:
+
+* **Watch parties (SyncPlay)** — any profile can start a SyncPlay session
+  from the Jellyfin app (tap the SyncPlay icon and invite others); playback,
+  pause and seek stay in sync across participants. SyncPlay is enabled by
+  default; administer it in Jellyfin Dashboard -> Playback.
+* **Offline downloads** — the Jellyfin mobile/desktop apps download titles to
+  the device for offline viewing. Downloads are authenticated against
+  Authentik (via the LDAP login chain), so revoked users lose access.
+
+
+## Live TV (Jellyfin)
+
+Live TV is wired automatically on first boot — **no TVHeadend or NextPVR
+setup needed**. Jellyfin ingests the Comcast dial as a native **M3U tuner**
+and uses the XMLTV guide the `iptv` container grabs, renumbered onto the dial:
+
+| Piece | Who sets it up | What it is |
+|-------|----------------|------------|
+| Channel source | `monarch-init` (Jellyfin API) | M3U tuner pointing at `LIVETV_TUNER_URL` (default: the Comcast dial, `/opt/epg/comcast-springfield.m3u`). `LIVETV_M3U_URL` is the **upstream** playlist the dial is built from, so a paid provider is still a one-line change |
+| Guide (EPG) | `monarch-init`, `monarch-livetv-guide.timer`, `iptv` container | channel list at `/opt/epg/channels.xml` (assembled from `LIVETV_EPG_SITES`); the grabber writes `guide.xml`, and the dial renumbers it into `comcast-springfield.xml`, which is the provider `monarch-init` gives Jellyfin. The raw `guide.xml` is left on disk but no longer added to Jellyfin, so it cannot duplicate the Comcast-numbered programme data. The grabber holds every listing it has fetched until it writes the file at the end, so one run's peak is days x channels and no single run of the whole channel list has ever finished here (three days aborted at Node's default heap, two days at 5 GB still held 5.07 GB *live*). `scripts/shard-livetv-guide.py` (run by `monarch-livetv-guide.timer` at 00:00/12:00) therefore grabs one **site** at a time — split further at `--max-channels 900` — and merges the parts into the same `guide.xml`, which is what lets the horizon be three days instead of one. The container is a server only (`init/iptv-pm2.config.js` is mounted over the image's own pm2 config, so its cron grab cannot race the shard), with `NODE_OPTIONS=--max-old-space-size=3072` and `mem_limit: 4g` sized for one part. A part that runs out of heap is halved and retried (`MIN_CHANNELS 100`, so up to `epg.iptvx.one-1-split1-split2-split3.xml`); a site whose parts keep failing is asked once whether **one channel** fits, and dropped for that run if it does not. `epg.iptvx.one` (729 channels, 679 of them served by no other site) fails that probe as of 2026-09-20 — a single channel exhausted the 3 GB heap in 214 s at `MAX_CONNECTIONS=1` — so the guide covers the other nine sites and the run reports it as missing; it is re-probed every run and needs no change to come back. That drop is reported **without** failing the run: it is the policy working, and counting it as a failure made `monarch-livetv-guide.service` go red on every timer tick until the red meant nothing. A part that fails for any other reason still exits 1 |
+
+**How much of Live TV has a guide.** The guide can only carry the channels whose
+site is in `LIVETV_EPG_SITES` (`init/init.py`), and that list is a measurement,
+not a guess: every site in the [iptv-org EPG
+repo](https://github.com/iptv-org/epg/tree/master/sites) was matched against the
+dial's 1,470 stream ids, and the default set is the ones that cover it —
+`xumo.tv` (128 of the dial), `tvtv.us` (163, the cable networks), `tvpassport.com`
+(91) and `tvguide.com` (63) as second sources for the same listings, then the
+smaller FAST guides. Together they name **339 of the 1,470 streams**; the rest are
+community-sourced FAST feeds no EPG site publishes, and they still play — they
+just have no "what's on" next to them.
+
+To widen or replace the guide:
+
+```
+LIVETV_EPG_SITES=xumo.tv,tvtv.us,my-paid-guide.com     # in .env
+sudo rm /opt/epg/channels.xml                          # the list is assembled once
+sudo docker compose run --rm init                      # or let monarch-init re-run
+sudo docker restart iptv                               # grab now
+```
+
+`channels.xml` is only written when it is absent, so an existing file is never
+overwritten — delete it to re-assemble, or edit it by hand if you know what your
+grabber needs.
+
+**First boot:** `monarch-init` builds the dial when `/opt/epg` is empty, then
+adds the Comcast tuner and guide provider (idempotent). The playlist exists
+immediately; the guide appears after the first grab, because the dial has no
+`guide.xml` to renumber yet. To get listings immediately:
+
+```
+sudo docker restart iptv                 # triggers the EPG grab right away
+sudo systemctl start monarch-livetv-dial # renumber it onto the dial when done
+python3 scripts/refresh-livetv-guide.py  # make Jellyfin re-read both
+```
+
+**Custom providers:** set `LIVETV_M3U_URL` in `.env` to your IPTV provider's
+playlist. It is the upstream source the dial is built from — the Jellyfin tuner
+stays on `LIVETV_TUNER_URL` (the dial), so numbering and groups still apply. Free
+iptv-org streams are community-sourced — most play, but some channels may be
+offline or geo-blocked; put a working replacement for one of them in
+`data/livetv-extra.m3u` (see below).
+
+### The Comcast dial
+
+The tuner is the Comcast dial by default: numbered channels, News/Sports/Movies
+groups, and a guide renumbered onto the same numbers. Without it Jellyfin shows
+thousands of rows in playlist order, and — because it keeps only one channel per
+`tvg-id` — a network's SD row silently disappears when its HD row uses the same
+id. The dial gives every row a unique id and duplicates the guide's own
+programmes under it:
+
+| Piece | What it is |
+|-------|------------|
+| `data/comcast-springfield-channels.tsv` | the dial itself, exactly as the operator supplied it: one `number<TAB>name` per line, nothing inferred. This is the authoritative source for a channel number |
+| `scripts/livetv_lineup.py` | matches the streams against it, numbers them, and writes the playlists and the renumbered guide into `/opt/epg` |
+| `data/livetv-extra.m3u` | operator-maintained replacement feeds, read **first**. Its streams take the primary number for their network, and the upstream entry becomes a sub-feed — the file currently replaces USA Network's dead US streams |
+| `/opt/epg/comcast-springfield.m3u` | the dial — Jellyfin's tuner points here; every row has a unique `tvg-id` (`CNN.us@SD.42`) so 42 and 842 both survive |
+| `/opt/epg/comcast-springfield.xml` | the guide, renumbered from the `iptv` container's `guide.xml`; programmes are the guide's own, duplicated under each number with `<lcn>` and a numbered display name |
+| `/opt/epg/<category>.m3u`, `/opt/epg/network-<name>.m3u` | News/Weather/Sports/Movies/Kids/Music/Documentary/Lifestyle/Local/Entertainment/General, plus one per network that appears more than once (the "several ABC stations, one subcategory" rule) |
+
+The `iptv` container serves `/opt/epg` at `http://iptv:3000/<name>`, which is how
+Jellyfin reaches all of it with nothing else running.
+
+```bash
+cd /usr/src/projects/complete/3-media/monarch
+python3 scripts/livetv_lineup.py --plan              # the taxonomy + what lines up
+python3 scripts/livetv_lineup.py --m3u PRIMARY --m3u FALLBACK --out /opt/epg
+python3 scripts/livetv_lineup.py --guide /opt/epg/guide.xml --out /opt/epg
+python3 scripts/refresh-livetv-guide.py             # make Jellyfin re-read it, and wait
+python3 scripts/verify-livetv-lineup.py             # the dial and the guide, as Jellyfin holds them
+```
+
+`--m3u` may be repeated; sources are merged in the order given, and the first
+stream of a network takes its primary number. `data/livetv-extra.m3u` is
+prepended automatically unless `--no-extra` is passed, and can be overridden
+with `LIVETV_EXTRA_M3U`.
+
+`refresh-livetv-guide.py` is the step that is easy to skip: writing `/opt/epg`
+changes nothing on its own, because Jellyfin keeps its own copy of the playlist
+and the guide until the *Refresh Guide* task runs. It clears Jellyfin's
+`cache/xmltv/*.xml` first — the downloaded guide is reused across refreshes, so
+without that the task parses yesterday's copy while the new file sits beside it —
+then starts the task and waits up to ten minutes for it, so `verify-livetv-lineup.py`
+immediately afterwards reads the new dial rather than the old one and reports a
+fault that is not there. A task that outlives the wait is left running and the
+script says so. If a Refresh Guide task is already running it leaves the cache
+alone and waits for that task; the timer and the monitor therefore never fight
+over the same file. Set `JELLYFIN_XMLTV_CACHE` if the appdata layout
+is not `/docker/appdata/jellyfin`.
+
+Re-run the generator whenever the lineup changes — it is idempotent, and Jellyfin
+picks the files up on its next guide refresh (**Dashboard → Scheduled Tasks →
+Refresh Guide**, or the API). On the deployment host a timer does it for you:
+`monarch-livetv-dial.timer` runs the generator at 00:30 and 12:30, half an hour
+behind the `iptv` container's own 00:00/12:00 guide grab, so the dial is always
+built from the current guide rather than from yesterday's. The dial service then
+runs `refresh-livetv-guide.py` as an `ExecStartPost`, so the rebuild reaches
+Jellyfin without a manual click; a Jellyfin that is down only makes that step
+noisy, not the dial red.
+
+```bash
+systemctl list-timers monarch-livetv-dial.timer
+systemctl start monarch-livetv-dial.service      # rebuild now, then refresh Jellyfin
+journalctl -u monarch-livetv-dial -n 20          # what it did
+```
+
+### Channel monitor and automatic failover
+
+`monarch-livetv-monitor.timer` runs `scripts/livetv-monitor.py` every 30 minutes
+(at :05 and :35, clear of the dial's :30 rebuild). It is the sidecar that keeps
+the dial honest:
+
+* **It probes every channel** in the generated dial, in parallel. A 200 is not
+  enough — several dead origins answer with an HTML error page — so the body has
+to be an HLS playlist. `--deep` additionally follows the first variant and
+  segment, which catches a master that is fine while every child is gone.
+* **It remembers the result** in SQLite at `/var/lib/monarch/livetv-monitor.sqlite`
+  (override with `LIVETV_MONITOR_DB`) and writes a small
+  `/var/lib/monarch/livetv-monitor.json` for monitoring. Each row records the
+  last OK/fail time, latency, HTTP status, and a failure streak.
+* **It fails over only on two consecutive failures.** The first run is a
+  baseline; a single timeout never renumbers the dial. On the second failure the
+  feed is dead, and the generator is run with `--health-db`: a dead feed is
+  dropped **only** when another stream on the same guide channel is alive, so the
+  live one takes the primary number (and `simulcast_rows` fills the paired row).
+  A channel whose every feed is down is left in place — a missing channel is
+  worse than one that may recover. A feed that was dropped stays on a
+  **watchlist** and is probed again: if it recovers, it is re-added, and if the
+  live sibling dies while it is healthy it is promoted back onto the number.
+* **It notices source changes.** It fingerprints `LIVETV_M3U_URL`,
+  `data/livetv-extra.m3u` and `data/comcast-springfield-channels.tsv`; a changed
+  playlist or lineup rebuilds the dial even if every current stream is fine.
+* **It refreshes Jellyfin after a rebuild**, using the same
+  `refresh-livetv-guide.py` the dial service calls, so the XMLTV cache is cleared
+  and the tuner and guide are re-read together. The refresh script refuses to
+  clear the cache while a Refresh Guide task is already running; it waits for
+  that task instead, so two refreshes cannot race over the file.
+
+```bash
+systemctl list-timers monarch-livetv-monitor.timer
+systemctl start monarch-livetv-monitor.service   # probe now
+journalctl -u monarch-livetv-monitor -n 30
+python3 scripts/livetv-monitor.py --limit 40 --deep --no-rebuild   # a quick look
+sqlite3 /var/lib/monarch/livetv-monitor.sqlite \
+  "select number, name, status, detail, fail_streak from channels where status != 'ok'"
+cat /var/lib/monarch/livetv-monitor.json
+```
+
+A manual `livetv_lineup.py --health-db …` run applies the same failover without
+waiting for the timer. `data/livetv-extra.m3u` remains the place to put a known
+working replacement; the monitor turns it from a static fallback into an
+automatic one when the feed it replaces dies. If a channel is dead and no feed
+is alive, add a working URL to that file and the next run will promote it.
+
+Five things worth knowing before editing the dial:
+
+* **The dataset is the operator's list, not a reconstruction.** Every number in
+  `comcast-springfield-channels.tsv` is Comcast's for the Springfield franchise,
+  so there is no "approximately right" row in it. That is why it is stored as
+  pasted: transcribing it into another format is how a number gets quietly
+  changed. If a channel moves, edit the TSV and re-run the generator.
+* **A name is matched on its identifying words, not on a regex per channel.**
+  Feed words (`HD`, `SD`, `East`, `DT2`, a parenthetical) are dropped, so `CNN`,
+  `CNN HD` and `CNN HD East` are one channel. Among the dial rows that match, the
+  *feed* then decides, because the dial lists a network's SD and HD positions as
+  separate rows: an HD stream takes the HD row (`CNN HD` is 842, `Fox News
+  Channel (720p)` is 841) and a name that says nothing stays on the classic
+  position (`CNN` is 42). An HD row that takes a stream leaves the classic
+  position beside it empty, and the lineup says both numbers are one channel, so
+  the same feed is listed on the SD row as well (a *simulcast*: `Jewelry TV 2
+  (720p)` is on 1032 *and* 8) rather than the low end of the dial going dark. The
+  lowest number only breaks what specificity and feed leave tied. A shorthand
+  that cannot collide (`DIAL_ALIASES`: HGTV for "Home &
+  Garden Television", MSNBC for "MS NOW", Nat Geo for "National Geographic")
+  binds to the dial's own legacy name. A lone generic word — "Cable News Network"
+  reduces to just `news` — may never carry a match, so "CBS News 24/7" is *not*
+  handed CNN's number.
+* **One `tvg-id` is one Jellyfin channel, so every row needs its own.** The
+  same network's SD and HD rows (42 CNN / 842 CNN HD, 35 USA / 835 USA HD) used
+  to carry the same id, and Jellyfin imported only the later one — channel 42
+  was absent from Live TV even though the M3U listed it. The dial now writes
+  `CNN.us@SD.42` / `CNN.us@SD.842` and the guide duplicates the programmes under
+  both, which is what makes the low numbers and the programmes appear together.
+  Jellyfin also collapsed rows that shared a URL, so the second row for one feed
+  gets a query parameter the origin ignores (`…index.m3u8?monarch=842`); the
+  first row keeps the pristine URL. This is the fix for “CNN is missing”: it was
+  never missing from the playlist.
+* **A replacement feed goes in `data/livetv-extra.m3u`.** It is read before the
+  upstream playlist, so the first stream for a network owns its primary number
+  and the dead upstream entry becomes a sub-feed beside it. In October 2026
+  both USA Network streams iptv-org published stopped answering; the file now
+  carries the working Latin American feed on 35/835. Keep the file small — one
+  entry per number that needs replacing, not a second whole playlist.
+* **Most of the dial has no stream, and gets none.** The list has 1,378 channels;
+  the playlist has ~1,500 streams, and only the ones that name a channel in the
+  dial take its number. Everything else — the Xumo FAST services, the Spanish
+  feeds, the sports-team overflow — takes a number in its category's band
+  instead of borrowing somebody's. The generator prints both counts, and lists
+  dial entries left empty, so the gap is visible rather than implied. About 200
+  of the empty rows are under 800, and almost all of them are channels no free
+  playlist carries at all — the Springfield locals (WGBY 2, WSHM 3, WGGB 4, WWLP
+  5), Local Access and the cable networks — so they are empty because there is
+  no stream to put on them, not because a number went missing.
+
+Sub-feeds of one network share its number with a decimal (`25`, `25.1`, `25.2`),
+exactly as a cable dial does.
+
+To add a category or a network playlist as a second tuner in Jellyfin (they are
+served at `http://iptv:3000/news.m3u`, `.../network-pbs.m3u`, …), add an M3U
+tuner per file and point the same XMLTV provider at
+`http://iptv:3000/comcast-springfield.xml`; the channels duplicate the dial's,
+which is why the dial is the tuner this deployment uses by default.
+
+
+## Restart services
+
+```
+sudo docker compose down
+sudo docker compose up -d
+```
+
+
+## What's still manual (one-time, mostly external)
+
+1. **Add indexers to Prowlarr** (`http://<host>:9696` -> Settings ->
+   Indexers) — they flow automatically to Radarr/Sonarr/Lidarr/Whisparr.
+   Legal/public-domain sources like **Archive.org** work great
+   (see [Remaining config](#remaining-config)). Tag an indexer `cloudflare`
+   to route it through the **FlareSolverr proxy** that `monarch-init`
+   already registered.
+2. **Stripe** — put your secret key (`STRIPE_SECRET_KEY`) in `.env`, then
+   run `./scripts/stripe-webhooks.sh` once. It ensures the single Magnate
+   webhook endpoint (`subscribe.innotel.us`, five events) exists and writes
+   its signing secret into `.env` for you; `./setup.sh` does this
+   automatically on first configure. The endpoint must be publicly reachable.
+3. **Jellyfin's plugins are pinned, not installed by hand.**
+   `init/jellyfin-plugins.json` records, per plugin, the release plus the sha256
+   of both the zip *and* the assembly inside it, and `monarch-init` installs from
+   that file. Two plugins are in it, because both are load-bearing and neither
+   says which build it is:
+
+   - **`oidc`** — `OIDC RBAC`, assembly `Jellyfin.Plugin.OIDC.dll`,
+     `Ezeqielle/jellyfin-plugin-oidc` v1.0.10. It is the **Cerulean Authentik**
+     button on Jellyfin's own login page; Jellyfin's catalog does not carry it and
+     its `meta.json` ships no `sourceUrl`, which is why it used to be installed by
+     hand. Before the pin, the only record of what was installed was a zip in
+     `/tmp`, and a rebuild came back with a login form and no SSO.
+   - **`ldap`** — `LDAP Authentication`, assembly `LDAP-Auth.dll`,
+     `jellyfin/jellyfin-plugin-ldapauth` v24. It is the credential store behind
+     that page. Its `meta.json` reports an empty version list, and its install
+     path used to ask GitHub for "the latest release" — which is how v23 ended up
+     installed beside v24. Jellyfin loads every folder carrying an assembly, so
+     the two copies cast the plugin's config type across two load contexts and
+     **every authentication returned HTTP 500** for a right password and a wrong
+     one alike. The pin is one build in one folder; a second non-retired copy is
+     reported by name (`--check`), and folders retired by renaming
+     (`LDAP-Auth.superseded-<date>`) are not counted, because Jellyfin reports
+     those as `Superseded` rather than loading them.
+
+   `python3 scripts/jellyfin-plugin-pin.py --check` (run by `drift-check`) judges
+   both installed builds against the pins; `--status` prints both sides,
+   `--plugin <name>` narrows it to one, and `--install` fetches, verifies both
+   hashes and extracts into `/docker/appdata/jellyfin/data/plugins/<plugin_dir>/`,
+   then tells you to restart Jellyfin (nothing here restarts your media server).
+
+   `scripts/jellyfin-oidc-sso.py --check` covers the other two halves of the
+   button — the plugin's config and the callback registered on the `monarch-media`
+   provider. The provider's callback URIs are in `MONARCH_SSO_REDIRECT_URIS`; the
+   ClientId/Authority/ClientSecret are the same `MONARCH_SSO_*` values the
+   gateways use, written into
+   `/docker/appdata/jellyfin/data/plugins/configurations/Jellyfin.Plugin.OIDC.xml`
+   by `monarch-init` (including the `paid_users` / `jellyfin_admins` role
+   mappings), and the name the plugin builds its `redirect_uri` from is
+   `MONARCH_SSO_SERVER_BASE_URL`.
+
+4. **ClipBucket has no content yet** (`tube.innotel.us`). The runtime and the
+   application files are in place; the schema and the admin account are created
+   by `python3 scripts/clipbucket-install.py --apply` (see
+   [Completed media migration](#completed-media-migration-from-the-legacy-72-server)),
+   so what is left is content: a database dump taken while the `.72` container
+   still ran, or a re-upload. `.env` must carry `CLIPBUCKET_DB_PASSWORD` (the
+   compose refuses to start the stack without it) and should carry
+   `CLIPBUCKET_ADMIN_PASSWORD` so the install script does not have to generate
+   one.
+
+
+## Remaining config
+
+Add some indexers to Prowlarr. These tools are powerful automation for
+managing media, and there is a wealth of legal, copyright-free, and
+open-source content you can use them for — e.g. in Radarr you can download
+movies in the Public Domain or released under Creative Commons (Night of the
+Living Dead (1968), His Girl Friday (1940), Charade (1963), The General
+(1926), ...). The "Gold Standard" legal indexer is **Archive.org**, which
+hosts thousands of public domain movies.
+
+
+## Troubleshooting
+
+#### monarch-init / monarch-seed
+`sudo docker logs monarch-init` shows what the automation did. Its per-service
+result, any "MANUAL ACTIONS NEEDED" list, and the last drift check's verdict (under
+`drift` — see [Live-stack drift check](#live-stack-drift-check-monarch-drift-check))
+are in `/docker/appdata/init/status.json`. If a service was mid-startup during the
+run, just re-run: `sudo docker start monarch-init`
+(or `sudo docker compose up -d` — it is idempotent).
+
+#### Transmission's RPC is unreachable, or downloads land in the wrong place
+`transmission-remote -l` inside the container is the quickest probe. If the RPC
+is down, `sudo docker logs transmission` says why. The download dir and the RPC
+whitelists are pinned two ways — `monarch-seed` writes them into
+`/docker/appdata/transmission/settings.json` before the daemon first starts, and
+`monarch-init` re-asserts the download dir over the RPC. If a hand-edit drifted
+it, re-run `sudo docker start monarch-init` (or `sudo docker compose up -d`) to
+put it back; `scripts/drift-check.sh` reports the mismatch until you do.
+
+#### An *arr has no indexers, and Prowlarr says "Prowlarr URL is invalid, Sonarr cannot connect to Prowlarr"
+That message is about the **Host header**, not the URL. Every *arr answers HTTP
+400 to a Host name it was not told about (its DNS-rebinding guard, whose default
+names only localhost), so Prowlarr calling `http://sonarr:8989` — or Sonarr
+calling Prowlarr back at `http://prowlarr:9696` for a search — is refused before
+authentication runs. The *arr then never receives an indexer, which is why the
+app list can look perfectly registered while every indexer list is empty.
+
+The allowlist is `init/arr-allowlist.txt`, read by both `monarch-init` (which
+writes it into all five apps) and `scripts/arr-allowed-hosts.py` (which applies
+it from the host). One detail decides whether the fix works:
+
+```bash
+python3 scripts/arr-allowed-hosts.py --check   # exit 2 = drift, 1 = apps not on this host
+python3 scripts/arr-allowed-hosts.py           # apply, and RESTART what changed
+```
+
+**A running *arr has already read the old list**, so an "applied" API call on its
+own leaves it refusing the new name. That is what `--no-restart` is for (apply
+now, restart in a window). `scripts/drift-check.sh` runs the `--check`, and
+Prowlarr's **Settings → Apps → Test** must answer 200 for all four.
+
+`--check` sends each app one request carrying the name its peers use and treats
+the 400 as the finding, rather than comparing `allowedHosts` — the setting is not
+a reliable proxy for it in either direction (Lidarr 2.x answers a service-name
+Host fine and never persists the field, so a comparison reports permanent drift
+for an app that works).
+
+#### Prowlarr has indexers but every search comes back empty
+An indexer that is present and blocked looks exactly like an indexer that is not
+there, except that it makes searches look *configured*. Most public trackers sit
+behind Cloudflare, and Prowlarr only routes an indexer through FlareSolverr when
+the indexer carries the `cloudflare` tag.
+
+```bash
+python3 scripts/prowlarr-indexers.py --check             # test every indexer already added
+python3 scripts/prowlarr-indexers.py --repair            # tag the blocked ones for the proxy
+python3 scripts/prowlarr-indexers.py                     # add the public ones that answer
+python3 scripts/prowlarr-indexers.py --privacy public,semiPrivate   # try the closed-signup ones too
+```
+
+`--repair` is the cheap half and the one to run first: it tags **only** the
+indexers already in the list that a second attempt through the proxy fixes, so
+fixing fifteen blocked ones does not mean re-testing six hundred definitions. It
+refuses to run when Prowlarr holds no indexer proxy, because the tag would then
+be written, the indexer would still be blocked, and the run would report a repair
+that changed nothing.
+
+It adds nothing it has not just tested, retries a Cloudflare failure through the
+proxy (tagging the indexer when that works), and repairs the ones already in the
+list the same way. Definitions marked `private` are never attempted: they want an
+account. `--check --offline` (what the drift timer runs) only asks whether an
+enabled indexer exists, because testing thirty trackers every six hours is a way
+to earn a ban — the deep test is the operator's command above.
+
+#### Prowlarr is full but an *arr still has no indexers
+Filling Prowlarr's list does not put anything into the apps. Prowlarr only offers
+an indexer to each app during an **application sync**, so a deployment whose apps
+were registered — or whose indexers were added — after the last sync shows
+Prowlarr with seventy indexers, all four app tests green, and every *arr holding
+none. That is "Prowlarr is not registering its indexers", and the missing step is
+the sync.
+
+```bash
+python3 scripts/arr-sync.py --check   # exit 2 = an app received nothing, 1 = not reachable
+python3 scripts/arr-sync.py           # sync all four, wait, then report what arrived
+```
+
+An app "has received" when it holds an indexer whose base URL is Prowlarr's own
+proxy path (`<prowlarrUrl>/<id>/`), which is what a synced indexer looks like —
+not a count of everything Prowlarr holds. **Fewer than Prowlarr has is the
+supported state**: Prowlarr deliberately will not sync an indexer that returns no
+results in that app's categories (its FAQ: "Prowlarr will not sync X Indexer to
+App"), so an app holding a subset of Prowlarr's list is correct while holding none
+is not. Only the zero is a finding, and `scripts/drift-check.sh` fails on it.
+
+#### An *arr warns "Download client Transmission places downloads in the root folder /data/media/<type>"
+A download's destination is two settings, and each one fails on its own without
+looking like the other:
+
+* **the category name each *arr sends.** Transmission has a single `category`
+  field, and Servarr sends it as a **subfolder of Transmission's download dir**
+  (the old qBittorrent schemas spelled it after the media type — `tvCategory`,
+  `movieCategory`, `musicCategory` — and a client created with a plain `category`
+  had no category at all). A client with no category drops the download straight
+  into the download dir;
+* **Transmission's download dir.** If it points at `/data/media/<type>`, the
+  category subfolder lands inside a library and Jellyfin scans half-finished
+  files — that is the warning above.
+
+The manifest is one source of truth for both: each *arr's category comes from
+`MONARCH_APPS`, and `transmission.category_paths` names the folder each lands in
+(`/data/torrents/<type>`, hardlink-friendly and outside every library root).
+`monarch-init` reconciles both — it pins the download dir and PUTs the *arr's
+corrected download client — but only while it runs, so a deployment that was
+configured by hand before that survives until one of these does the same on a
+live host:
+
+```bash
+python3 scripts/arr-download-categories.py --check   # exit 2 = drift, 1 = not reachable
+python3 scripts/arr-download-categories.py           # correct it (restarts nothing)
+```
+
+Run it after changing a category in the WebUI by hand, and after a host was
+brought up from an older checkout. `scripts/drift-check.sh` runs the `--check`,
+compares each app's category and Transmission's **download dir** (a right name
+under the wrong dir is exactly the case above), and fails when the dir has drifted
+into a library.
+
+#### Transmission still asks for a password after signing in through Cerulean
+Transmission, unlike qBittorrent, has **no per-subnet auth bypass**: its local
+login is either required for everyone or for no one. The WebUI is published on
+loopback only and `transmission-sso` is the sole route to it, so the correct
+posture is no local login at all — the same as Bazarr and Seerr. The linuxserver
+entrypoint turns `rpc-authentication-required` off whenever `USER`/`PASS` are
+unset, and `monarch-seed` writes it off in `settings.json` too.
+
+If `drift-check` reports `transmission: the WebUI still requires its own login`,
+something set `USER`/`PASS` on the `transmission` service; unset them, recreate
+the container, and re-run `monarch-init` (`configure_transmission` asserts the
+posture). A second login behind Cerulean is the exact failure this avoids.
+
+#### Why the Homarr image is pinned by digest, not `:latest`
+
+`watchtower` runs on this host every six hours with `--cleanup`, so a `:latest`
+tag means the dashboard's build can be replaced — and the previous image deleted
+— without anyone deciding to. Every rotation changes the hash of every
+`/_next/static` chunk, and a browser still holding the old page then asks for
+chunks that no longer exist: the widget queries never run and the page lands on
+Next.js's *"This page couldn't load — an unexpected error occurred"* boundary,
+which looks exactly like a real server error and does not clear on a soft reload.
+
+The image reference therefore names a digest, the same posture `jellyfin`
+already takes; set `HOMARR_IMAGE` to move to a new build deliberately instead of
+by surprise. (The image's `sw.js` is a 160-byte no-op that caches nothing, so it
+neither causes nor rescues this.)
+
+#### The dashboard's language cannot be set to one Homarr does not bundle
+
+The UI language is a per-browser cookie (`homarr.locale`), and its default comes
+from `serverSetting.culture` → `{"defaultLocale":"en"}` in Homarr's SQLite. So
+switching the board's language is that one row (site-wide) or the picker in a
+user's settings (per user) — there is no file to drop in for either.
+
+The dictionaries are **compiled into the image**: the build carries 33 locales
+(`ca cn cr cs da de el en es et fi fr he hr hu it ja ko lt lv nl no pl pt ro ru
+sk sl sv tr uk vi zh`) as bundled chunks, and any other value silently falls
+back to English. **`fa` (Persian) and `ar` (Arabic) are not in that set**, so
+they cannot be enabled by configuration at all — adding one means building a
+translation into a derived image, not editing anything on the host.
+
+#### Redis logs "Memory overcommit must be enabled!"
+
+Redis runs inside the `homarr` container (Homarr ships it and starts it on
+`:6379`), and on every start it logs *"Memory overcommit must be enabled! Without
+it, a background save or replication may fail under low memory condition."*
+
+`vm.overcommit_memory` is a **global** kernel parameter — it is not namespaced —
+so the container cannot set it. `sysctl -w vm.overcommit_memory=1` inside
+`monarch` fails with *"permission denied on key"*, and an `/etc/sysctl.d` file
+written there is inert. The setting belongs on the **Incus host that runs this
+container** — `i1`, `192.168.1.51` — where the platform stack tracks it:
+
+```bash
+# on i1
+install -m 0644 sysctl.d/60-redis-overcommit.conf /etc/sysctl.d/60-redis-overcommit.conf
+sysctl -p /etc/sysctl.d/60-redis-overcommit.conf      # -> vm.overcommit_memory = 1
+```
+
+That file lives at `ips/hosts/i1/sysctl.d/60-redis-overcommit.conf`. A value of
+`1` lets the kernel satisfy allocations beyond the commit limit, which is what
+Redis asks for so a background save cannot fail under memory pressure. Nothing in
+the dashboard breaks while it is `0` — the log line on every start is the whole
+symptom — and `drift-check` reports the value as `infra: vm.overcommit_memory`.
+
+#### `Failed to read integration cache generation` right after a restart
+
+Each `homarr` start logs this warning once per integration, all inside the same
+few milliseconds, next to `Redis connection readiness timed out`. Homarr runs
+Redis inside its own container and reads the integration caches through it, so
+the first reads race Redis's own start-up; the cache wrapper logs its
+`errorMessage` whenever a read throws, which is exactly what happens in that
+window. Once the first connection succeeds the warnings stop and do not return
+until the next restart — a burst at `T+6s` and then nothing.
+
+Check that before treating it as a fault: compare the warning timestamps with the
+container's start time (`docker inspect -f '{{.State.StartedAt}}' homarr`) and
+look at Redis itself (`redis-cli ping` inside the container, plus a non-zero
+`dbsize` — the app writes its own `integration-cache:payload:*` and
+`board-widget-queries-v1:*` keys). It is not a signal that the dashboard is
+degraded, and it cannot be silenced from configuration without patching the
+image.
+
+#### The dashboard (Homarr) shows a dead link, a duplicate, or the wrong layout
+Homarr v1 keeps boards in SQLite (`/docker/appdata/homarr/appdata/db/db.sqlite`),
+and `scripts/seed-homarr-board.py` **is** the design: the `DESIGN` list in it
+names the sections and the order of the tiles inside them, and re-running the
+script is how a change reaches the board.
+
+```bash
+python3 scripts/seed-homarr-board.py            # apply the design to every board
+python3 scripts/seed-homarr-board.py --help     # (the module docstring is the reference)
+```
+
+It is safe to run against a live Homarr (sqlite is WAL and the writes are one
+transaction), and it converges rather than appends: sections the design does not
+name are removed, tiles are re-placed at the designed x/y, and an app row the
+design no longer carries is deleted **with its tile**. That last part is the
+"dead link" repair — a tile pointing at a name with no DNS record 000s however
+healthy its container is, so `DEAD` in the script lists the services that can
+only fail (the retired `profiles: ["legacy"]` ones, and platforms whose public
+names were never created in NPM).
+
+Add a host to the board only after `getent hosts <name>` answers **on the
+deployment host** — that is the difference between a tile and a dead link, and it
+is how the `*.monarch.local` ones got in. Every board in the database is updated,
+not just the first: a second board is what an operator gets after a teammate
+saves their own, and a half-updated dashboard is worse than an unwritten one.
+
+The board is a **directory, not a status page**: a tile is a name that resolves
+and is routed, and the service behind it being down is a finding about that
+service. As of 2026-09-18 two tiles answer **502** for that reason — `AthenIQ
+Learn` and `AthenIQ Studio` point at `192.168.1.46:18080`, the Tutor (Open edX)
+caddy AthenIQ ran there, and no host runs that stack today (no tutor containers
+anywhere, the tutor data volumes are gone from `.46`; the repo declares
+tutor-lms/cms/meilisearch/mysql/mongo/redis in `ips/groups/extras/1-primary.yml`
+but not the caddy). They are kept deliberately: the links are right, and the day
+the LMS is restored the tiles are already there. Verified with
+`curl -o /dev/null -w '%{http_code}' -k <url>` from the deployment host, which is
+how every tile was checked before the redesign.
+
+#### DNS check
+`sudo docker exec -it radarr cat /etc/resolv.conf` — the stack pins
+Cloudflare DNS (1.1.1.1 / 1.0.0.1).
+
+#### The Jellyfin sign-in form answers 500 for every password
+See [When a Cerulean identity cannot sign in](#when-a-cerulean-identity-cannot-sign-in-http-500-from-the-login-form)
+— three pieces have to agree with Authentik (the outpost's API token, the bind
+credential, and one copy of the LDAP plugin), and `python3 scripts/verify-ldap.py`
+tells them apart (`exit 1` unreachable, `2` bind refused, `3` search found
+nobody, `4` the outpost cannot hold the flow's session cookie). `scripts/drift-check.sh`
+runs it, so the failure is reported before a subscriber finds it; the `exit 4`
+case is repaired by `scripts/ldap-outpost-host.py --fix`, which the heal runs.
+
+The plugin *build* is `scripts/jellyfin-plugin-pin.py`'s job now, including the
+two-copies case: it counts the folders carrying each assembly, so v23 installed
+beside v24 is reported by name rather than by symptom.
+
+**A bind that gets no reply is not a wrong credential.** The outpost logs
+`took-ms: 3316` for a bind against the Cerulean Authentik, and `verify-ldap.py`
+used to wait 3 seconds — so a reply that was merely late was reported as "the bind
+token has drifted", and the fix it printed sent an operator to rotate a working
+secret. The wait is now well past the observed latency (15s, `--timeout`), a
+silent attempt is retried once (`--attempts`), and the two cases come back
+differently: *no reply* is `exit 1` (unreachable — the outpost is slow or
+restarting), while a *result code* is `exit 2`.
+
+`drift-check` fails on a result code, and on **no reply from an outpost that has
+been up past its own start period** (`DRIFT_LDAP_GRACE_SEC`, 90s). That second
+half is new: *no reply* was a note unconditionally until 2026-09-18, and the cost
+was measured — the outpost ran 45 minutes with its API token rejected (container
+log `403 Forbidden (Token invalid/expired)`, `/ldap healthcheck` failing 541
+times, port 3389 never opened), every Cerulean identity got HTTP 500 from
+Jellyfin's login form, and the drift run still said *all live-stack invariants
+OK*. A container that is starting, or was restarted seconds ago, is still a note;
+one that is up, past the grace window, and not serving is a finding, and the
+message names the repair:
+
+```bash
+docker compose up -d --force-recreate authentik-ldap
+```
+
+Recreating is what fixes it: `monarch-init` pins the outpost's token to
+`AUTHENTIK_LDAP_TOKEN`, but a process that started against the previous one keeps
+failing on its own (the retry backoff grows to minutes and it never re-reads the
+environment). `MONARCH_LDAP_PROBE` overrides the probe command, which is how the
+note and fail paths are tested without breaking a working outpost.
+
+#### Jellyfin is not serving (a restart) versus its libraries being gone
+
+`drift-check` says two different things about Jellyfin's libraries, and only one
+of them is about the libraries:
+
+```
+DRIFT-FAIL: jellyfin: GET /Library/VirtualFolders answered HTTP 503, not 200 even after waiting 60s - the server is not serving, ...
+DRIFT-FAIL: jellyfin: libraries missing: 'Movies' 'TV Shows' 'Music' 'Other' (have: 'Collections,Movies,Music,Other,TV Shows')
+```
+
+The second names the missing libraries because the server answered and listed
+what it has. The **first means the server did not answer at all**, so nothing about
+its libraries was read — and the two are not the same finding, because the first
+is what a *restart* looks like.
+
+This build starts in two phases: a setup host binds the port first (its log says
+`ServerSetupApp.SetupServer: Kestrel is listening`) and the real server follows
+~25s later with `Core startup complete`. Every authenticated call is answered
+`503` for that whole window — `/Library/VirtualFolders`, `/Users`, and so the
+apps' key check too — and `POST /System/Restart` is asynchronous, so the outgoing
+process keeps answering for several seconds after it is asked to leave. What
+restarts Jellyfin: its own dashboard, a plugin install, and `monarch-init` — which
+is what `drift-check --heal` runs.
+
+So neither side judges that window as drift. A run waits
+`DRIFT_JELLYFIN_GRACE_SEC` (default 60s — one boot) for the server to answer
+before calling it a failure, and the heal waits longer (`DRIFT_READY_TIMEOUT_SEC`,
+default 300s) before re-checking, because it is the thing that restarted it. A
+*recreate* is not that window at all: the port refuses connections until the new
+container's server binds, which takes minutes, so a run that finds nothing
+listening asks Docker how long the container has been up and waits out
+`DRIFT_JELLYFIN_BOOT_SEC` (default 900s) while it is young. A run
+that still cannot read the libraries is looking at a Jellyfin that is not serving
+rather than one that is:
+
+```bash
+docker ps --filter name=jellyfin          # is the container up at all?
+docker logs --tail 40 jellyfin            # "Startup complete", or a crash?
+
+# Ask an AUTHENTICATED endpoint: a 200 from /System/Info/Public is the *setup*
+# host answering. 200 = serving, 401 = serving but the key is stale, 503 = still
+# booting, 000 = down.
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8097/Users \
+  -H "Authorization: MediaBrowser Token=$(cat /docker/appdata/init/jellyfin-api-key.txt)"
+```
+
+If the stack is only partly up, `docker compose up -d` starts what is missing, and
+`drift-check --heal` does that and re-runs `monarch-init` for you.
+
+`jellyfin-admin-password.py --check-apps` makes the same distinction: a key is
+*rejected* only on `401`/`403`, while a `503` from a server that never read it is
+reported as unverified. A key cannot be rejected by a server that did not answer,
+which is why a restart used to read as *an app's stored API key no longer
+authenticates*.
+
+#### Hardlinks check
+Find the same file in `/data/torrents` and `/data/media` and compare inodes:
+`ls -i /data/media/movies/<your video>` vs
+`ls -i /data/torrents/movies/<your video>`. If they differ, check the
+read/write permissions on source/destination (see Radarr/Sonarr logs).
+
+#### Files do not move from torrents to media folder
+Check Activity -> Queue for "Downloaded - Unable to Import Automatically",
+click Manual Import, confirm the correct movie, and import.
+
+#### FlareSolverr
+The `flaresolverr` container is already in the stack and `monarch-init`
+registers a **FlareSolverr proxy** in Prowlarr automatically (tagged
+`cloudflare`). To use it, tag an indexer `cloudflare` in Prowlarr (Settings
+> Indexers > edit indexer > Tags) — indexers without the tag are never
+routed through the proxy. To change its settings manually: Prowlarr >
+Settings > Indexers > Indexer Proxies > edit **FlareSolverr**.
+
+#### Jellyfin hardware acceleration
+Add to the `jellyfin` service:
+
+```yaml
+    devices:
+      - /dev/dri:/dev/dri
+```
+
+#### SABnzbd Usenet client
+The `sabnzbd` service is already in the stack on host port 8082, published from
+`SABNZBD_PORT` — the same
+variable `scripts/npm-hosts.conf` forwards to, so moving the port moves both.
+Use the TRASH-guide folder structure and
+
+
+
+### Nightly disk cleanup
+
+`scripts/docker-cleanup.sh` (mirrored from ips, canonical there) runs nightly at
+04:17 via `/etc/cron.d/docker-cleanup`: build cache (2 GB kept), dangling and
+unreferenced images, containers exited for more than a day, and container logs
+over 50 MB (trimmed to 10 MB). Volumes are never touched. Run it manually with
+`DRY_RUN=1 scripts/docker-cleanup.sh` to preview.
+
+## qBittorrent memory leak → replaced by Transmission (2026-10-01)
+
+`qbittorrent` restart-looped 28+ times and the live-stack drift check failed
+(`infra: qbittorrent restarted N times (>= 10)`). The container has no `mem_limit`
+of its own, so it was OOM-killed against the **monarch Incus cgroup** (then 6 GiB),
+whose `memory.peak` sat exactly at its cap (`memory.events: oom_kill 15`):
+**qBittorrent 5.2.x leaks memory** (upstream qBittorrent/qBittorrent#24618,
+~10 GB/day). A memory cap and a healthcheck kept it limping, but the leak never
+stopped, so qBittorrent was **removed and replaced with Transmission**.
+
+What changed:
+
+- `docker-compose.yml`: the `qbittorrent` and `qbittorrent-sso` services are gone;
+  `transmission` (and `transmission-sso`) is the downloader, with a healthcheck
+  that probes the RPC so a dead-but-running container reports `unhealthy`. The
+  WebUI stays loopback-only; only the peer port (`51413`) is published.
+- The per-app folders are unchanged: Servarr sends its category to Transmission as
+  a subfolder of the download dir, which is pinned to `/data/torrents`, so
+  `movies`/`tv`/`music`/`xxx` still land under `/data/torrents/<type>` and are the
+  same path in every container.
+- `monarch-seed` now writes Transmission's `settings.json` (download dir, RPC
+  whitelists off, no local login) instead of qBittorrent's config.
+- `monarch-init` (`configure_transmission`) and `scripts/arr-download-categories.py`
+  reconcile the download dir and each *arr's Transmission client;
+  `scripts/drift-check.sh` asserts both.
+
+The `monarch` Incus limit stayed at `8GiB` as a guard so one misbehaving service
+cannot starve the whole stack. Operational note: clearing a kernel-stuck wedged
+task once needed a reboot of the `i1` host — the healthcheck exists so that state
+is visible before it gets there.
+
+### Deploying the swap (order of operations)
+
+The swap is a change to `docker-compose.yml` and `init/`, so it only reaches the
+stack when the **live checkout** does. The media host is the `monarch` Incus
+container on `i1` (LAN `192.168.1.56`); its checkout is
+`/usr/src/projects/complete/3-media/monarch` **inside that container**, and
+`systemd/monarch.service` runs `docker compose … up -d --wait --remove-orphans`
+from it. That checkout is *not* a shared mount with the dev box, and it carries
+its own uncommitted work — reconcile it deliberately (shared remote, merge, pull)
+rather than copying one tree over the other (see
+`ips/docs/checkout-drift-2026-10-01.md`).
+
+`docker start monarch-init` on its own changes **nothing** about the downloader:
+it re-runs the one-shot init container *as the host last defined it*, so on a host
+still on the old compose it just re-seeds qBittorrent and reports success. The
+order that matters is:
+
+```bash
+# 1. On the media host, in the checkout: get the new compose + init/ onto disk.
+#    (git pull after the shared-remote merge, or the reconciled files.)
+sudo docker compose up -d --remove-orphans     # creates transmission + transmission-sso
+sudo docker start monarch-init                  # then let init re-wire the *arrs
+# or, if the stack is managed by the unit:  sudo systemctl restart monarch
+```
+
+`--remove-orphans` is the flag that matters. Compose `up` leaves running any
+container whose service is no longer in the file, so without it `qbittorrent` and
+`qbittorrent-sso` keep running beside `transmission` — the state that looks like
+"the swap did not work". `monarch.service` already passes it, so a
+`systemctl restart monarch` on a host whose files are current is enough.
+
+Three things are **not** in the repo and have to be done on the host/provider:
+
+- **`.env`** (live, git-ignored) must carry the new callback:
+  `MONARCH_SSO_REDIRECT_URIS` gains `https://transmission.<domain>/oauth2/callback`.
+- **Authentik** must have that same callback registered on the media client;
+  `scripts/verify-sso.py` fails until it is.
+- **Nginx Proxy Manager** must swap the host. `scripts/npm-hosts.conf` already
+  lists `transmission` at `14007` and no longer lists `qbittorrent`, so
+  `python3 scripts/npm-proxy-hosts.py --prune` adds the new name and deletes the
+  retired one (its `--check` reports the drift first; `--dry-run` shows the plan).
+
+### Retiring qBittorrent's leftovers
+
+Nothing in the stack reads these once `transmission` is verified, but keep them
+until it is — an appdata directory is the *only* copy of a session's resume data
+and its `settings.json`:
+
+1. Confirm the replacement first: `scripts/drift-check.sh` clean, and
+   `python3 scripts/arr-download-categories.py --check` reporting every *arr on
+   the Transmission client with download dir `/data/torrents`.
+2. Remove the proxy host: `python3 scripts/npm-proxy-hosts.py --prune` (drop the
+   `qbittorrent.<domain>` row and its certificate assignment; the conf no longer
+   lists the name, so `--check` fails until it is pruned).
+3. Retire the appdata last: `sudo rm -rf /docker/appdata/qbittorrent`. Its
+   `torrents/` and session state are superseded by
+   `/docker/appdata/transmission`, and the media itself lives under
+   `/data/torrents` (untouched). `scripts/docker-cleanup.sh` never removes
+   volumes or appdata, so this one is a hand step and stays documented here.
+4. Authentik: drop the `qbittorrent` application/provider if the media client
+   was one client with a redirect list — the callback above is the whole change.
+
+## Repository access from the deployment host
+
+This host pulls and pushes its own repositories over **SSH with per-repository
+deploy keys**. There is no stored personal access token and no HTTPS credential
+helper on the box:
+
+| Repository | Remote | Key |
+|---|---|---|
+| `innotelinc/monarch` | `git@github.com:innotelinc/monarch.git` | `/root/.ssh/github_deploy` |
+| `innotelinc/innotel-platform-stack` | `git@github-ips:innotelinc/innotel-platform-stack.git` | `/root/.ssh/github_deploy_ips` |
+
+GitHub does not allow one deploy key to serve two repositories, which is why the
+platform stack has its own key and the `github-ips` alias in `/root/.ssh/config`
+(`HostName github.com` plus `IdentitiesOnly yes`) instead of a plain `github.com`
+remote. Both keys are registered **with write access**, because this host pushes
+the commits it makes; revoke them under each repository's *Settings → Deploy
+keys* if that stops being true.
+
+To rotate a key: `ssh-keygen -t ed25519 -f /root/.ssh/<name> -N ""`, add the
+`.pub` under *Settings → Deploy keys* with *Allow write access*, and leave
+`~/.ssh/config` pointing at it. `ssh -T git@github.com` (or `git@github-ips`)
+answers `Hi innotelinc/<repo>!` when the key is right.

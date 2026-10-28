@@ -1,0 +1,38 @@
+[Unit]
+Description=Monarch Jellyfin TLS certificate (renew from the edge and install it)
+Documentation=https://github.com/innotelinc/monarch
+Requires=docker.service
+After=monarch.service docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/monarch
+
+# The renewal Cerulean performs lands on the edge (NPM) and nowhere else, so the
+# copy Jellyfin should be serving is the copy the edge is serving —
+# `jellyfin-tls.py --renew` reads it back and installs it as the PKCS#12 file
+# Jellyfin loads. Before this unit existed the renewal reached the edge and never
+# this filesystem, so the day the certificate expired the listener began serving
+# an expired one and the first sign of it was a phone refusing to connect.
+#
+# `--restart` is part of the install because Jellyfin reads `network.xml` and the
+# certificate at startup only, and it restarts *only* when something changed: a
+# run where the edge holds what the listener already serves installs nothing,
+# restarts nothing, and says so. That is what makes a weekly schedule acceptable
+# on a media server rather than a weekly interruption.
+#
+# Exit 2 is the tool's "cannot look" (no appdata, no docker, no container, or no
+# edge credentials in .env) — the same convention `drift-check.sh` uses, and the
+# reason it is a finding and not a silent pass. The journal line names which half
+# could not be read. The script path is relative to WorkingDirectory (rewritten
+# to the install target by install-monarch.sh).
+ExecStart=/usr/bin/python3 scripts/jellyfin-tls.py --renew --restart
+# One edge API call, one PKCS#12 build, one container restart.
+TimeoutStartSec=300s
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

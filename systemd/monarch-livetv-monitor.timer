@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the Monarch Live TV channel monitor every 30 minutes
+Documentation=https://github.com/innotelinc/monarch
+
+[Timer]
+# :05/:35, so a normal run finishes well before the dial rebuilds at :30 and
+# 00:30/12:30. The service also orders itself after the dial, so a slow probe
+# waits instead of overlapping.
+OnBootSec=5min
+OnCalendar=*:05,35
+Persistent=true
+AccuracySec=1min
+Unit=monarch-livetv-monitor.service
+
+[Install]
+WantedBy=timers.target

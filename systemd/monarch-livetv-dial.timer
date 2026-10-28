@@ -1,0 +1,15 @@
+[Unit]
+Description=Rebuild the Monarch Live TV dial twice a day, after the guide is built
+Documentation=https://github.com/innotelinc/monarch
+
+[Timer]
+# Half an hour behind the guide timer. The dial also waits on the guide unit itself,
+# so this gap is slack rather than the mechanism: it keeps the two from starting in
+# the same second on a host where both timers were just enabled.
+OnCalendar=*-*-* 00:30:00
+OnCalendar=*-*-* 12:30:00
+Persistent=true
+Unit=monarch-livetv-dial.service
+
+[Install]
+WantedBy=timers.target

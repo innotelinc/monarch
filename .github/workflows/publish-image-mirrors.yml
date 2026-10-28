@@ -1,0 +1,98 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# publish-image-mirrors.yml — publish this stack's Docker Hub image mirrors.
+#
+# The stack runs a handful of images that live only on Docker Hub. Docker Hub
+# answers an anonymous pull out of roughly a hundred requests per six hours per
+# address, and that budget is SHARED with every digest check the Network's update
+# monitor (Ontrak Sync) makes — so pulling these images from the Hub was enough to
+# exhaust it and make *other* updates fail with `429 Too Many Requests`.
+#
+# So the stack pulls them from this repo's GHCR namespace instead, published by
+# this workflow. GitHub Container Registry has no equivalent pull limit, and a
+# push from Actions in this public repository publishes a PUBLIC package, so a
+# fresh host can still pull it anonymously.
+#
+# WHAT IS MIRRORED, AND HOW: `docker buildx imagetools create` copies an image's
+# manifest and its blobs by reference, so every platform the upstream publishes
+# arrives intact without this job downloading a layer. The tag comes from one
+# place — the `tag` input — so the dispatch and the schedule mirror the same
+# reference, and the pinned default is the single source of truth for every
+# consumer (docker-compose.yml, scripts/offline-images.txt, .env.sample).
+#
+# `nextpvr` is two entries because NextPVR publishes a SEPARATE single-arch image
+# per CPU architecture rather than one multi-arch manifest; mirroring keeps that
+# shape (nextpvr_amd64 / nextpvr_arm64), and install-monarch.sh picks the one that
+# matches the host.
+#
+# The schedule keeps `:latest` tracking upstream without a person remembering to
+# run it; `imagetools` only pushes when the mirrored digest actually changed.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Publish image mirrors
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to mirror (must exist for every image below)"
+        required: false
+        default: "latest"
+  schedule:
+    # Daily, a little ahead of the nightly release so `:latest` is never more than
+    # a day behind upstream.
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # The repository's own GHCR namespace (ghcr.io/<owner>/<repo>).
+  IMAGE_NAMESPACE: ${{ github.repository }}
+
+jobs:
+  mirror:
+    name: Mirror ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One image failing to resolve must not hide the others' state.
+      fail-fast: false
+      matrix:
+        include:
+          - name: watchtower
+            source: docker.io/nickfedor/watchtower
+          - name: requestrr
+            source: docker.io/thomst08/requestrr
+          - name: nginx-proxy-manager
+            source: docker.io/jc21/nginx-proxy-manager
+          - name: nextpvr_amd64
+            source: docker.io/nextpvr/nextpvr_amd64
+          - name: nextpvr_arm64
+            source: docker.io/nextpvr/nextpvr_arm64
+    env:
+      MIRROR_TAG: ${{ github.event.inputs.tag || 'latest' }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Copies the manifest list (every platform the upstream publishes) rather
+      # than a single-arch image, so the mirror is a drop-in for the upstream ref.
+      - name: Pull and re-push the image
+        run: |
+          set -euo pipefail
+          mirror_tag="${MIRROR_TAG:-latest}"
+          source="${{ matrix.source }}:$mirror_tag"
+          destination="$REGISTRY/$IMAGE_NAMESPACE/${{ matrix.name }}"
+          docker buildx imagetools create \
+            --tag "$destination:$mirror_tag" \
+            --tag "$destination:latest" \
+            "$source"
+          echo "::notice::published $destination:$mirror_tag (${{ matrix.source }} mirror)"

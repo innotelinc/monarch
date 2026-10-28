@@ -1,0 +1,18 @@
+[Unit]
+Description=Renew Monarch's Jellyfin certificate from the edge on a schedule
+Documentation=https://github.com/innotelinc/monarch
+
+[Timer]
+# Weekly, and ahead of the 30-day window `jellyfin-tls.py --check` warns in, so a
+# renewal Cerulean performs is picked up within a week of it happening rather than
+# at the expiry. The run is a no-op whenever the edge's material is the material
+# the listener already serves, so most weeks cost one API call and one comparison.
+# Persistent catches up after downtime/boot; RandomizedDelaySec keeps a fleet of
+# hosts off the edge's API at the same instant.
+OnCalendar=Mon *-*-* 04:17:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=monarch-jellyfin-tls.service
+
+[Install]
+WantedBy=timers.target

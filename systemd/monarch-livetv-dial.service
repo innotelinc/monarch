@@ -1,0 +1,36 @@
+[Unit]
+Description=Monarch Live TV dial (renumber the guide and playlists onto the Comcast lineup)
+Documentation=https://github.com/innotelinc/monarch
+Requires=docker.service
+After=docker.service network-online.target
+# Ordered behind the guide build and not required by it: a guide that failed to
+# build leaves the dial renumbering whatever guide is on disk, which is exactly what
+# it did before there was a guide unit at all. The pairing is the point — the dial
+# reads /opt/epg/guide.xml, so building it in the same breath is what stops the
+# numbering being applied to yesterday's listings.
+Wants=monarch-livetv-guide.service
+After=monarch-livetv-guide.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/monarch
+# The upstream playlist and the optional replacement playlist are deployment
+# values (.env), not code: a paid provider or a different fallback file must be
+# honoured without editing this unit. `-` makes a missing .env non-fatal.
+EnvironmentFile=-/opt/monarch/.env
+ExecStart=/usr/bin/python3 scripts/livetv_lineup.py --guide /opt/epg/guide.xml --out /opt/epg
+# A dial on disk changes nothing until Jellyfin re-reads it. This clears the
+# downloaded XMLTV cache and starts the Refresh Guide task, so the twice-daily
+# rebuild actually reaches the clients. `-` keeps the dial green when Jellyfin
+# is down; the channel monitor retries the refresh on its next run.
+ExecStartPost=-/usr/bin/python3 scripts/refresh-livetv-guide.py
+# The dial rewrites a guide that is now days deep rather than a day, so it is given
+# room to take longer than it used to.
+TimeoutStartSec=3600s
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,307 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# release.yml — build & publish the Monarch Media Platform release.
+#
+# Triggers:
+#   • every tagged release  (git tag v* && git push --tags)  — recommended
+#   • manual via "Run workflow" (version bump minor | major), or
+#   • nightly schedule.
+#
+# What a release produces:
+#   build-images    publish the first-party Docker images to GHCR  #                   (ghcr.io/innotelinc/monarch-recs|health),
+#                   tagged with the release version AND :latest
+#   release         cut the GitHub release with deployment payload +
+#                   source bundle + checksums
+#   release-images  docker image bundle (offline install) — parallel VM
+#   release-iso     bootable live/install ISO — parallel VM
+#
+# Version: derived by scripts/release-version.py from the HIGHEST existing
+#   version (tags + releases), never from the newest release record — see that
+#   script for the v1.23 collision that rule came from. `build-images` computes
+#   it once and every other job consumes that output, so the images and the
+#   release can never name different versions.
+#
+# Inputs:
+#   minor | major   - version bump from the highest release (default: minor)
+#   lightweight     - skip the docker image bundle + live ISO (quick test only)
+#
+# Asset policy (hosted runners):
+#   • Every release (scheduled + default manual) is FULL: the release job cuts
+#     the release with the lightweight deployment payload + source bundle,
+#     then two parallel jobs build+upload each heavy artifact on their own VM:
+#       - release-images → docker image bundle (~burn GW+ on a full pull)
+#       - release-iso    → live ISO (~7 GB live-build chroot + ISO)
+#   Each separate VM comfortably fits its artifact, which is why the two heavy
+#   builds are split rather than combined in one job.
+#   • Set the `lightweight` input to skip the two heavy builds for a quick
+#     manual test release.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: Release Monarch Media Platform
+
+on:
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (minor | major)"
+        type: choice
+        options:
+          - minor
+          - major
+        default: minor
+      lightweight:
+        description: "Skip the docker image bundle + live ISO (quick test release only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: monarch-release
+  cancel-in-progress: false
+
+jobs:
+  # ── Publish the first-party images (recs/health) to GHCR.
+  # Runs before the offline bundle job so the bundle can include the fresh
+  # images. Tagged runs publish VERSION + latest; otherwise next-version +
+  # latest (the version string is recomputed here to keep jobs independent).
+  build-images:
+    name: Build & publish Monarch images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The one place the version is decided. Everything downstream — image
+      # tags, the release, the ISO, the summary — reads this output, so a second
+      # computation cannot disagree with the release it is naming.
+      #
+      # On a tag push the tag IS the version (--tag), which keeps
+      # `git tag v1.24 && git push --tags` cutting exactly v1.24.
+      - name: Compute release version
+        id: version
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'minor' }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          args=(--bump "$BUMP")
+          if [ -n "$TAG" ]; then
+            args+=(--tag "$TAG")
+          fi
+          VERSION="$(python3 scripts/release-version.py "${args[@]}")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Cross-arch builds (arm64 from the amd64 runner) need QEMU.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build & push Monarch AI recommendations
+        uses: docker/build-push-action@v7
+        with:
+          context: ./ai-recs
+          file: ./ai-recs/Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm64
+          push: true
+          tags: |
+            ghcr.io/innotelinc/monarch-recs:${{ steps.version.outputs.version }}
+            ghcr.io/innotelinc/monarch-recs:latest
+
+      - name: Build & push Monarch media health
+        uses: docker/build-push-action@v7
+        with:
+          context: ./health-analytics
+          file: ./health-analytics/Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm64
+          push: true
+          tags: |
+            ghcr.io/innotelinc/monarch-health:${{ steps.version.outputs.version }}
+            ghcr.io/innotelinc/monarch-health:latest
+
+      - name: Build & push Monarch ClipBucket
+        uses: docker/build-push-action@v7
+        with:
+          context: ./clipbucket
+          file: ./clipbucket/Dockerfile
+          platforms: |
+            linux/amd64
+            linux/arm64
+          push: true
+          tags: |
+            ghcr.io/innotelinc/monarch-clipbucket:${{ steps.version.outputs.version }}
+            ghcr.io/innotelinc/monarch-clipbucket:latest
+
+  # ── Cut the GitHub release (payload + source bundle; version from the tag
+  # when one was pushed, otherwise bumped from the last release).
+  release:
+    name: Cut release
+    needs: build-images
+    runs-on: ubuntu-latest
+    # The version is NOT recomputed here. Two jobs deriving it independently is
+    # how the images and the release come to name different versions when a
+    # release is cut in between them; this job reports what was actually built.
+    outputs:
+      version: ${{ needs.build-images.outputs.version }}
+      release_url: ${{ steps.cut.outputs.release_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build source bundle
+        run: ./scripts/build-source-bundle.sh
+
+      - name: Build deployment payload
+        run: ./scripts/build-offline-bundle.sh --deployment-only
+
+      # Idempotent on purpose. `gh release create` fails outright when the
+      # name is taken, which is what made a re-run of this workflow (or a tag
+      # pushed for a version released earlier) fail with "release with the same
+      # tag name already exists" — leaving the run red over a release that is
+      # already correct. An existing release is refreshed instead.
+      - name: Cut release
+        id: cut
+        env:
+          VERSION: ${{ needs.build-images.outputs.version }}
+          LITE: ${{ github.event.inputs.lightweight }}
+        run: |
+          if [ "$LITE" = "true" ]; then
+            EXTRA="**Lightweight release**: deployment payload + source bundle only."
+          else
+            EXTRA="**Full release**: includes the docker image bundle and live ISO, built and uploaded by parallel jobs in this run."
+          fi
+          NOTES=$(cat <<NOTESEOF
+          Monarch Media Platform **$VERSION** — the self-hosted streaming platform with AI recommendations, live TV, Authentik SSO and media automation.
+
+          **This release was generated automatically** by the release workflow (tagged push, schedule, or manual dispatch).
+
+          **First-party images published to GHCR** (also tagged \`latest\`, amd64 + arm64):
+          - \`ghcr.io/innotelinc/monarch-recs\` — AI recommendations + smart search
+          - \`ghcr.io/innotelinc/monarch-health\` — media health analytics
+          - \`ghcr.io/innotelinc/monarch-clipbucket\` — ClipBucket v5 runtime (nginx + PHP-FPM + MariaDB)
+
+          **What's included:**
+          - \`monarch-deployment.tar.gz\` — full source + \`docker-compose.yml\` + systemd payload
+          - \`monarch-source-bundle.tar.gz\` — full uncompiled repo for offline rebuilds
+          - $EXTRA
+
+          **How to use it:**
+          - **Live install** — write \`monarch-live-amd64.iso\` to a USB stick (\`dd\`), boot it, and launch **Install Monarch** from the desktop to install the whole platform onto an internal disk.
+          - **In-place install** on an already-installed Linux box — run \`scripts/install-monarch.sh\` from the deployment payload, or \`./setup.sh\` to also auto-configure Nginx Proxy Manager (subdomains + wildcard SSL).
+          - **Offline** — \`scripts/fetch-offline-bundle.sh\` pulls the deployment bundle + docker image parts for a fully offline install.
+          NOTESEOF
+          )
+          TITLE="Monarch Media Platform $VERSION"
+          assets=(
+            dist/offline-bundle/monarch-deployment.tar.gz
+            dist/offline-bundle/SHA256SUMS
+            dist/source-bundle/monarch-source-bundle.tar.gz
+            dist/source-bundle/monarch-source-bundle.tar.gz.sha256
+          )
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::release $VERSION already exists — refreshing its notes and assets"
+            # --draft=false publishes it: a release run's outcome is a published
+            # release, and a draft holding this version would otherwise stay
+            # invisible while blocking the name.
+            gh release edit "$VERSION" --title "$TITLE" --notes "$NOTES" --draft=false
+            gh release upload "$VERSION" "${assets[@]}" --clobber
+          else
+            gh release create "$VERSION" "${assets[@]}" --title "$TITLE" --notes "$NOTES"
+          fi
+          echo "release_url=$(gh release view "$VERSION" --json url -q .url)" >> "$GITHUB_OUTPUT"
+
+  # ── Docker image bundle (separate VM so its large peak doesn't crowd the
+  # ISO build). Runs on every full release; uploads the image parts plus the
+  # deployment tarball and SHA256SUMS (keeping payload + checksums consistent).
+  release-images:
+    name: Build & upload docker image bundle
+    needs: [release, build-images]
+    if: github.event.inputs.lightweight != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker system prune -af 2>/dev/null || true
+          df -h / | tail -1
+      - name: Build docker image bundle
+        run: ./scripts/build-offline-bundle.sh
+      - name: Upload image bundle + refreshed checksums
+        run: |
+          shopt -s nullglob
+          gh release upload "$VERSION" \
+            dist/offline-bundle/docker-images-part*.tar.gz \
+            dist/offline-bundle/monarch-deployment.tar.gz \
+            dist/offline-bundle/SHA256SUMS --clobber
+
+  # ── Live ISO (separate VM: ~7 GB live-build chroot + ~2 GB ISO).
+  release-iso:
+    name: Build & upload live ISO
+    needs: release
+    if: github.event.inputs.lightweight != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h / | tail -1
+      - name: Install live-build ISO toolchain
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y live-build xorriso mtools genisoimage \
+            grub-efi-amd64-bin grub-pc-bin isolinux syslinux-common
+      # The ISO bakes the deployment payload, so produce it first.
+      - name: Build deployment payload
+        run: ./scripts/build-offline-bundle.sh --deployment-only
+      - name: Build live ISO
+        run: sudo ./scripts/build-live-usb.sh
+      - name: Upload live ISO
+        run: |
+          gh release upload "$VERSION" \
+            dist/live-usb/monarch-live-amd64.iso \
+            dist/live-usb/monarch-live-amd64.iso.sha256 --clobber
+
+  summarize:
+    name: Summarize release
+    needs: [build-images, release, release-images, release-iso]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::notice::Release: ${{ needs.release.outputs.version }} — ${{ needs.release.outputs.release_url }}"
+          echo "::notice::Images: ${{ needs.build-images.result }} | Image bundle: ${{ needs.release-images.result }} | Live ISO: ${{ needs.release-iso.result }}"
+          exit 0

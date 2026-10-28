@@ -1,0 +1,30 @@
+[Unit]
+Description=Monarch Live TV monitor (probe streams, fail over dead feeds, refresh the guide)
+Documentation=https://github.com/innotelinc/monarch
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+# The monitor reads /opt/epg and can rebuild the dial. Do not start it on top of
+# the dial or guide oneshots; systemd waits for those to finish first.
+After=monarch-livetv-dial.service monarch-livetv-guide.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/monarch
+# The upstream playlist, the replacement file, and the Jellyfin cache location
+# are deployment values in .env. `-` makes a missing file non-fatal.
+EnvironmentFile=-/opt/monarch/.env
+StateDirectory=monarch
+ExecStart=/usr/bin/python3 scripts/livetv-monitor.py --once
+# Probing the whole dial plus a Jellyfin refresh can take a few minutes; the
+# script itself has a per-request timeout and clears the TaskStarted flag after
+# it, so this is a backstop, not the normal runtime.
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

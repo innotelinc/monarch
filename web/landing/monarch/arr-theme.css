@@ -1,0 +1,128 @@
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ * MONARCH — the theme the *arr apps wear.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Radarr, Sonarr, Lidarr, Whisparr and Prowlarr ship no theming hook of their
+ * own, so this file is injected into their pages at the edge (the NPM proxy
+ * host's `sub_filter` — see scripts/npm-theme.py). It is served from the public
+ * apex, https://monarch.innotel.us/monarch/arr-theme.css, and the injection
+ * only ever adds a <link> to it; nothing in this stack rebuilds an app image.
+ *
+ * WHY THE SELECTORS LOOK LIKE THAT
+ * ---------------------------------
+ * Servarr compiles its styles as CSS *modules*, so every class carries a
+ * per-build hash: `.Button-primary-MZWFG`, `.PageHeader-logo-WW_El`,
+ * `.styles-logo-WwFI0`. The hash changes with every app release, so nothing
+ * here names a full class — each selector matches the stable PREFIX with
+ * `[class*="…-"]`. That is the whole reason this survives an image bump.
+ *
+ * WHAT IT CHANGES
+ * ---------------
+ *   * the chrome goes to Monarch's near-black,
+ *   * the primary/action colour becomes the crown's gold, and the "primary"
+ *     labels/status chips the velvet red,
+ *   * links go gold,
+ *   * the app's own logo is replaced by the crown (an <img> via `content:`, a
+ *     background-image mark via `background-image:` — both are covered because
+ *     Servarr has shipped both),
+ *   * the browser tab title is prefixed by the small script beside this file.
+ *
+ * It is deliberately a palette and a mark, not a redesign: an operator who
+ * knows Sonarr should still recognise Sonarr.
+ */
+
+/* ── canvas ───────────────────────────────────────────────────────────────── */
+:root {
+  --pageBackground: #0b0d10 !important;
+  --monarch-gold: #f5cc57;
+  --monarch-gold-hi: #fff0b8;
+  --monarch-gold-deep: #d69a2b;
+  --monarch-red: #b5101f;
+}
+
+html,
+body {
+  background: #0b0d10 !important;
+}
+
+/* ── links ────────────────────────────────────────────────────────────────── */
+a,
+[class*="link-"] {
+  color: #e7b63f !important;
+}
+a:hover {
+  color: #fff0b8 !important;
+}
+
+/* ── primary action (buttons) ─────────────────────────────────────────────── */
+[class*="Button-primary-"] {
+  background-image: linear-gradient(#fff0b8, #f5cc57 34%, #d69a2b) !important;
+  border: 1px solid #b7791f !important;
+  color: #2b1e04 !important;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35) !important;
+}
+[class*="Button-primary-"]:hover {
+  filter: brightness(1.07) saturate(1.05);
+}
+
+/* ── status chips / labels / progress ─────────────────────────────────────── */
+[class*="Label-primary-"],
+[class*="Icon-primary-"] {
+  background-color: #b5101f !important;
+  color: #ffe9a8 !important;
+}
+[class*="ProgressBar-primary-"],
+[class*="ProgressBar-frontText-"] {
+  background-color: #f5cc57 !important;
+  color: #2b1e04 !important;
+}
+input[type="checkbox"]:checked,
+[class*="CheckInput-primary-"] {
+  accent-color: #f5cc57 !important;
+}
+
+/* ── the mark ─────────────────────────────────────────────────────────────── */
+/* An <img> logo: replace the drawn image itself. */
+img[src*="Images/logo"],
+img[src*="logo."][class*="logo"] {
+  content: url("https://monarch.innotel.us/monarch/monarch-crown.svg") !important;
+  width: auto !important;
+  max-height: 36px !important;
+  object-fit: contain !important;
+}
+/* A background-image mark (the div-based header logo): paint the crown. */
+[class*="PageHeader-logo-"],
+[class*="styles-logo-"],
+[class*="LoadingPage-logoFull-"] {
+  background-image: url("https://monarch.innotel.us/monarch/monarch-crown.svg") !important;
+  background-size: contain !important;
+  background-repeat: no-repeat !important;
+  background-position: left center !important;
+}
+/* …and hide whatever that element draws inside it, so only the crown shows. */
+[class*="PageHeader-logo-"] img,
+[class*="styles-logo-"] img,
+[class*="LoadingPage-logoFull-"] img {
+  visibility: hidden !important;
+}
+
+/* ── the wordmark beside the logo ─────────────────────────────────────────── */
+/* Servarr prints the app name next to the mark; make it read as the platform. */
+[class*="PageHeader-logoContainer-"]::after,
+[class*="styles-logoContainer-"]::after {
+  content: "MONARCH";
+  margin-left: 10px;
+  align-self: center;
+  font-family: "DejaVu Serif", Georgia, serif;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+  font-size: 13px;
+  color: #f5cc57;
+  white-space: nowrap;
+}
+
+/* ── scrollbars, so the dark canvas does not end at a bright bar ──────────── */
+* {
+  scrollbar-color: #3a3226 #0b0d10;
+}

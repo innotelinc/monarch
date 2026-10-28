@@ -1,0 +1,773 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ci.yml — static checks on push and pull requests.
+#
+# The repo is maintained at zero findings: structure, compose, hooks, and the
+# landing page stay conformant. Attribution guard lives in its own workflow.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  structure:
+    name: Repository structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Conformant structure
+        run: |
+          set -euo pipefail
+          for f in README.md LICENSE .env.example web/landing/index.html; do
+            if [ ! -f "$f" ]; then
+              echo "::error::missing required file: $f"
+              exit 1
+            fi
+          done
+          echo "structure: ok"
+
+      - name: .gitignore covers .env
+        run: |
+          set -euo pipefail
+          if ! grep -q '^\.env' .gitignore; then
+            echo "::warning:: .gitignore does not list .env"
+          fi
+
+  edge-config:
+    name: Edge config sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The proxy map must forward to ports the compose file actually
+      # publishes: the live NPM can match a wrong row perfectly, which is how
+      # `tv` pointed at the Zeus portal's :3001 while the IPTV guide published
+      # 3011. Static, no NPM needed, works in both NPM modes.
+      - name: npm-hosts.conf ports match docker-compose publishes
+        run: python3 scripts/check-proxy-ports.py
+
+      # The Magnate tier map is a policy table the enforcer parses at runtime:
+      # a typo in it should fail here, not on a live entitlement run.
+      - name: Entitlement tier map is valid and the enforcer compiles
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          tiers = json.load(open("scripts/magnate-tiers.json"))
+          plans = tiers["plans"]
+          assert tiers["default_plan"] in plans, "default_plan must exist in plans"
+          for slug, policy in plans.items():
+              for key in ("streams", "quality_kbps", "profiles", "downloads"):
+                  assert key in policy, f"{slug}: missing {key}"
+          print(f"tiers: {len(plans)} plans, default {tiers['default_plan']}")
+          PY
+          python3 -m py_compile scripts/magnate-entitlements.py
+
+  scripts:
+    name: Script checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The script unit tests cover the sign-in posture this repo enforces on
+      # apps that have a login of their own: `seerr-login-methods.py` turns
+      # Seerr's email-and-password sign-in off so the Cerulean-backed Jellyfin
+      # account is the only one, and the tests assert it sends one field (the
+      # API merges a partial body) and fails while the setting is still on.
+      # `jellyfin-login-methods.py` is the same posture one level down — every
+      # account Jellyfin holds in its own database is a second password outside
+      # Authentik — and its tests pin the two things that would be wrong
+      # quietly: that the policy endpoint *replaces* rather than merges (so the
+      # whole policy travels back), and that a build which does not report
+      # AuthenticationProviderId exits 2 instead of passing.
+      - name: Script unit tests
+        run: python3 -m unittest discover -s scripts/tests -t scripts/tests -v
+
+      - name: Python syntax
+        run: python3 -m py_compile scripts/*.py scripts/tests/*.py
+
+  # The sign-in posture is only worth having if the pieces that enforce it stay
+  # wired to each other. The unit tests above cover what the checker *does*;
+  # this covers that it is still called, still documented, and still fed the
+  # same account and the same bind credentials. None of it needs a live
+  # Jellyfin, so drift shows up here rather than on the host.
+  posture:
+    name: Sign-in posture wiring
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The live half lives in drift-check.sh. If that call is dropped the
+      # checker keeps passing in CI while never running against the deployment
+      # it exists for.
+      - name: drift-check still enforces the Jellyfin posture
+        run: |
+          set -euo pipefail
+          f=scripts/drift-check.sh
+          grep -q 'jellyfin-login-methods.py --check' "$f" \
+            || { echo "::error::$f no longer runs the Jellyfin login-methods check"; exit 1; }
+          grep -q 'jellyfin-login-methods.py --apply' "$f" \
+            || { echo "::error::$f does not say how to remediate a local account"; exit 1; }
+          # The two halves that fail as an HTTP 500 on the login form: the LDAP
+          # path (outpost token, then bind credential) and the SSO button
+          # (plugin config, then the callback on the provider).
+          grep -q 'verify-ldap.py' "$f" \
+            || { echo "::error::$f no longer runs verify-ldap.py - the outpost's token and the bind password go unchecked"; exit 1; }
+          grep -q 'jellyfin-oidc-sso.py --check' "$f" \
+            || { echo "::error::$f no longer runs jellyfin-oidc-sso.py - the login page's SSO button goes unchecked"; exit 1; }
+          # The button has two halves that fail differently: the config and the
+          # callback (above), and the plugin *binaries* that provide it (below).
+          grep -q 'jellyfin-plugin-pin.py --check' "$f" \
+            || { echo "::error::$f no longer runs jellyfin-plugin-pin.py - a swapped, missing or duplicated plugin build goes unchecked"; exit 1; }
+          # The login screen's image is regenerated by Jellyfin itself after
+          # every library scan, so "branded" is a file that is installed *and* a
+          # branding path that names it. Neither half is loud on its own - a
+          # location pointing at nothing is served as the collage - so the check
+          # has to stay in the timer rather than in whoever next looks at a login
+          # page.
+          grep -q 'jellyfin-splash.py --check' "$f" \
+            || { echo "::error::$f no longer runs jellyfin-splash.py --check - 'the login screen is Jellyfin's poster collage' goes unreported"; exit 1; }
+          # Jellyfin's own HTTPS listener fails without saying so: a PEM where it
+          # wants PKCS#12, a file its user cannot read, or the material from the
+          # day it was installed (the estate renews on a timer and pushes to the
+          # edge, never here). The check reads the configuration *and* the
+          # certificate the listener returns; if it drops out of the timer, the
+          # first sign of drift is a phone refusing to connect.
+          grep -q 'jellyfin-tls.py --check' "$f" \
+            || { echo "::error::$f no longer runs jellyfin-tls.py --check - 'Jellyfin is serving an expired or unreadable certificate' goes unreported"; exit 1; }
+          grep -q 'jellyfin-tls.py --renew' "$f" \
+            || { echo "::error::$f does not say how to renew the certificate from the edge"; exit 1; }
+          grep -q 'jellyfin-tls.py --apply' "$f" \
+            || { echo "::error::$f does not say how to install material the edge does not hold"; exit 1; }
+          # The *arr wiring fails as "Prowlarr is not registering" while every
+          # app shows as registered: an *arr answers 400 to a Host it was not
+          # told about, so the app tests and the indexer sync are refused. Both
+          # halves have to stay checked. The indexer half is --offline in the
+          # timer on purpose: testing thirty trackers every six hours is real
+          # traffic, and the deep test is the operator's command.
+          grep -q 'arr-allowed-hosts.py --check' "$f" \
+            || { echo "::error::$f no longer runs arr-allowed-hosts.py - a *arr left off the allowlist refuses Prowlarr with 400"; exit 1; }
+          grep -q 'prowlarr-indexers.py --check --offline' "$f" \
+            || { echo "::error::$f no longer runs prowlarr-indexers.py --check --offline - 'Prowlarr holds no indexers' goes unreported"; exit 1; }
+          # Filling Prowlarr does not fill the apps: only an application sync
+          # delivers an indexer, so Prowlarr can be full and every *arr empty
+          # with all four app tests green. Nothing else in the timer counts that.
+          grep -q 'arr-sync.py --check' "$f" \
+            || { echo "::error::$f no longer runs arr-sync.py --check - 'Prowlarr is full and the apps received nothing' goes unreported"; exit 1; }
+          # Where a download lands is two settings that fail silently: the
+          # category name each app sends and the download dir Transmission files
+          # it under. The app only hints at a wrong path on its own Health page.
+          grep -q 'arr-download-categories.py --check' "$f" \
+            || { echo "::error::$f no longer runs arr-download-categories.py --check - 'downloads land in the library root' goes unreported"; exit 1; }
+          # ClipBucket's unfinished install presents as "a site with no
+          # content": the schema, the version row and the installer lock are what
+          # separate the two, and nothing else in the timer reads any of them.
+          grep -q 'clipbucket-install.py --check' "$f" \
+            || { echo "::error::$f no longer runs clipbucket-install.py --check - 'ClipBucket is serving its installer' goes unreported"; exit 1; }
+          # A finished install is an empty site: without this one, 'installed but
+          # nothing in it' is reported as healthy, which is the state the stack
+          # was documented as being migrated in.
+          grep -q 'clipbucket-library.py --check' "$f" \
+            || { echo "::error::$f no longer runs clipbucket-library.py --check - 'ClipBucket shows no content' goes unreported"; exit 1; }
+          # The catalogue check judges this repo's model of the app, and every
+          # file in that model can be right while the watch page serves nothing.
+          grep -q 'clipbucket-library.py --serve-check' "$f" \
+            || { echo "::error::$f no longer runs clipbucket-library.py --serve-check - 'ClipBucket lists videos it cannot play' goes unreported"; exit 1; }
+          # And the two readers of the shared list must both still read it.
+          for reader in init/init.py scripts/arr-allowed-hosts.py; do
+            grep -q 'arr-allowlist.txt' "$reader" \
+              || { echo "::error::$reader no longer reads init/arr-allowlist.txt"; exit 1; }
+          done
+          grep -q '^prowlarr$' init/arr-allowlist.txt \
+            || { echo "::error::init/arr-allowlist.txt no longer names prowlarr - the *arrs call it back by that name"; exit 1; }
+          # The model gateway's key check is the one whose *subject* lives on
+          # another host, so nothing local fails when it stops running - the
+          # gateway keeps answering and a refused key goes back to being seen
+          # only as "every model in the chain failed" somewhere else.
+          grep -q 'gateway-provider-keys.py --check' "$f" \
+            || { echo "::error::$f no longer runs gateway-provider-keys.py --check - a gateway key it refused goes unreported"; exit 1; }
+          # A staged run is a rehearsal, not an alarm: CI and an operator both
+          # pass their own manifest through MONARCH_INVARIANTS, and a failure there
+          # is the thing being looked at. Without this the notification fires on a
+          # stack that is fine - which is what happened when a fabricated library
+          # name and a port nothing listens on were pushed to an operator's phone.
+          grep -q 'STAGED=1' "$f" \
+            || { echo "::error::$f no longer marks a run as staged"; exit 1; }
+          grep -q 'if \[ "\$STAGED" -eq 1 \]' "$f" \
+            || { echo "::error::$f no longer withholds the alert from a staged run"; exit 1; }
+          # A heal that has failed N times in a row has to stop trying: the whole
+          # point of the streak is that the sixth attempt is not a plan, and the
+          # escape hatch (`--reset-streak`, run by a person who has looked) has to
+          # exist or the stack stays unhealed forever.
+          grep -q 'DRIFT_HEAL_MAX_STREAK' "$f" \
+            || { echo "::error::$f no longer stands the heal down after a failing streak"; exit 1; }
+          grep -q -- '--reset-streak) RESET_STREAK=1' "$f" \
+            || { echo "::error::$f no longer lets a person reset the heal streak"; exit 1; }
+          # The verdict has to say what the heal did about the findings, or a reader
+          # cannot tell "nothing is wrong" from "nothing was tried".
+          grep -q "printf 'heal=%s" "$f" \
+            || { echo "::error::$f no longer records what the heal did"; exit 1; }
+          echo "posture: drift-check wired"
+
+      # LDAP is what makes every Jellyfin account Authentik's rather than
+      # Jellyfin's own. If the template stops carrying the bind token — or a
+      # hardcoded one creeps back in — the plugin's binds fail and Jellyfin
+      # silently falls back to its own passwords, which is the exact drift
+      # `jellyfin-login-methods.py` reports one level down.
+      - name: The LDAP plugin config is written from the deployed bind token
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+
+          source = pathlib.Path("init/init.py").read_text(encoding="utf-8")
+          assert 'LDAP_BIND_TOKEN = os.environ.get("AUTHENTIK_LDAP_BIND_TOKEN"' in source, \
+              "init.py no longer reads AUTHENTIK_LDAP_BIND_TOKEN"
+          assert "<LdapBindPassword>{LDAP_BIND_TOKEN}</LdapBindPassword>" in source, \
+              "the plugin template no longer writes the deployed bind token"
+          assert "<LdapServer>{LDAP_SERVER}</LdapServer>" in source, \
+              "the plugin template no longer writes the configured LDAP server"
+          print("posture: plugin config is templated from the deployment")
+          PY
+
+      # The pinned plugins have to stay pinned in BOTH readers: monarch-init
+      # installs them (so a rebuilt host comes back with the SSO button and the
+      # LDAP credential store) and the drift check verifies them. If init.py
+      # stops reading the pin and goes back to fetching "the latest release",
+      # the host and the check disagree about what "the plugin" is, and only one
+      # of them is right.
+      - name: monarch-init installs the pinned Jellyfin plugins
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          pins = json.loads(pathlib.Path("init/jellyfin-plugins.json").read_text(encoding="utf-8"))["plugins"]
+          names = [p.get("name") for p in pins]
+          assert names == ["oidc", "ldap"], f"the pin file no longer covers both plugins: {names}"
+          for pin in pins:
+              for key in ("repo", "tag", "asset", "asset_sha256", "assembly",
+                          "assembly_sha256", "plugin_dir"):
+                  assert pin.get(key), f"the {pin['name']} pin no longer records {key!r}"
+
+          source = pathlib.Path("init/init.py").read_text(encoding="utf-8")
+          assert "jellyfin-plugins.json" in source, \
+              "init.py no longer reads init/jellyfin-plugins.json"
+          assert 'pin["asset_sha256"]' in source and 'pin["assembly_sha256"]' in source, \
+              "init.py no longer verifies both the zip and the assembly inside it"
+          assert "configure_jellyfin_oidc()" in source, \
+              "init.py no longer wires Jellyfin's OIDC plugin"
+          assert "install_ldap_plugin_via_pin" in source, \
+              "the LDAP install lost its pinned fallback and is fetching an unpinned release again"
+          # The config has to come from the deployment's own values, not literals:
+          # the secret and the client id are per-zone, and a hardcoded secret is
+          # a secret in the repo.
+          for var in ("MONARCH_SSO_CLIENT_ID", "MONARCH_SSO_CLIENT_SECRET",
+                      "MONARCH_SSO_SERVER_BASE_URL", "MONARCH_SSO_APP"):
+              assert var in source, f"init.py no longer reads {var}"
+          print("posture: plugins pinned to " + ", ".join(f"{p['repo']} {p['tag']}" for p in pins))
+          PY
+
+          # The pin is what the check and init agree on, so both must point at it.
+          grep -q 'jellyfin-plugins.json' scripts/jellyfin-plugin-pin.py \
+            || { echo "::error::scripts/jellyfin-plugin-pin.py no longer reads the pin"; exit 1; }
+
+      # Both plugin config files are shared with the plugin that owns them, and a
+      # write is not free: Jellyfin re-reads a plugin config only at startup, so
+      # the caller restarts it for a write. That is why "changed" has to mean the
+      # values init manages (plugin_config_changed()) and the write is done in one
+      # place (apply_plugin_config()). A bare `previous != xml` reads as changed on
+      # EVERY run - the LDAP plugin adds a <LdapUser> record and rewrites the XML
+      # declaration - which cost a Jellyfin restart (~40s of outage) per init run
+      # until it was fixed, and with it the 503 window drift-check read as
+      # *libraries missing*.
+      - name: Both plugin configs are compared by value, not by bytes
+        run: |
+          set -euo pipefail
+          f=init/init.py
+          for helper in plugin_config_values plugin_config_changed \
+                        read_plugin_config write_plugin_config apply_plugin_config; do
+            grep -q "^def $helper" "$f" \
+              || { echo "::error::$f no longer defines $helper"; exit 1; }
+          done
+          # The plugin's own bookkeeping must stay out of the comparison.
+          grep -q 'PLUGIN_OWNED_TAGS = {"LdapUsers"}' "$f" \
+            || { echo "::error::$f no longer excludes the plugin-owned elements from the comparison - a linked account would read as drift on every run"; exit 1; }
+          # Both writers render, and both call sites apply through the one writer.
+          for writer in render_ldap_plugin_config render_oidc_plugin_config; do
+            grep -q "^def $writer" "$f" \
+              || { echo "::error::$f no longer defines $writer"; exit 1; }
+          done
+          grep -q 'apply_plugin_config(path, xml, previous, "LDAP-Auth")' "$f" \
+            || { echo "::error::$f no longer applies the LDAP config through apply_plugin_config"; exit 1; }
+          grep -q 'apply_plugin_config(path, xml, previous, "OIDC")' "$f" \
+            || { echo "::error::$f no longer applies the OIDC config through apply_plugin_config"; exit 1; }
+          # And the byte comparison that made every run "changed" must not return.
+          if grep -nE '^ *needs_restart = previous != ' "$f"; then
+            echo "::error::$f compares a plugin config as bytes again - a plugin-owned element or the XML declaration makes that true on every run, so Jellyfin restarts every run"
+            exit 1
+          fi
+          echo "posture: plugin configs are compared by managed value"
+
+      # status.json is the file an operator reads after an install, so the drift
+      # check's verdict has to be folded into it - read from the check's own file,
+      # never judged here ("init says everything is configured" is a different
+      # claim from "the live stack is healthy", and only the check probes it).
+      - name: init carries the drift verdict into status.json
+        run: |
+          set -euo pipefail
+          grep -q '"drift": read_drift_verdict()' init/init.py \
+            || { echo "::error::status.json no longer carries the drift verdict"; exit 1; }
+          grep -q 'scripts/drift-check.sh writes one after each run' init/init.py \
+            || { echo "::error::init no longer says where the verdict comes from"; exit 1; }
+          grep -q 'drift-last' scripts/drift-check.sh \
+            || { echo "::error::drift-check no longer records a verdict for init to read"; exit 1; }
+          echo "posture: the drift verdict is in the file an operator reads"
+
+      # A standing-down heal is in a state the reader was already told about, so the
+      # interval is how long they get before being told AGAIN - and being handed the
+      # same page again is not information. The findings of the alert that went out
+      # are kept, a repeat is only sent when they changed, and what changed leads it.
+      # Losing any of that turns the escalation back into a repeating page.
+      - name: A standing-down alert repeats only with news
+        run: |
+          set -euo pipefail
+          grep -q 'STANDDOWN_ALERT_FILE=' scripts/drift-check.sh \
+            || { echo "::error::drift-check keeps no record of what the standing-down alert said"; exit 1; }
+          grep -q 'standdown_recall' scripts/drift-check.sh \
+            || { echo "::error::the repeat is not compared with the last alert"; exit 1; }
+          for line in 'what changed since' 'new since then' 'no longer reported since then'; do
+            grep -q "$line" scripts/drift-check.sh \
+              || { echo "::error::the repeat no longer says '$line'"; exit 1; }
+          done
+          grep -q 'these are the findings it already carried' scripts/drift-check.sh \
+            || { echo "::error::an unchanged repeat no longer says why it stayed silent"; exit 1; }
+          # The one screen an operator opens, and the state files it reads.
+          grep -q 'drift-standdown-alert' docs/operations.md \
+            || { echo "::error::the state directory is documented without the alert record"; exit 1; }
+          grep -q 'scripts/drift-status.py' docs/operations.md \
+            || { echo "::error::the status view is undocumented"; exit 1; }
+          grep -q 'scripts/drift-status.py' README.md \
+            || { echo "::error::README does not say where to look"; exit 1; }
+          echo "posture: the standing-down alert is news or silence"
+
+      # Nothing listening is a boot in progress only while the container is young,
+      # and the container's own start time is what says so. Losing that turns an
+      # image update into a page; losing the other half of it turns a wedged server
+      # into something nobody is told about.
+      - name: A Jellyfin that is not listening is judged by its container's age
+        run: |
+          set -euo pipefail
+          grep -q 'DRIFT_JELLYFIN_BOOT_SEC' scripts/drift-check.sh \
+            || { echo "::error::drift-check has no budget for a container that was just recreated"; exit 1; }
+          grep -q "docker inspect -f '{{.State.StartedAt}}' jellyfin" scripts/drift-check.sh \
+            || { echo "::error::drift-check no longer asks Docker how long the container has been up"; exit 1; }
+          grep -q 'it is still starting' scripts/drift-check.sh \
+            || { echo "::error::a boot that outlasts the budget no longer says so"; exit 1; }
+          grep -q 'stopped or wedged server rather than a boot in progress' scripts/drift-check.sh \
+            || { echo "::error::a server that is not coming back is no longer distinguished"; exit 1; }
+          grep -q 'DRIFT_JELLYFIN_BOOT_SEC' docs/operations.md \
+            || { echo "::error::the boot budget is undocumented"; exit 1; }
+          echo "posture: nothing listening is a boot only while it is young"
+
+      # One account is allowed to sign in outside Authentik, and two scripts
+      # have to agree on which. Divergence is not loud: the checker calls the
+      # real admin a stray, and `--apply` then tries to disable the account the
+      # deployment depends on.
+      - name: Both scripts name the same break-glass account
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+
+          def default_user(path):
+              source = pathlib.Path(path).read_text(encoding="utf-8")
+              marker = 'JELLYFIN_ADMIN_USER", "'
+              at = source.find(marker)
+              assert at != -1, f"{path} no longer defaults JELLYFIN_ADMIN_USER"
+              return source[at + len(marker):].split('"', 1)[0]
+
+          checker = default_user("scripts/jellyfin-login-methods.py")
+          setter = default_user("scripts/jellyfin-admin-password.py")
+          assert checker == setter, (
+              f"break-glass account disagrees: jellyfin-login-methods.py says "
+              f"{checker!r}, jellyfin-admin-password.py says {setter!r}"
+          )
+          print(f"posture: both scripts keep {checker!r}")
+          PY
+
+      # The renewal that reaches the edge has to reach Jellyfin too. `--check`
+      # reports a stale certificate, but reporting is not repairing: the unit is
+      # the half that acts, and it only acts if the timer runs it and install.sh
+      # installs the timer. If that wiring is dropped, the file Jellyfin loads
+      # silently stays the certificate that was current the day it was installed
+      # and nothing says so until a client refuses to connect.
+      - name: The Jellyfin certificate renewal is scheduled
+        run: |
+          set -euo pipefail
+          grep -q '^ExecStart=/usr/bin/python3 scripts/jellyfin-tls.py --renew --restart$' \
+            systemd/monarch-jellyfin-tls.service \
+            || { echo "::error::systemd/monarch-jellyfin-tls.service no longer renews and restarts"; exit 1; }
+          grep -q '^Unit=monarch-jellyfin-tls.service$' systemd/monarch-jellyfin-tls.timer \
+            || { echo "::error::systemd/monarch-jellyfin-tls.timer no longer schedules the renewal unit"; exit 1; }
+          # Both halves of the unit and the timer have to be installed, and the
+          # timer enabled, or the schedule never runs on a host.
+          for unit in monarch-jellyfin-tls.service monarch-jellyfin-tls.timer; do
+            grep -q "$unit" scripts/install-monarch.sh \
+              || { echo "::error::install-monarch.sh no longer installs $unit"; exit 1; }
+          done
+          grep -q 'enable monarch-jellyfin-tls.timer' scripts/install-monarch.sh \
+            || { echo "::error::install-monarch.sh no longer enables monarch-jellyfin-tls.timer"; exit 1; }
+          echo "posture: the certificate renewal is scheduled"
+
+      # A posture nobody documents is a posture that gets deleted by the next
+      # person tidying the README.
+      - name: The posture is documented
+        run: |
+          set -euo pipefail
+          grep -q 'jellyfin-login-methods.py' README.md \
+            || { echo "::error::README no longer documents the Jellyfin posture"; exit 1; }
+          grep -q 'jellyfin-login-methods.py' docs/operations.md \
+            || { echo "::error::docs/operations.md no longer documents the Jellyfin posture"; exit 1; }
+          # jellyfin-tls.py belongs in this list for the same reason as the rest:
+          # the tool is the half that acts, the doc is how an operator finds it.
+          for checker in verify-ldap.py jellyfin-oidc-sso.py jellyfin-plugin-pin.py \
+                         jellyfin-splash.py jellyfin-tls.py; do
+            grep -q "$checker" docs/operations.md \
+              || { echo "::error::docs/operations.md no longer documents $checker"; exit 1; }
+          done
+          # The renewal has a schedule as well as a tool, and the schedule is
+          # the half an operator has to be told about to find it at all.
+          grep -q 'monarch-jellyfin-tls.timer' docs/operations.md \
+            || { echo "::error::docs/operations.md no longer documents the certificate renewal timer"; exit 1; }
+          # The *arr tools are three steps of one chain - the Host allowlist, the
+          # indexers in Prowlarr, and the sync that delivers them - and each one
+          # looks like "the previous one silently worked" when it is dropped.
+          for checker in arr-allowed-hosts.py prowlarr-indexers.py arr-sync.py \
+                         arr-download-categories.py; do
+            grep -q "$checker" docs/operations.md \
+              || { echo "::error::docs/operations.md no longer documents $checker"; exit 1; }
+          done
+
+      # Transmission has no category objects: Servarr sends `category` as a
+      # subfolder of Transmission's download dir, so the name decides the folder
+      # and the download dir decides whether that folder sits in a library. The
+      # old qBittorrent schema spelled the field after the media type
+      # (tvCategory/movieCategory/musicCategory) and a bare `category` matched
+      # nothing - a client built that way was reported configured with no category
+      # at all. Pin both halves: the field lookup and the name -> folder map.
+      - name: init reconciles the download category under the app's own field name
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+
+          source = pathlib.Path("init/init.py").read_text(encoding="utf-8")
+          # The field lookup has to cover Transmission's plain `category` and the
+          # media-type spellings a qBittorrent schema would carry.
+          for spelling in ("tvCategory", "movieCategory", "musicCategory", "category"):
+              assert spelling in source, \
+                  f"init.py no longer knows the download-category field {spelling}"
+          assert 'field = category_field(payload)' in source, \
+              "init.py no longer sets the category through the field the app has"
+          assert 'def category_field(' in source, \
+              "the field-name lookup is gone - a plain `category` matches nothing"
+          # Transmission is the download client now, and the folders have to sit
+          # outside every library root, named by the ones MONARCH_APPS tells the
+          # apps, or the two drift apart.
+          assert 'def ensure_transmission_client(' in source, \
+              "init.py no longer wires the Transmission download client"
+          assert 'TRANSMISSION_CATEGORIES = {app["category"]: f"/data/torrents/{app[\'media\']}"' in source, \
+              "TRANSMISSION_CATEGORIES no longer derives from MONARCH_APPS"
+          assert '"category_paths": TRANSMISSION_CATEGORIES' in source, \
+              "the invariants manifest no longer carries the name -> folder map"
+          assert 'TRANSMISSION_BASE = "http://transmission:9091"' in source, \
+              "init.py no longer talks to Transmission"
+          print("posture: download categories are named by the apps and emitted with their paths")
+          PY
+          # The page is published rather than gated, and that decision belongs
+          # where the next operator looks before re-adding a gate.
+          grep -q 'OAUTH2_PROXY_SKIP_AUTH_ROUTES' docker-compose.yml \
+            || { echo "::error::docker-compose.yml no longer states which names publish their own sign-in page"; exit 1; }
+          echo "posture: documented"
+
+  landing:
+    name: Landing page sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Landing sanity
+        run: |
+          set -euo pipefail
+          f=web/landing/index.html
+          grep -qi '<title>' "$f" || { echo "::error::landing has no <title>"; exit 1; }
+          grep -qi 'og:title' "$f" || { echo "::error::landing has no og:title"; exit 1; }
+          echo "landing: ok"
+
+      # The portal contract: Magnate at subscribe.innotel.us is the ecosystem
+      # landing page AND the subscribing page (Monarch never takes a payment),
+      # so both public entry points must send users there. Removing the link
+      # silently would strand visitors on a page with nothing to subscribe to.
+      - name: Portal (subscribe.innotel.us) is linked from both entry points
+        run: |
+          set -euo pipefail
+          grep -q 'https://subscribe.innotel.us' web/landing/index.html \
+            || { echo "::error::landing does not link the portal (subscribe.innotel.us)"; exit 1; }
+          grep -q '"https://subscribe.innotel.us"' scripts/seed-homarr-board.py \
+            || { echo "::error::Homarr seeder has no Subscribe tile"; exit 1; }
+          echo "portal: ok"
+
+  # The alerts are the part of the drift check that reaches a person, and the part
+  # that cannot be exercised against the real bot. `DRIFT_TELEGRAM_CMD` replaces
+  # the send (the same shape as MONARCH_LDAP_PROBE), so both rules are asserted
+  # here with no request leaving the runner:
+  #
+  #   * a STAGED run - one pointed at a manifest other than the host's own, which
+  #     is what CI and an operator rehearsal both do - reports its findings and
+  #     stays silent. It did not once: the runs that verified this check's own
+  #     failure paths pushed a fabricated library name and a port nothing listens
+  #     on to an operator's phone.
+  #   * an un-staged failure notifies, and the notification says whether the stack
+  #     had just been healed and re-checked (a repair that did not take, so it
+  #     needs a person) or was only read (which `--heal` is the repair for). Both
+  #     used to arrive as the same nine words.
+  #   * the run records that verdict where an operator can read it without the
+  #     journal (`--status`), and a staged run records nothing.
+  #
+  # No stack is needed: absent services are findings here, which is what the alert
+  # paths react to. MONARCH_STATE_DIR is the directory the check judges (manifest,
+  # heal clock, verdict), so a temp one is a whole host's state - no sudo and no
+  # /docker on the runner.
+  drift-alerts:
+    name: Drift-check alert paths
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: A staged run reports, and does not notify
+        run: |
+          set -euo pipefail
+          # A manifest at any path other than the state directory's own is what
+          # marks a run staged.
+          mkdir -p /tmp/drift-state
+          python3 - /tmp/staged-invariants.json <<'PY'
+          import json, os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), "init"))
+          import init as monarch_init
+          with open(sys.argv[1], "w") as fh:
+              json.dump(monarch_init.build_invariants(), fh, indent=2)
+          PY
+          printf 'MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n' > /tmp/check.env
+          # Placeholder-shaped on purpose: these only have to be non-empty for the
+          # alert branch to be entered, and DRIFT_TELEGRAM_CMD replaces the send,
+          # so no token is needed and none may be written down.
+          export TELEGRAM_BOT_TOKEN='<fake>' TELEGRAM_CHAT_ID='<fake>'
+          export DRIFT_JELLYFIN_GRACE_SEC=0
+          # Both halves are recorded: the subject carries which failure it is, the
+          # body carries what to do about it, and the assertions read both.
+          export DRIFT_TELEGRAM_CMD='printf "%s\n" "$DRIFT_TELEGRAM_SUBJECT" "$DRIFT_TELEGRAM_BODY" >> /tmp/alerted'
+          rm -f /tmp/alerted
+          # Bounded: this job asserts an exit code, not a duration, and a check
+          # that hangs would wedge the runner rather than fail the test.
+          if MONARCH_ENV=/tmp/check.env MONARCH_STATE_DIR=/tmp/drift-state \
+               MONARCH_INVARIANTS=/tmp/staged-invariants.json \
+               timeout 240 bash scripts/drift-check.sh > /tmp/staged.log 2>&1; then
+            echo "::error::the staged run found nothing - this asserts the alert path, so it needs a finding"; exit 1
+          fi
+          grep -q 'DRIFT-FAIL' /tmp/staged.log \
+            || { echo "::error::a staged run did not report its finding"; exit 1; }
+          grep -q 'no alert' /tmp/staged.log \
+            || { echo "::error::a staged run did not say why it stayed silent"; exit 1; }
+          if [ -e /tmp/alerted ]; then
+            echo "::error::a staged run notified the operator:"; cat /tmp/alerted; exit 1
+          fi
+          if [ -e /tmp/drift-state/drift-last ]; then
+            echo "::error::a staged run recorded a verdict for this host:"; cat /tmp/drift-state/drift-last; exit 1
+          fi
+          echo "staged run: reported, silent, recorded nothing"
+
+      - name: An un-staged failure notifies, and says which failure it is
+        run: |
+          set -euo pipefail
+          # A manifest at the state directory's own path is what makes a run
+          # un-staged, and MONARCH_STATE_DIR is the directory the check judges - so
+          # a temp one is a whole host's state, no sudo and no /docker needed.
+          export MONARCH_STATE_DIR=/tmp/drift-state
+          mkdir -p "$MONARCH_STATE_DIR"
+          python3 - "$MONARCH_STATE_DIR/invariants.json" <<'PY'
+          import json, os, sys
+          sys.path.insert(0, os.path.join(os.getcwd(), "init"))
+          import init as monarch_init
+          with open(sys.argv[1], "w") as fh:
+              json.dump(monarch_init.build_invariants(), fh, indent=2)
+          PY
+          printf 'MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n' > /tmp/check.env
+          export TELEGRAM_BOT_TOKEN='<fake>' TELEGRAM_CHAT_ID='<fake>'
+          export DRIFT_JELLYFIN_GRACE_SEC=0
+          # Both halves are recorded: the subject carries which failure it is, the
+          # body carries what to do about it, and the assertions read both.
+          export DRIFT_TELEGRAM_CMD='printf "%s\n" "$DRIFT_TELEGRAM_SUBJECT" "$DRIFT_TELEGRAM_BODY" >> /tmp/alerted'
+
+          rm -f /tmp/alerted
+          if MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh > /tmp/live.log 2>&1; then
+            echo "::error::the un-staged run found nothing - the alert path was not exercised"; exit 1
+          fi
+          [ -e /tmp/alerted ] \
+            || { echo "::error::an un-staged failure did not notify at all"; exit 1; }
+          grep -q 'Monarch drift check failed' /tmp/alerted \
+            || { echo "::error::the notification lost its subject"; exit 1; }
+          grep -q 'only checked - nothing was repaired' /tmp/alerted \
+            || { echo "::error::a read-only failure does not say so"; exit 1; }
+
+          # And the same failure after a heal must read differently.
+          rm -f /tmp/alerted
+          export DRIFT_REVERIFY_FROM_HEAL=1
+          MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh > /tmp/live2.log 2>&1 || true
+          [ -e /tmp/alerted ] \
+            || { echo "::error::a post-heal failure did not notify"; exit 1; }
+          grep -q 'AFTER A HEAL' /tmp/alerted \
+            || { echo "::error::a post-heal failure is not distinguishable from a read-only one"; exit 1; }
+          if grep -q 'nothing was repaired' /tmp/alerted; then
+            echo "::error::the post-heal alert also claims nothing was repaired"; exit 1
+          fi
+
+          # And the verdict the operator can read without the journal agrees with
+          # what was just sent, and answers like a read-only check.
+          grep -q '^verdict=drift$' "$MONARCH_STATE_DIR/drift-last" \
+            || { echo "::error::the run recorded no drift verdict"; cat "$MONARCH_STATE_DIR/drift-last"; exit 1; }
+          grep -q '^finding=' "$MONARCH_STATE_DIR/drift-last" \
+            || { echo "::error::the recorded verdict does not say what was found"; exit 1; }
+          grep -q '^heal=recheck$' "$MONARCH_STATE_DIR/drift-last" \
+            || { echo "::error::the verdict does not say what the heal did"; exit 1; }
+          if MONARCH_STATE_DIR="$MONARCH_STATE_DIR" bash scripts/drift-check.sh --status; then
+            echo "::error::--status called a drifted stack clean"; exit 1
+          fi
+          echo "un-staged run: notified, both subjects distinct, verdict readable"
+
+      - name: A heal that has failed its streak stands down
+        run: |
+          set -euo pipefail
+          export MONARCH_STATE_DIR=/tmp/drift-state
+          mkdir -p "$MONARCH_STATE_DIR"
+          [ -f "$MONARCH_STATE_DIR/invariants.json" ] \
+            || { echo "::error::the previous step's manifest is not there - this step judges the host's own state and needs it"; exit 1; }
+          # docker is a shim that logs and fails, so this step can assert that the
+          # heal did not even ask it for anything - and so a bug in the stand-down
+          # cannot start the stack's containers on a runner.
+          mkdir -p /tmp/drift-shim
+          cat > /tmp/drift-shim/docker <<'SH'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/docker-called
+          exit 1
+          SH
+          chmod +x /tmp/drift-shim/docker
+          export PATH=/tmp/drift-shim:$PATH
+          printf 'MONARCH_USERNAME=admin\nMONARCH_PASSWORD=monarch8\n' > /tmp/check.env
+          export TELEGRAM_BOT_TOKEN='<fake>' TELEGRAM_CHAT_ID='<fake>'
+          export DRIFT_JELLYFIN_GRACE_SEC=0
+          export DRIFT_TELEGRAM_CMD='printf "%s\n" "$DRIFT_TELEGRAM_SUBJECT" "$DRIFT_TELEGRAM_BODY" >> /tmp/alerted'
+
+          # Five attempts in a row have already failed to clear the drift.
+          rm -f /tmp/alerted /tmp/docker-called
+          printf '%s 5 0\n' "$(( $(date +%s) - 7200 ))" > "$MONARCH_STATE_DIR/drift-heal-last"
+          MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh --heal > /tmp/standdown.log 2>&1 \
+            && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'heal standing down' /tmp/standdown.log \
+            || { echo "::error::the heal did not stand down after five failing attempts"; exit 1; }
+          if grep -q 'reconciling the stack' /tmp/standdown.log; then
+            echo "::error::the heal tried again after standing down"; exit 1
+          fi
+          if grep -qE '^docker (compose|start|run)' /tmp/docker-called 2>/dev/null; then
+            echo "::error::the standing-down heal still drove the stack:"; cat /tmp/docker-called; exit 1
+          fi
+          grep -q 'has stood down' /tmp/alerted \
+            || { echo "::error::the standing-down heal did not say so in its alert"; exit 1; }
+
+          # And the next tick must not repeat it - but must say why it was quiet.
+          rm -f /tmp/alerted
+          MONARCH_ENV=/tmp/check.env timeout 240 bash scripts/drift-check.sh --heal --quiet \
+            > /tmp/standdown2.log 2>&1 && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'no alert - the heal stood down' /tmp/standdown2.log \
+            || { echo "::error::a quiet standing-down run does not say why it stayed silent"; exit 1; }
+          if [ -e /tmp/alerted ]; then
+            echo "::error::the standing-down alert repeated within its interval"; exit 1
+          fi
+
+          # The interval is up (DRIFT_STANDDOWN_ALERT_REPEAT_SEC=0) and the stack has
+          # not moved, so the repeat is the same page - and must not be sent. The
+          # record of what the last alert carried is what makes that judgement
+          # possible, so it has to exist, and it has to be read by content rather
+          # than by "we alerted before".
+          [ -f "$MONARCH_STATE_DIR/drift-standdown-alert" ] \
+            || { echo "::error::the standing-down alert recorded nothing about what it said"; exit 1; }
+          rm -f /tmp/alerted
+          MONARCH_ENV=/tmp/check.env DRIFT_STANDDOWN_ALERT_REPEAT_SEC=0 timeout 240 \
+            bash scripts/drift-check.sh --heal --quiet > /tmp/same.log 2>&1 \
+            && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'no alert - the standing-down alert went out' /tmp/same.log \
+            || { echo "::error::an unchanged repeat does not say why it stayed silent"; exit 1; }
+          if [ -e /tmp/alerted ]; then
+            echo "::error::the same page was sent twice:"; cat /tmp/alerted; exit 1
+          fi
+
+          # Change what the last alert carried and the repeat has news, so it goes -
+          # and it says what changed rather than re-describing the stack.
+          printf 'DRIFT-FAIL: a service that is no longer checked\n' >> "$MONARCH_STATE_DIR/drift-standdown-alert"
+          grep -q 'a service that is no longer checked' "$MONARCH_STATE_DIR/drift-standdown-alert" \
+            || { echo "::error::the injected finding is not in the record - the comparison would be vacuous"; exit 1; }
+          rm -f /tmp/alerted
+          MONARCH_ENV=/tmp/check.env DRIFT_STANDDOWN_ALERT_REPEAT_SEC=0 timeout 240 \
+            bash scripts/drift-check.sh --heal --quiet > /tmp/changed.log 2>&1 \
+            && { echo "::error::a drifted stack reported success"; exit 1; }
+          grep -q 'what changed since' /tmp/alerted \
+            || { echo "::error::the repeat does not lead with what changed"; cat /tmp/alerted; exit 1; }
+          grep -q 'no longer reported since then: DRIFT-FAIL: a service that is no longer checked' /tmp/alerted \
+            || { echo "::error::the repeat does not name the finding that went away"; cat /tmp/alerted; exit 1; }
+          grep -q 'has stood down' /tmp/alerted \
+            || { echo "::error::the repeat lost the sentence that says the heal has stood down"; exit 1; }
+          # ... and what it said becomes the record the next repeat compares with,
+          # which is this run's findings rather than the ones it was handed.
+          [ -s "$MONARCH_STATE_DIR/drift-standdown-alert" ] \
+            || { echo "::error::the repeat left no findings recorded"; exit 1; }
+          if grep -q 'a service that is no longer checked' "$MONARCH_STATE_DIR/drift-standdown-alert"; then
+            echo "::error::the record was not rewritten from the findings of the alert that went out"; exit 1
+          fi
+
+          # The escape hatch a person runs after looking at the stack.
+          MONARCH_STATE_DIR="$MONARCH_STATE_DIR" bash scripts/drift-check.sh --reset-streak \
+            || { echo "::error::--reset-streak failed"; exit 1; }
+          grep -q ' 0 0$' "$MONARCH_STATE_DIR/drift-heal-last" \
+            || { echo "::error::--reset-streak did not clear the streak"; exit 1; }
+
+          # And the one screen an operator opens, over the state those runs wrote:
+          # it must call this drifted stack drifted, name the way out, and answer
+          # JSON for a dashboard. A clean, fresh verdict exits 0 by contrast.
+          if python3 scripts/drift-status.py --state-dir "$MONARCH_STATE_DIR" > /tmp/status.txt 2>/tmp/status.err; then
+            echo "::error::drift-status called a drifted stack clean"; cat /tmp/status.txt; exit 1
+          fi
+          grep -q 'DRIFT' /tmp/status.txt \
+            || { echo "::error::drift-status does not say the stack is drifted"; cat /tmp/status.txt; exit 1; }
+          grep -q 'DRIFT-FAIL' /tmp/status.txt \
+            || { echo "::error::drift-status does not list the findings"; exit 1; }
+          grep -q -- '--reset-streak' /tmp/status.txt \
+            || { echo "::error::drift-status does not name the way out of a stood-down heal"; exit 1; }
+          python3 scripts/drift-status.py --state-dir "$MONARCH_STATE_DIR" --json > /tmp/status.json || true
+          python3 - /tmp/status.json <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          assert payload["status"] == "drift", payload
+          assert payload["heal"] == "stood_down", payload
+          assert payload["findings"], payload
+          PY
+          mkdir -p /tmp/clean-state
+          printf 'verdict=ok\nat=%s\nepoch=%s\nhost=runner\nmanifest=/x\nissues=0\nheal_streak=0\nheal=none\n' \
+            "$(date -Is)" "$(date +%s)" > /tmp/clean-state/drift-last
+          python3 scripts/drift-status.py --state-dir /tmp/clean-state \
+            || { echo "::error::drift-status did not call a fresh clean verdict clean"; exit 1; }
+          echo "standing down: no heal, one alert, a repeat needs news, reset works, status answers"
