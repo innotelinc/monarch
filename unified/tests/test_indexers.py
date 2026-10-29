@@ -104,7 +104,9 @@ def test_prowlarr_search_maps_json_and_drops_usenet(monkeypatch):
             self.calls = []
 
         def get(self, url, params=None, timeout=None):
-            self.calls.append((url, dict(params or {})))
+            # Prowlarr is called with repeated parameters, i.e. a list of pairs.
+            recorded = params if isinstance(params, list) else dict(params or {})
+            self.calls.append((url, recorded))
             if url.endswith("/api/v1/indexer"):
                 return FakeResponse([
                     {"id": 1, "protocol": "torrent"},
@@ -137,9 +139,11 @@ def test_prowlarr_search_maps_json_and_drops_usenet(monkeypatch):
     search_calls = [call for call in client.calls if call[0].endswith("/api/v1/search")]
     assert search_calls, client.calls
     _, params = search_calls[0]
-    assert params["query"] == "Film 2020"
-    assert params["categories"] == indexers.CATEGORY_MOVIE
-    assert params["apikey"] == "k"
+    query = dict(params)
+    assert query["query"] == "Film 2020"
+    assert query["apikey"] == "k"
+    sent_categories = [value for key, value in params if key == "categories"]
+    assert sent_categories == indexers.CATEGORY_MOVIE.split(",")
 
     # The protocol map is cached, so a second search only asks for results.
     before = len(client.calls)

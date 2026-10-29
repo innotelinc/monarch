@@ -190,14 +190,17 @@ def search_prowlarr(indexer: Indexer, query: str, *, limit: int = 100,
                     categories: str = "", timeout: float = 30.0,
                     client: httpx.Client) -> list[IndexerResult]:
     """Prowlarr's aggregated search: every indexer it knows, in one call."""
-    params: dict[str, Any] = {
-        "query": query, "type": "search", "limit": str(limit),
-        "apikey": indexer.api_key,
-    }
-    if categories:
-        params["categories"] = categories
+    # Prowlarr wants categories as repeated parameters: a comma-separated value
+    # is a 400 (measured against a live Prowlarr, not assumed).
+    params: list[tuple[str, str]] = [
+        ("query", query), ("type", "search"), ("limit", str(limit)),
+        ("apikey", indexer.api_key),
+    ]
+    for category in (c.strip() for c in categories.split(",")):
+        if category:
+            params.append(("categories", category))
     response = client.get(f"{indexer.url.rstrip('/')}/api/v1/search",
-                          params=params, timeout=timeout)
+                          params=params, timeout=max(timeout, 45.0))
     if response.status_code != 200:
         return []
     protocols = prowlarr_protocols(indexer, client, timeout)
