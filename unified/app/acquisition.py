@@ -273,27 +273,60 @@ def after_import(conn, settings: Settings, paths: list[Path],
     return report
 
 
-def live_lineup(settings: Settings, fetch: Callable[[str], str] | None = None) -> list[dict]:
-    """Fetch the playlist and guide and return the numbered channel list."""
-    if not settings.livetv_m3u:
-        return []
-    fetch = fetch or _fetch_text
-    channels = livetv.parse_m3u(fetch(settings.livetv_m3u))
-    names: dict[str, str] = {}
-    programmes: list[livetv.Programme] = []
-    if settings.livetv_xmltv:
-        names, programmes = livetv.parse_xmltv(fetch(settings.livetv_xmltv))
-    channels = livetv.number_channels(livetv.merge_logos(channels, names),
-                                      settings.livetv_channel_base)
-    return livetv.lineup(channels, programmes)
-
-
 def _fetch_text(url: str) -> str:
     import httpx
     with httpx.Client(timeout=30, follow_redirects=True) as client:
         response = client.get(url)
         response.raise_for_status()
         return response.text
+
+
+# A real guide is tens of megabytes. Parsing it once per page load was the one
+# place the merged service could burn CPU and bandwidth for nothing, so the
+# parsed result is cached for a few minutes per (playlist, guide, horizon).
+GUIDE_TTL = 600
+_guide_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def guide(settings: Settings, hours: int = 6,
+          fetch: Callable[[str], str] | None = None,
+          ttl: float | None = None) -> dict[str, Any]:
+    """Channels, what is on now, and the guide window — fetched at most once."""
+    from datetime import datetime, timedelta, timezone
+
+    key = f"{settings.livetv_m3u}|{settings.livetv_xmltv}|{hours}"
+    ttl = GUIDE_TTL if ttl is None else ttl
+    cached = _guide_cache.get(key)
+    now_monotonic = time.monotonic()
+    if cached and now_monotonic - cached[0] < ttl:
+        return cached[1]
+
+    payload: dict[str, Any] = {"channels": [], "programmes": [], "hours": hours}
+    if settings.livetv_m3u:
+        fetch = fetch or _fetch_text
+        channels = livetv.parse_m3u(fetch(settings.livetv_m3u))
+        names: dict[str, str] = {}
+        programmes: list[livetv.Programme] = []
+        if settings.livetv_xmltv:
+            names, programmes = livetv.parse_xmltv(fetch(settings.livetv_xmltv))
+        channels = livetv.number_channels(livetv.merge_logos(channels, names),
+                                          settings.livetv_channel_base)
+        now = datetime.now(timezone.utc)
+        horizon = now + timedelta(hours=hours)
+        window = [p for p in programmes if p.stop > now and p.start < horizon]
+        payload = {
+            "channels": livetv.lineup(channels, window),
+            "programmes": [p.to_dict() for p in window][:4000],
+            "hours": hours,
+            "fetched": db.now(),
+        }
+    _guide_cache[key] = (now_monotonic, payload)
+    return payload
+
+
+def live_lineup(settings: Settings, fetch: Callable[[str], str] | None = None) -> list[dict]:
+    """The numbered channel list, from the cached guide."""
+    return guide(settings, fetch=fetch)["channels"]
 
 
 class Scheduler:

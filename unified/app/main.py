@@ -22,8 +22,8 @@ from pydantic import BaseModel, Field
 
 from . import db, indexers as indexer_mod, library, scoring, subtitles
 from .acquisition import (
-    CATEGORIES, Scheduler, indexers_from_db, jellyfin_client, latest_quality,
-    live_lineup, subtitle_provider,
+    CATEGORIES, Scheduler, guide, indexers_from_db, jellyfin_client, latest_quality,
+    subtitle_provider,
 )
 from .downloader import Transmission, TransmissionError
 from .parser import parse, title_key
@@ -385,32 +385,14 @@ def dedupe_report(_: str = Depends(current_user)) -> dict[str, Any]:
 
 @app.get("/api/live/channels")
 def live_channels(_: str = Depends(current_user)) -> dict[str, Any]:
-    return {"channels": live_lineup(settings)}
+    return {"channels": guide(settings)["channels"]}
 
 
 @app.get("/api/live/guide")
 def live_guide(hours: int = Query(default=6, ge=1, le=72),
                _: str = Depends(current_user)) -> dict[str, Any]:
-    from . import livetv
-    from .acquisition import _fetch_text
-
-    if not settings.livetv_m3u:
-        return {"channels": [], "programmes": []}
-    channels = livetv.parse_m3u(_fetch_text(settings.livetv_m3u))
-    names, programmes = (livetv.parse_xmltv(_fetch_text(settings.livetv_xmltv))
-                         if settings.livetv_xmltv else ({}, []))
-    channels = livetv.number_channels(livetv.merge_logos(channels, names),
-                                      settings.livetv_channel_base)
-    return {
-        "channels": [c.to_dict() for c in channels],
-        "programmes": [p.to_dict() for p in programmes if p.stop > db_now()][:2000],
-        "hours": hours,
-    }
-
-
-def db_now():
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc)
+    """The guide window. Parsed once and cached: a real XMLTV file is tens of MB."""
+    return guide(settings, hours=hours)
 
 
 @app.get("/api/indexers")

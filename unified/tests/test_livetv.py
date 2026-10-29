@@ -79,3 +79,42 @@ def test_lineup_has_numbers_and_titles():
     assert rows[0]["number"] == 1
     assert rows[0]["now"]["title"] == "News at Six"
     assert rows[1]["now"] is None
+
+
+def test_the_guide_is_parsed_once_and_then_served_from_cache():
+    """A real guide is tens of megabytes; one page load must not re-parse it."""
+    from datetime import timedelta
+
+    from app import acquisition
+    from app.settings import Settings
+
+    now = datetime.now(timezone.utc)
+    stamp = lambda when: when.strftime("%Y%m%d%H%M%S +0000")
+    xmltv = f"""<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="bbc1.uk"><display-name>BBC One</display-name></channel>
+  <programme channel="bbc1.uk" start="{stamp(now - timedelta(minutes=10))}" stop="{stamp(now + timedelta(hours=1))}">
+    <title>On Now</title>
+  </programme>
+</tv>"""
+
+    settings = Settings(livetv_m3u="http://guide.test/list.m3u",
+                        livetv_xmltv="http://guide.test/guide.xml")
+    calls: list[str] = []
+
+    def fetch(url: str) -> str:
+        calls.append(url)
+        return M3U if url.endswith(".m3u") else xmltv
+
+    acquisition._guide_cache.clear()
+    first = acquisition.guide(settings, fetch=fetch)
+    assert len(calls) == 2
+    assert first["channels"] and first["channels"][0]["now"]["title"] == "On Now"
+    assert first["programmes"][0]["title"] == "On Now"
+
+    second = acquisition.guide(settings, fetch=fetch)
+    assert second is first
+    assert len(calls) == 2  # no refetch, no reparse
+
+    acquisition.guide(settings, fetch=fetch, ttl=0)
+    assert len(calls) == 4  # an expired cache refetches
