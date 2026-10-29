@@ -45,6 +45,16 @@ services:
       LIVETV_CHANNEL_BASE: "${LIVETV_CHANNEL_BASE:-2}"
       CORE_SEARCH_INTERVAL: "${CORE_SEARCH_INTERVAL:-900}"
       CORE_SEARCH_BATCH: "${CORE_SEARCH_BATCH:-4}"
+      # Subtitles: the one Bazarr job that is worth keeping.
+      OPENSUBTITLES_API_KEY: "${OPENSUBTITLES_API_KEY:-}"
+      OPENSUBTITLES_USERNAME: "${OPENSUBTITLES_USERNAME:-}"
+      OPENSUBTITLES_PASSWORD: "${OPENSUBTITLES_PASSWORD:-}"
+      CORE_SUBTITLE_LANGS: "${CORE_SUBTITLE_LANGS:-en}"
+      CORE_SUBTITLE_INTERVAL: "${CORE_SUBTITLE_INTERVAL:-21600}"
+      CORE_SUBTITLE_BATCH: "${CORE_SUBTITLE_BATCH:-15}"
+      # Jellyfin stays for playback; core just tells it when files land.
+      JELLYFIN_URL: "${JELLYFIN_URL:-http://jellyfin:8096}"
+      JELLYFIN_API_KEY: "${JELLYFIN_API_KEY:-}"
     volumes:
       - "${CORE_DATA:-/docker/appdata/core}:/data"
       - "${MEDIA_ROOT:-/data/media}:/media"

@@ -20,11 +20,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import db, indexers as indexer_mod, library, scoring
+from . import db, indexers as indexer_mod, library, scoring, subtitles
 from .acquisition import (
-    CATEGORIES, Scheduler, indexers_from_db, latest_quality, live_lineup,
+    CATEGORIES, Scheduler, indexers_from_db, jellyfin_client, latest_quality,
+    live_lineup, subtitle_provider,
 )
-from .downloader import Transmission
+from .downloader import Transmission, TransmissionError
 from .parser import parse, title_key
 from .settings import settings
 
@@ -91,6 +92,18 @@ class IndexerIn(BaseModel):
     kind: str = Field(default="torznab", pattern="^(torznab|newznab)$")
     cats: str = ""
     enabled: bool = True
+
+
+class GrabIn(BaseModel):
+    """One release, grabbed by hand from a search result."""
+    title: str = Field(min_length=1, max_length=400)
+    kind: str = Field(default="movie", pattern="^(movie|episode|track)$")
+    download_url: str = Field(default="", max_length=2000)
+    infohash: str = Field(default="", max_length=64)
+    indexer: str = Field(default="", max_length=80)
+    guid: str = Field(default="", max_length=1000)
+    size: int = Field(default=0, ge=0)
+    wanted_id: int | None = None
 
 
 class ProfileIn(BaseModel):
@@ -198,6 +211,64 @@ def search(
     return {"query": q, "results": payload, "current_quality": current}
 
 
+@app.post("/api/grab")
+def grab(payload: GrabIn, _: str = Depends(current_user)) -> dict[str, Any]:
+    """Grab one release the user picked by hand.
+
+    The automatic path chooses for you; this is the override. It goes through
+    the same publishing steps — a row first, then the downloader — so a hand
+    grab is watched, imported and deduplicated exactly like an automatic one.
+    """
+    link = payload.download_url.strip()
+    if not link and payload.infohash:
+        link = f"magnet:?xt=urn:btih:{payload.infohash}"
+    if not link:
+        raise HTTPException(status_code=422, detail="a download URL or an infohash is required")
+
+    release = parse(payload.title, payload.kind)
+    with conn_scope() as conn:
+        existing = db.one(
+            conn,
+            "SELECT * FROM grabs WHERE release = ? AND state IN ('grabbed','completed','imported')"
+            " ORDER BY id DESC LIMIT 1",
+            (release.raw,),
+        )
+        if existing is not None:
+            return {"ok": True, "duplicate": True, "grab": dict(existing),
+                    "message": "that release was already grabbed"}
+
+        cur = conn.execute(
+            "INSERT INTO grabs(wanted_id, indexer, guid, release, size, quality, score,"
+            " infohash, state, grabbed_at) VALUES(?,?,?,?,?,?,0,?,'grabbed',?)",
+            (payload.wanted_id, payload.indexer or "manual", payload.guid,
+             release.raw, payload.size or None, release.quality,
+             payload.infohash or None, db.now()),
+        )
+        grab_id = int(cur.lastrowid)
+        if payload.wanted_id:
+            conn.execute("UPDATE wanted SET status = 'grabbed', updated_at = ? WHERE id = ?",
+                         (db.now(), payload.wanted_id))
+        row = db.one(conn, "SELECT * FROM grabs WHERE id = ?", (grab_id,))
+
+        try:
+            added = transmission().add(link, labels=[settings.transmission_category])
+        except (TransmissionError, OSError) as exc:
+            conn.execute("UPDATE grabs SET state = 'failed' WHERE id = ?", (grab_id,))
+            if payload.wanted_id:
+                conn.execute(
+                    "UPDATE wanted SET status = 'failed', last_error = ?, updated_at = ?"
+                    " WHERE id = ?", (f"transmission: {exc}", db.now(), payload.wanted_id),
+                )
+            failed = db.one(conn, "SELECT * FROM grabs WHERE id = ?", (grab_id,))
+            return {"ok": False, "grab": dict(failed), "error": f"downloader: {exc}"}
+        conn.execute("UPDATE grabs SET download_id = ? WHERE id = ?",
+                     (str(added.get("id") or ""), grab_id))
+        row = db.one(conn, "SELECT * FROM grabs WHERE id = ?", (grab_id,))
+
+    return {"ok": True, "duplicate": bool(added.get("duplicate")),
+            "grab": dict(row), "added": added}
+
+
 @app.get("/api/wanted")
 def wanted_list(status: str | None = None, _: str = Depends(current_user)) -> dict[str, Any]:
     with conn_scope() as conn:
@@ -246,12 +317,60 @@ def scan(_: str = Depends(current_user)) -> dict[str, Any]:
         for row in rows:
             before = db.one(conn, "SELECT id FROM items WHERE fingerprint = ?",
                             (row["fingerprint"],))
-            item_id = db.upsert_item(conn, row)
+            db.upsert_item(conn, row)
             if before is None:
                 added += 1
-            else:
-                item_id = item_id
-    return {"scanned": len(rows), "added": added}
+    jellyfin_report = None
+    if added and settings.jellyfin_enabled:
+        jellyfin_report = jellyfin_client(settings).refresh()
+    return {"scanned": len(rows), "added": added, "jellyfin": jellyfin_report}
+
+
+@app.get("/api/subtitles")
+def subtitles_status(preview: int = Query(default=0, ge=0, le=100),
+                     _: str = Depends(current_user)) -> dict[str, Any]:
+    with conn_scope() as conn:
+        report = subtitles.stats(conn)
+    payload: dict[str, Any] = {
+        **report,
+        "languages": list(settings.subtitle_languages),
+        "provider": "opensubtitles" if settings.opensubtitles_api_key else "",
+        "enabled": bool(settings.subtitles_enabled and settings.opensubtitles_api_key),
+    }
+    if preview:
+        payload["library"] = subtitles.missing_report(
+            settings.library_root, list(settings.subtitle_languages), limit=preview,
+        )
+    return payload
+
+
+@app.post("/api/subtitles/fetch")
+def subtitles_fetch(limit: int = Query(default=0, ge=0, le=200),
+                    _: str = Depends(current_user)) -> dict[str, Any]:
+    """Run a subtitle pass now. Missing files are recorded, not retried blindly."""
+    provider = subtitle_provider(settings)
+    if provider is None:
+        raise HTTPException(
+            status_code=409,
+            detail="no subtitle provider configured — set OPENSUBTITLES_API_KEY",
+        )
+    with conn_scope() as conn:
+        result = subtitles.run_pass(conn, settings, provider,
+                                   limit=limit or settings.subtitle_batch, delay=0)
+    return result
+
+
+@app.get("/api/jellyfin")
+def jellyfin_status(_: str = Depends(current_user)) -> dict[str, Any]:
+    return jellyfin_client(settings).info()
+
+
+@app.post("/api/jellyfin/refresh")
+def jellyfin_refresh(_: str = Depends(current_user)) -> dict[str, Any]:
+    client = jellyfin_client(settings)
+    if not client.configured:
+        raise HTTPException(status_code=409, detail="JELLYFIN_URL / JELLYFIN_API_KEY are not set")
+    return client.refresh()
 
 
 @app.get("/api/dedupe")

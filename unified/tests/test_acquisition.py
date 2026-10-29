@@ -178,3 +178,50 @@ def test_scheduler_tick_survives_missing_services(conn, settings):
     outcome = scheduler.tick()
     assert "stats" in outcome
     conn.close()
+
+
+def test_after_import_notifies_jellyfin_and_fetches_a_subtitle(conn, settings, tmp_path):
+    from app import subtitles
+
+    class Jelly:
+        configured = True
+
+        def __init__(self):
+            self.paths = []
+
+        def refresh(self, paths=(), full=True):
+            self.paths = list(paths)
+            return {"configured": True, "updated": len(self.paths), "refreshed": True}
+
+    class Provider:
+        name = "fake"
+        configured = True
+
+        def search(self, request, languages):
+            return [subtitles.Candidate("fake", "1", languages[0])]
+
+        def download(self, candidate):
+            return b"1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+
+    video = tmp_path / "library" / "movies" / "Film (2020)" / "Film.2020.1080p.mkv"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"x" * 4096)
+
+    jelly = Jelly()
+    report = acquisition.after_import(conn, settings, [video], provider=Provider(), jelly=jelly)
+    assert jelly.paths == [video]
+    assert report["jellyfin"]["refreshed"] is True
+    assert [row["status"] for row in report["subtitles"]] == ["ok"]
+    assert subtitles.subtitle_path(video, "en").exists()
+
+
+def test_after_import_never_lets_jellyfin_break_the_import(conn, settings, tmp_path):
+    class Broken:
+        configured = True
+
+        def refresh(self, paths=(), full=True):
+            raise RuntimeError("boom")
+
+    report = acquisition.after_import(conn, settings, [tmp_path / "x.mkv"], jelly=Broken())
+    assert "boom" in report["jellyfin"]["error"]
+    assert "subtitles" not in report  # no provider configured in the test environment

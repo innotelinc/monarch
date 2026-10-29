@@ -54,6 +54,25 @@ class Settings:
     auth_header: str = os.environ.get("CORE_AUTH_HEADER", "X-Auth-Request-Email")
     auth_disabled: bool = _bool("CORE_AUTH_DISABLED", False)
 
+    # Subtitles: the one part of Bazarr worth keeping. OpenSubtitles.com hands
+    # out a free API key per household; the username/password pair is optional
+    # and only unlocks the higher download quota that comes with a VIP account.
+    opensubtitles_api_key: str = os.environ.get("OPENSUBTITLES_API_KEY", "")
+    opensubtitles_username: str = os.environ.get("OPENSUBTITLES_USERNAME", "")
+    opensubtitles_password: str = os.environ.get("OPENSUBTITLES_PASSWORD", "")
+    opensubtitles_base_url: str = os.environ.get("OPENSUBTITLES_BASE_URL", "")
+    subtitles_enabled: bool = _bool("CORE_SUBTITLES_ENABLED", True)
+    subtitle_languages_raw: str = os.environ.get("CORE_SUBTITLE_LANGS", "en")
+    subtitle_batch: int = _int("CORE_SUBTITLE_BATCH", 15)
+    subtitle_interval: int = _int("CORE_SUBTITLE_INTERVAL", 21600)
+    subtitle_delay: float = float(os.environ.get("CORE_SUBTITLE_DELAY", "2") or 2)
+
+    # Jellyfin keeps playback and transcoding. Refreshing its library after an
+    # import is the one thing the old stack did by hand.
+    jellyfin_url: str = os.environ.get("JELLYFIN_URL", "")
+    jellyfin_api_key: str = os.environ.get("JELLYFIN_API_KEY", "")
+    jellyfin_enabled: bool = _bool("CORE_JELLYFIN_REFRESH", True)
+
     # Scheduler cadence, in seconds.
     search_interval: int = _int("CORE_SEARCH_INTERVAL", 900)
     import_interval: int = _int("CORE_IMPORT_INTERVAL", 60)
@@ -65,6 +84,13 @@ class Settings:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "core.sqlite3"
+
+    @property
+    def subtitle_languages(self) -> list[str]:
+        """`CORE_SUBTITLE_LANGS=en,es` -> ['en', 'es'], order preserved."""
+        codes = [part.strip().lower().replace("_", "-")
+                 for part in self.subtitle_languages_raw.split(",")]
+        return list(dict.fromkeys(code for code in codes if code))
 
     @property
     def media_kinds(self) -> dict[str, str]:

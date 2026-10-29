@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import db, indexers as indexer_mod, library, livetv, scoring
+from . import jellyfin as jellyfin_mod, subtitles
 from .downloader import Transmission, TransmissionError
 from .parser import Release, matches, parse
 from .settings import Settings
@@ -224,7 +225,57 @@ def import_completed(conn, client: Transmission, settings: Settings) -> list[dic
         conn.execute("UPDATE wanted SET status = 'imported', updated_at = ? WHERE id = ?",
                      (db.now(), row["wanted_id"]))
         imported.append({"release": release.raw, "path": str(destination), "action": action})
+
+    if imported:
+        # The two things the old stack needed other services for: tell Jellyfin
+        # what just arrived, and fetch a subtitle for the new file only.
+        after_import(conn, settings, [Path(row["path"]) for row in imported])
     return imported
+
+
+def subtitle_provider(settings: Settings):
+    """The configured subtitle provider, or None when there is no API key."""
+    if not settings.opensubtitles_api_key:
+        return None
+    return subtitles.OpenSubtitles(
+        settings.opensubtitles_api_key, settings.opensubtitles_username,
+        settings.opensubtitles_password, base=settings.opensubtitles_base_url,
+    )
+
+
+def jellyfin_client(settings: Settings) -> jellyfin_mod.Jellyfin:
+    return jellyfin_mod.Jellyfin(settings.jellyfin_url, settings.jellyfin_api_key)
+
+
+def after_import(conn, settings: Settings, paths: list[Path],
+                 provider=None, jelly: jellyfin_mod.Jellyfin | None = None) -> dict:
+    """Post-import work: Jellyfin notification, then subtitles for those files.
+
+    Both steps are optional and none of them may fail an import that already
+    put the file on disk, so each is wrapped and reported separately.
+    """
+    report: dict[str, Any] = {}
+    if settings.jellyfin_enabled:
+        jelly = jelly or jellyfin_client(settings)
+        try:
+            report["jellyfin"] = jelly.refresh(paths)
+        except Exception as exc:  # a broken client must not lose the import
+            log.warning("jellyfin refresh failed: %s", exc)
+            report["jellyfin"] = {"configured": jelly.configured, "error": str(exc)}
+
+    if settings.subtitles_enabled:
+        provider = provider or subtitle_provider(settings)
+        if provider is not None and getattr(provider, "configured", True):
+            fetched: list[dict] = []
+            for path in paths:
+                try:
+                    fetched.extend(subtitles.fetch_for(conn, path,
+                                                       list(settings.subtitle_languages),
+                                                       provider))
+                except Exception as exc:
+                    log.warning("subtitle fetch failed for %s: %s", path, exc)
+            report["subtitles"] = fetched
+    return report
 
 
 def live_lineup(settings: Settings, fetch: Callable[[str], str] | None = None) -> list[dict]:
@@ -267,6 +318,7 @@ class Scheduler:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.last: dict[str, Any] = {}
+        self._next_subtitles = 0.0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -313,6 +365,20 @@ class Scheduler:
                     grabbed.append(plan_row.release.raw)
             result["grabbed"] = grabbed
             result["stats"] = db.stats(conn)
+
+            # Subtitles are the slowest job here (a network call per file) and
+            # the least urgent, so they run on their own cadence with a small
+            # batch rather than on every pass.
+            due = time.monotonic() >= self._next_subtitles
+            if due and self.settings.subtitles_enabled and self.settings.opensubtitles_api_key:
+                try:
+                    result["subtitles"] = subtitles.run_pass(
+                        conn, self.settings, subtitle_provider(self.settings),
+                    )
+                except Exception as exc:
+                    log.warning("subtitle pass failed: %s", exc)
+                    result["subtitles"] = {"error": str(exc)}
+                self._next_subtitles = time.monotonic() + self.settings.subtitle_interval
 
         self.last = {**result, "at": db.now()}
         return self.last

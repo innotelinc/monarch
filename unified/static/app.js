@@ -5,7 +5,7 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-const state = { view: "home", libraryKind: "movie", live: null };
+const state = { view: "home", libraryKind: "movie", live: null, results: [] };
 
 /* --------------------------------------------------------------------- utils */
 
@@ -186,6 +186,7 @@ views.search = async (params) => {
   const kind = params.get("kind") || "movie";
   const data = await api(`/api/search?q=${encodeURIComponent(query)}&kind=${kind}`);
   if (data.reason) return `<div class="error">${escapeHtml(data.reason)}</div>`;
+  state.results = data.results;
   return `
     <div class="view-head"><div><h1>Results for “${escapeHtml(query)}”</h1>
       <p>${data.results.length} unique releases after cross-indexer dedupe${data.current_quality ? ` · already held at ${escapeHtml(data.current_quality)}` : ""}.</p></div>
@@ -196,7 +197,7 @@ views.search = async (params) => {
     </div>
     ${data.results.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Release</th><th>Score</th><th>Seeds</th><th>Size</th><th></th></tr></thead>
-      <tbody>${data.results.map((row) => `
+      <tbody>${data.results.map((row, index) => `
         <tr>
           <td>
             <div style="font-weight:600">${escapeHtml(row.title)}</div>
@@ -205,7 +206,7 @@ views.search = async (params) => {
           <td>${row.verdict.accepted ? `<span class="pill ok">${row.verdict.score}</span>` : `<span class="pill bad">rejected</span>`}</td>
           <td>${row.seeders}</td>
           <td>${bytes(row.size)}</td>
-          <td><button class="btn ghost" type="button" disabled title="Automatic grab arrives with the first cutover">Grab</button></td>
+          <td><button class="btn ghost" type="button" data-grab="${index}" title="Send this release to the downloader">Grab</button></td>
         </tr>`).join("")}</tbody>
     </table></div>` : `<div class="empty">No indexer returned a match. Check the indexers in Settings.</div>`}
   `;
@@ -322,7 +323,12 @@ views.live = async () => {
 };
 
 views.settings = async () => {
-  const [indexers, scheduler] = await Promise.all([api("/api/indexers"), api("/api/scheduler")]);
+  const [indexers, scheduler, subs, jelly] = await Promise.all([
+    api("/api/indexers"),
+    api("/api/scheduler"),
+    api("/api/subtitles").catch(() => null),
+    api("/api/jellyfin").catch(() => ({ configured: false, reachable: false })),
+  ]);
   return `
     <div class="view-head"><div><h1>Settings</h1>
       <p>Indexers, the scheduler and the dedupe audit. Keys are stored server-side and never sent back to the browser.</p></div></div>
@@ -353,6 +359,29 @@ views.settings = async () => {
           <button class="btn" id="dedupe" type="button">Audit duplicates</button>
         </div>
         <div id="dedupe-out" style="margin-top:14px"></div>
+      </div>
+    </div>
+
+    <div class="row" style="align-items:flex-start;margin-top:18px">
+      <div class="card" style="flex:1 1 360px">
+        <h3>Subtitles</h3>
+        ${subs && subs.enabled ? `
+          <p>${subs.ok} files have a subtitle, ${subs.missing} have none yet, ${subs.failed} failed. Languages: <b>${subs.languages.join(", ")}</b> via <b>${escapeHtml(subs.provider)}</b>.</p>
+          <div class="meta" style="margin-top:12px">
+            <button class="btn" id="subs-fetch" type="button">Fetch missing subtitles</button>
+          </div>
+          <div id="subs-out" style="margin-top:12px;color:var(--muted);font-size:13px"></div>
+        ` : `<p>No subtitle provider configured. Set <code>OPENSUBTITLES_API_KEY</code> and <code>CORE_SUBTITLE_LANGS</code>, then restart core — missing subtitles are then fetched for every import and on a slow background pass.</p>`}
+      </div>
+      <div class="card" style="flex:1 1 360px">
+        <h3>Jellyfin</h3>
+        ${jelly.configured ? (jelly.reachable
+          ? `<p>${escapeHtml(jelly.server || "Jellyfin")} ${escapeHtml(jelly.version || "")} — core tells it about every import, so a new file appears without waiting for a scheduled scan.</p>`
+          : `<p>Configured, but not reachable: ${escapeHtml(jelly.error || "no answer")}.</p>`)
+          : `<p>Set <code>JELLYFIN_URL</code> and <code>JELLYFIN_API_KEY</code> so every import refreshes the library.</p>`}
+        <div class="meta" style="margin-top:12px">
+          <button class="btn" id="jelly-refresh" type="button" ${jelly.configured ? "" : "disabled"}>Refresh Jellyfin library</button>
+        </div>
       </div>
     </div>
 
@@ -479,6 +508,58 @@ function wire() {
       const result = await api("/api/scheduler/tick", { method: "POST" });
       toast(`Pass done: ${result.grabbed?.length ?? 0} grabbed, ${result.imported?.length ?? 0} imported`, "ok");
       render();
+    } catch (error) { toast(error.message, "bad"); }
+    finally { event.target.disabled = false; }
+  });
+
+  $$("[data-grab]").forEach((button) => button.addEventListener("click", async () => {
+    const row = state.results[Number(button.dataset.grab)];
+    if (!row) return;
+    button.disabled = true;
+    button.textContent = "Grabbing…";
+    try {
+      const kind = new URLSearchParams(location.hash.split("?")[1] || "").get("kind") || "movie";
+      const result = await api("/api/grab", {
+        method: "POST",
+        body: JSON.stringify({
+          title: row.title, kind, download_url: row.download_url,
+          infohash: row.infohash, indexer: row.indexer, guid: row.guid,
+          size: row.size || 0,
+        }),
+      });
+      if (result.ok) {
+        toast(result.duplicate ? "Already grabbed — nothing sent twice" : "Grabbed — watch it in Downloads", "ok");
+        button.textContent = result.duplicate ? "Already grabbed" : "Grabbed";
+      } else {
+        toast(result.error || "Grab failed", "bad");
+        button.disabled = false;
+        button.textContent = "Grab";
+      }
+    } catch (error) {
+      toast(error.message, "bad");
+      button.disabled = false;
+      button.textContent = "Grab";
+    }
+  }));
+
+  $("#subs-fetch")?.addEventListener("click", async (event) => {
+    event.target.disabled = true;
+    event.target.textContent = "Fetching…";
+    try {
+      const result = await api("/api/subtitles/fetch", { method: "POST" });
+      $("#subs-out").textContent = result.count
+        ? `${result.ok} of ${result.count} subtitles written; the rest were recorded as missing.`
+        : "Nothing to fetch — every file in the library already has one, or recent misses are being held back.";
+      toast(`${result.ok || 0} subtitles saved`, "ok");
+    } catch (error) { toast(error.message, "bad"); }
+    finally { event.target.disabled = false; event.target.textContent = "Fetch missing subtitles"; }
+  });
+
+  $("#jelly-refresh")?.addEventListener("click", async (event) => {
+    event.target.disabled = true;
+    try {
+      const result = await api("/api/jellyfin/refresh", { method: "POST" });
+      toast(result.refreshed ? "Jellyfin is rescanning" : "Jellyfin did not acknowledge", result.refreshed ? "ok" : "bad");
     } catch (error) { toast(error.message, "bad"); }
     finally { event.target.disabled = false; }
   });

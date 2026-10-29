@@ -17,7 +17,7 @@ state and the channel lineup, and it serves the only UI anyone signs in to.
 | Sonarr, Radarr, Lidarr, Whisparr | one service per media type: monitor, search, decide, import | `core`: one `wanted` table, one profile, one engine |
 | Prowlarr | normalise and fan out indexer searches | `core/indexers.py`: Torznab/Newznab directly, deduped by infohash |
 | Jellyseerr, Requestrr | two request frontends over the same catalog | `core` Requests view; one queue, one dedupe key |
-| Bazarr | subtitle fetch and sync | not yet ported — see *Open items* |
+| Bazarr | subtitle fetch and sync | `core/subtitles.py`: OpenSubtitles hash + title search, written next to the video, misses recorded |
 | Homarr, `monarch-landing` | two front doors onto the same stack | the `core` UI (this is the only one left) |
 | Deluge, SABnzbd | two more download clients | Transmission only |
 | TVHeadend, NextPVR, Dispatcharr, autobrr, iptv-epg | four ways to make a playlist playable | `core/livetv.py`: M3U tuner + XMLTV guide read natively |
@@ -40,6 +40,21 @@ The two expensive things left are the two that cannot be removed: Jellyfin
 (transcoding) and Transmission (transfer). `deploy/monarch-core.compose.yml`
 caps `core` at 512 MB and the gateway at 128 MB — deliberately the memory one
 gateway used to take on its own.
+
+## Subtitles and the Jellyfin handoff
+
+The two jobs that used to need their own container are now two steps after an
+import, in the same pass that links the file:
+
+- **Subtitles.** A video is identified by the OpenSubtitles hash (size plus the
+  first and last 64 KiB) *and* by its parsed title/year, so a hash miss still
+  finds the release. The subtitle is written next to the file as
+  `Name.en.srt` — never over one that exists — and the outcome is recorded, so a
+  file with genuinely no subtitle is not re-queried every pass. Languages come
+  from `CORE_SUBTITLE_LANGS`; the provider is `OPENSUBTITLES_API_KEY`.
+- **Jellyfin.** `POST /Library/Media/Updated` names the folder that appeared and
+  `POST /Library/Refresh` covers the rest. An unreachable Jellyfin is reported
+  in Settings and never fails an import that already put the file on disk.
 
 ## Dedupe
 
@@ -108,6 +123,8 @@ unified/
   app/scoring.py       quality profiles, upgrade rules, the grab decision
   app/indexers.py      Torznab/Newznab client, cross-indexer dedupe
   app/downloader.py    Transmission RPC
+  app/subtitles.py     OpenSubtitles search, naming, the fetch pass
+  app/jellyfin.py      library refresh after an import
   app/library.py       scan, content dedupe, import paths
   app/livetv.py        M3U + XMLTV, deterministic channel numbering
   app/acquisition.py   the loop: search → decide → grab → import
@@ -118,18 +135,19 @@ scripts/migrate-from-arr.py   import indexers and the missing queue
 deploy/monarch-core.compose.yml
 ```
 
+## What the UI does
+
+Search scores every candidate and the number is the decision's reason; **Grab**
+sends that release to Transmission by hand and goes through the same dedupe as an
+automatic grab. Settings carries the subtitle state (found / missing / failed),
+a *Fetch missing subtitles* button, the Jellyfin status and a manual refresh, the
+indexer list and the duplicate audit.
+
 ## Open items
 
-- **Subtitles.** Bazarr is retired in the plan but not yet replaced; the
-  catalog has no `subtitle` table until it is. Until then, keep Bazarr running
-  or accept libraries without subtitle automation.
-- **Playback handoff.** `core` links imported files into the library, and
-  Jellyfin picks them up from the filesystem. A Jellyfin API "refresh library"
-  call after an import would remove the last manual step; it is not written.
-- **Grab from the search view.** Search shows the score and the reasons and
-  refuses to grab; the scheduler is the only thing that grabs. Manual override
-  is the next piece of UI work.
-- **Notification of failures.** Failed grabs are recorded and shown; nothing
-  emails or pushes yet.
-- **Deployment.** The service has never been deployed: this repository has the
-  code, the compose file and the tests, and no host access was used.
+- **Notification of failures.** Failed grabs and failed subtitle fetches are
+  recorded and shown; nothing emails or pushes yet.
+- **Sync drift.** Subtitles are written as found. Tools like `ffsubsync` fix a
+  subtitle timed for a different release; that step is not wired in.
+- **Usenet.** `core` speaks Torznab/Newznab for search but only Transmission for
+  transfer. Sabnzbd is stopped with the rest of the old stack.

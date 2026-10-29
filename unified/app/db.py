@@ -91,6 +91,23 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- One row per (video, language): the record of what was looked for and found,
+-- so a file with genuinely no subtitle is not re-queried on every pass.
+CREATE TABLE IF NOT EXISTS subtitles (
+    id            INTEGER PRIMARY KEY,
+    video_path    TEXT NOT NULL,
+    language      TEXT NOT NULL,
+    subtitle_path TEXT,
+    source        TEXT,
+    status        TEXT NOT NULL DEFAULT 'ok'
+                  CHECK (status IN ('ok','missing','failed')),
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    updated_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS subtitles_key ON subtitles(video_path, language);
+CREATE INDEX IF NOT EXISTS subtitles_status ON subtitles(status);
 """
 
 
