@@ -119,6 +119,14 @@ complete a browser OIDC flow), which is why that hostname is not a 301.
 
 ### Rollback
 
+Step 8 is a profile, not a deletion: the twenty retired services sit behind
+`profiles: ["retired"]` in `docker-compose.yml`, so a plain `docker compose up
+d` never starts them again, and bringing one back is
+`docker compose --profile retired up -d sonarr`. Their appdata and NPM hosts are
+untouched; `monarch-init`'s `depends_on` no longer names them, because a
+required service that depends on a profiled one makes the whole file refuse to
+load.
+
 Until step 8 nothing is destroyed, so rollback is: stop `core`, re-enable the
 old proxy hosts. After step 8, restoring the appdata backup and re-enabling the
 hosts returns the old stack exactly as it was — the *arr applications still hold

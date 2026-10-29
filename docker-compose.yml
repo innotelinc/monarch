@@ -165,6 +165,7 @@ services:
   jellyseerr:
     <<: *common-keys
     container_name: jellyseerr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/seerr-team/seerr:latest
     init: true
     ports:
@@ -186,6 +187,7 @@ services:
   sonarr:
     <<: *common-keys
     container_name: sonarr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/sonarr:latest
     ports:
       - 127.0.0.1:8989:8989
@@ -200,6 +202,7 @@ services:
   radarr:
     <<: *common-keys
     container_name: radarr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/radarr:latest
     ports:
       - 127.0.0.1:7878:7878
@@ -214,6 +217,7 @@ services:
   lidarr:
     <<: *common-keys
     container_name: lidarr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/lidarr:latest
     ports:
       - 127.0.0.1:8686:8686
@@ -228,6 +232,7 @@ services:
   whisparr:
     <<: *common-keys
     container_name: whisparr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # v2-develop (not latest): hotio's `latest` is frozen at v2.2.0-release.231,
     # which predates current Whisparr. (The original reason was qBittorrent
     # 5.2.x support; qBittorrent was replaced by Transmission on 2026-10-01,
@@ -262,6 +267,7 @@ services:
   bazarr:
     <<: *common-keys
     container_name: bazarr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/bazarr:latest
     ports:
       - 127.0.0.1:6767:6767
@@ -276,6 +282,7 @@ services:
   homarr:
     <<: *common-keys
     container_name: homarr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # Homarr v1 (homarr-labs rewrite; the old ajnart/homarr v0.16 line is
     # archived). v1 keeps everything under a single /appdata mount.
     # Pinned by digest, not `:latest`. watchtower runs every 6 h with --cleanup
@@ -322,6 +329,7 @@ services:
   landing:
     <<: *common-keys
     container_name: monarch-landing
+    profiles: ["retired"]   # see docs/unified.md — replaced by the core UI
     image: nginx:alpine
     ports:
       - 14014:80
@@ -396,6 +404,7 @@ services:
   sabnzbd:
     <<: *common-keys
     container_name: sabnzbd
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/sabnzbd:latest
     ports:
       # 8082 is the default because scripts/npm-hosts.conf forwards
@@ -439,6 +448,7 @@ services:
   requestrr:
     <<: *common-keys
     container_name: requestrr
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # Served from this repo's own GHCR mirror (published by
     # .github/workflows/publish-image-mirrors.yml) rather than Docker Hub: an
     # anonymous Docker Hub pull shares its small per-address budget with every
@@ -600,6 +610,7 @@ services:
   clipbucket:
     <<: *common-keys
     container_name: clipbucket
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # Built from ./clipbucket (nginx + PHP-FPM + MariaDB runtime, app source
     # git-cloned on first boot) - the upstream oxygenz image is amd64-only.
     # The release workflow publishes amd64 + arm64 to GHCR.
@@ -777,15 +788,8 @@ services:
     restart: "no"
     depends_on:
       - jellyfin
-      - jellyseerr
       - prowlarr
-      - sonarr
-      - radarr
-      - lidarr
-      - whisparr
-      - bazarr
       - transmission
-      - sabnzbd
       - iptv
     environment:
       MONARCH_USERNAME: ${MONARCH_USERNAME:-admin}
@@ -921,6 +925,7 @@ services:
   radarr-sso:
     <<: *sso-gateway
     container_name: radarr-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://radarr:7878
@@ -930,6 +935,7 @@ services:
   sonarr-sso:
     <<: *sso-gateway
     container_name: sonarr-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://sonarr:8989
@@ -939,6 +945,7 @@ services:
   lidarr-sso:
     <<: *sso-gateway
     container_name: lidarr-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://lidarr:8686
@@ -948,6 +955,7 @@ services:
   whisparr-sso:
     <<: *sso-gateway
     container_name: whisparr-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://whisparr:6969
@@ -957,6 +965,7 @@ services:
   bazarr-sso:
     <<: *sso-gateway
     container_name: bazarr-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://bazarr:6767
@@ -984,6 +993,7 @@ services:
   sabnzbd-sso:
     <<: *sso-gateway
     container_name: sabnzbd-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://sabnzbd:8080
@@ -1004,6 +1014,7 @@ services:
   jellyseerr-sso:
     <<: *sso-gateway
     container_name: jellyseerr-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       # The request portal publishes its own sign-in page (the Jellyfin/Cerulean
@@ -1065,6 +1076,7 @@ services:
   clipbucket-sso:
     <<: *sso-gateway
     container_name: clipbucket-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://clipbucket:80
@@ -1089,6 +1101,7 @@ services:
   requestrr-sso:
     <<: *sso-gateway
     container_name: requestrr-sso
+    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       # Upstream is the app by name over the compose network, which is why the
@@ -1098,6 +1111,70 @@ services:
       OAUTH2_PROXY_UPSTREAMS: http://requestrr:4545
     ports:
       - "${REQUESTRR_SSO_PORT:-14013}:4180"
+
+  ###############################################
+  # MONARCH CORE - one service for the whole media platform
+  ###############################################
+  # Replaces sonarr/radarr/lidarr/whisparr/prowlarr/jellyseerr/requestrr/bazarr
+  # and the dashboard: one catalog, one wanted queue, one grab decision, one
+  # subtitle pass, one live-TV lineup, one UI. Jellyfin still plays, Transmission
+  # still fetches. Source: unified/ in this repo, docs/unified.md for the plan.
+  core:
+    restart: unless-stopped
+    logging:
+      driver: json-file
+    container_name: monarch-core
+    image: monarch-core:1.0.0
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: ${TZ:-America/New_York}
+      CORE_DATA_DIR: /data
+      CORE_LIBRARY_ROOT: /data/media
+      CORE_AUTH_HEADER: X-Auth-Request-Email
+      TRANSMISSION_URL: http://transmission:9091
+      JELLYFIN_URL: ${JELLYFIN_URL:-http://jellyfin:8096}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      OPENSUBTITLES_USERNAME: ${OPENSUBTITLES_USERNAME:-}
+      OPENSUBTITLES_PASSWORD: ${OPENSUBTITLES_PASSWORD:-}
+      OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY:-}
+      CORE_SUBTITLE_PROVIDER: ${CORE_SUBTITLE_PROVIDER:-auto}
+      CORE_SUBTITLE_LANGS: ${CORE_SUBTITLE_LANGS:-en}
+      CORE_SUBTITLE_BATCH: ${CORE_SUBTITLE_BATCH:-25}
+      CORE_SUBTITLE_INTERVAL: ${CORE_SUBTITLE_INTERVAL:-1800}
+      CORE_SEARCH_INTERVAL: ${CORE_SEARCH_INTERVAL:-900}
+      LIVETV_M3U_URL: ${LIVETV_M3U_URL:-}
+      LIVETV_XMLTV_URL: ${LIVETV_XMLTV_URL:-}
+    volumes:
+      # /data at the same path Transmission uses, so a finished torrent's
+      # absolute path resolves inside core for the hardlink.
+      - /data:/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "127.0.0.1:8090:8090"
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # One sign-in for every door. Same anchors as the app gateways (so the shared
+  # _innotel_sso cookie still works), but there is only this one now.
+  core-sso:
+    <<: *sso-gateway
+    container_name: monarch-core-sso
+    environment:
+      <<: *sso-env
+      OAUTH2_PROXY_UPSTREAMS: http://core:8090
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    ports:
+      - "${CORE_SSO_PORT:-14100}:4180"
+    mem_limit: 128m
 
 volumes:
   clipbucket_db:
