@@ -194,6 +194,22 @@ points `SplashscreenLocation` at it with `SplashscreenEnabled`, with the server
 name set to Gizmo so a TV client shows one product, not two. Verified by reading
 it back from `GET /Branding/Splashscreen` (image/png, 3840×2160).
 
+Jellyfin 12's shell paints the splash on `<div class="splashLogo">` as a
+background image and has no second splash setting, so the light theme is served
+by one `@media (prefers-color-scheme: light)` rule in the branding CSS that
+replaces that background with the light render (the 1920×1080 one, embedded as
+a data URI — a 4K one would double the branding config). The rule is fenced by
+`/* gizmo-light-splash */` … `/* /gizmo-light-splash */` so re-running the
+installer replaces it instead of stacking a second copy; the 4K light PNG sits
+next to the dark one in `assets/gizmo/` and in the Jellyfin config for anyone
+who wants it as the splash outright.
+
+The image is also digest-pinned and labelled
+`com.centurylinklabs.watchtower.enable=false`: an upgrade there is a database
+migration, and Watchtower's idea of "newer" was the 11 → 12 jump that crash-
+looped on its own migration. Moving Jellyfin is `JELLYFIN_IMAGE=… docker
+compose up -d jellyfin`, deliberately.
+
 ## Open items
 
 - **Notification of failures.** Failed grabs and failed subtitle fetches are
