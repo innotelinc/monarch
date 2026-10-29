@@ -89,7 +89,7 @@ class IndexerIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     url: str = Field(min_length=4, max_length=500)
     api_key: str = ""
-    kind: str = Field(default="torznab", pattern="^(torznab|newznab)$")
+    kind: str = Field(default="torznab", pattern="^(torznab|newznab|prowlarr)$")
     cats: str = ""
     enabled: bool = True
 

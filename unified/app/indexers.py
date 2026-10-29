@@ -64,6 +64,14 @@ class IndexerResult:
         }
 
 
+# Prowlarr is the one *arr service worth keeping while its indexers are worth
+# having: it is the only thing that speaks to trackers with no Torznab of their
+# own. Core can read its search API directly, so one row replaces the per-site
+# proxying and the results still get core's ranking and dedupe.
+PROTOCOL_TTL = 300
+_protocol_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
 @dataclass(frozen=True)
 class Indexer:
     name: str
@@ -156,6 +164,70 @@ def search_url(indexer: Indexer, query: str, *, limit: int = 100,
     return f"{base}/api?{urllib.parse.urlencode(params)}"
 
 
+def prowlarr_protocols(indexer: Indexer, client: httpx.Client,
+                       timeout: float) -> dict[str, str]:
+    """indexerId -> 'torrent' | 'usenet', so usenet results are never offered."""
+    import time
+
+    key = f"{indexer.url}|{indexer.api_key}"
+    cached = _protocol_cache.get(key)
+    if cached and time.monotonic() - cached[0] < PROTOCOL_TTL:
+        return cached[1]
+    mapping: dict[str, str] = {}
+    try:
+        response = client.get(f"{indexer.url.rstrip('/')}/api/v1/indexer",
+                              params={"apikey": indexer.api_key}, timeout=timeout)
+        if response.status_code == 200:
+            for row in response.json() or []:
+                mapping[str(row.get("id"))] = str(row.get("protocol") or "").lower()
+    except (httpx.HTTPError, OSError, ValueError):
+        mapping = {}
+    _protocol_cache[key] = (time.monotonic(), mapping)
+    return mapping
+
+
+def search_prowlarr(indexer: Indexer, query: str, *, limit: int = 100,
+                    categories: str = "", timeout: float = 30.0,
+                    client: httpx.Client) -> list[IndexerResult]:
+    """Prowlarr's aggregated search: every indexer it knows, in one call."""
+    params: dict[str, Any] = {
+        "query": query, "type": "search", "limit": str(limit),
+        "apikey": indexer.api_key,
+    }
+    if categories:
+        params["categories"] = categories
+    response = client.get(f"{indexer.url.rstrip('/')}/api/v1/search",
+                          params=params, timeout=timeout)
+    if response.status_code != 200:
+        return []
+    protocols = prowlarr_protocols(indexer, client, timeout)
+    base = indexer.url.rstrip("/")
+    results: list[IndexerResult] = []
+    for row in response.json() or []:
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        protocol = protocols.get(str(row.get("indexerId"))) or str(row.get("protocol") or "").lower()
+        if protocol == "usenet":
+            continue  # Transmission is the only client; an NZB cannot be pinned
+        download = str(row.get("downloadUrl") or "").strip()
+        if download.startswith("/"):
+            download = base + download
+        results.append(IndexerResult(
+            indexer=str(row.get("indexer") or indexer.name),
+            title=title,
+            guid=str(row.get("guid") or download or title),
+            download_url=download or str(row.get("magnetUrl") or ""),
+            size=_int(str(row.get("size") or 0)),
+            seeders=_int(str(row.get("seeders") or 0)),
+            leechers=_int(str(row.get("leechers") or 0)),
+            infohash=str(row.get("infoHash") or "")
+            or str(row.get("magnetUrl") or "").split("btih:")[-1][:40],
+            published=str(row.get("publishDate") or ""),
+        ))
+    return results
+
+
 def search(indexer: Indexer, query: str, *, limit: int = 100,
            categories: str = "", timeout: float = 30.0,
            client: httpx.Client | None = None) -> list[IndexerResult]:
@@ -165,11 +237,14 @@ def search(indexer: Indexer, query: str, *, limit: int = 100,
     own_client = client is None
     client = client or httpx.Client(timeout=timeout, follow_redirects=True)
     try:
+        if indexer.kind == "prowlarr":
+            return search_prowlarr(indexer, query, limit=limit, categories=categories,
+                                   timeout=timeout, client=client)
         response = client.get(search_url(indexer, query, limit=limit, categories=categories))
         if response.status_code != 200:
             return []
         return parse_feed(response.content, indexer.name)
-    except (httpx.HTTPError, OSError):
+    except (httpx.HTTPError, OSError, ValueError):
         return []
     finally:
         if own_client:

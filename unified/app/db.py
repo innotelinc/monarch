@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS indexers (
     name    TEXT NOT NULL UNIQUE,
     url     TEXT NOT NULL,
     api_key TEXT NOT NULL DEFAULT '',
-    kind    TEXT NOT NULL DEFAULT 'torznab' CHECK (kind IN ('torznab','newznab')),
+    kind    TEXT NOT NULL DEFAULT 'torznab'
+            CHECK (kind IN ('torznab','newznab','prowlarr')),
     cats    TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1
 );
@@ -125,7 +126,40 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a database written by an older build up to the current schema.
+
+    SQLite cannot widen a CHECK constraint in place, so a table that predates
+    the `prowlarr` indexer kind is rebuilt once. Everything else is additive and
+    covered by CREATE TABLE IF NOT EXISTS above.
+    """
+    row = one(conn, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'indexers'")
+    if row is None or "'prowlarr'" in (row["sql"] or ""):
+        return
+    conn.executescript("""
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        CREATE TABLE indexers_new (
+            id      INTEGER PRIMARY KEY,
+            name    TEXT NOT NULL UNIQUE,
+            url     TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            kind    TEXT NOT NULL DEFAULT 'torznab'
+                    CHECK (kind IN ('torznab','newznab','prowlarr')),
+            cats    TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO indexers_new(id, name, url, api_key, kind, cats, enabled)
+            SELECT id, name, url, api_key, kind, cats, enabled FROM indexers;
+        DROP TABLE indexers;
+        ALTER TABLE indexers_new RENAME TO indexers;
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+    """)
 
 
 @contextmanager

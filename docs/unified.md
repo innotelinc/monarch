@@ -15,7 +15,7 @@ state and the channel lineup, and it serves the only UI anyone signs in to.
 | Retired | Was doing | Now |
 |---|---|---|
 | Sonarr, Radarr, Lidarr, Whisparr | one service per media type: monitor, search, decide, import | `core`: one `wanted` table, one profile, one engine |
-| Prowlarr | normalise and fan out indexer searches | `core/indexers.py`: Torznab/Newznab directly, deduped by infohash |
+| Prowlarr | normalise and fan out indexer searches | `core/indexers.py`: Torznab/Newznab directly **and** Prowlarr's search API as one aggregated indexer, deduped by infohash |
 | Jellyseerr, Requestrr | two request frontends over the same catalog | `core` Requests view; one queue, one dedupe key |
 | Bazarr | subtitle fetch and sync | `core/subtitles.py`: hash + title search, written next to the video, misses recorded |
 | Homarr, `monarch-landing` | two front doors onto the same stack | the `core` UI (this is the only one left) |
@@ -146,11 +146,25 @@ automatic grab. Settings carries the subtitle state (found / missing / failed),
 a *Fetch missing subtitles* button, the Jellyfin status and a manual refresh, the
 indexer list and the duplicate audit.
 
+## Why Prowlarr is still running
+
+Most trackers in this estate have no Torznab endpoint of their own — Prowlarr
+is the only thing that speaks to them. Deleting it would either break search or
+require a scraper per site, so `core` keeps it in the smallest role it can:
+**one** indexer row of kind `prowlarr`, whose results core parses, ranks,
+dedupes and filters (usenet answers are dropped, because Transmission is the
+only client). The other four *arr services are gone; Prowlarr is a search proxy
+with a database, not an application anyone signs in to. Retiring it later is a
+matter of adding a native indexer row per tracker and deleting the one row.
+
 ## Open items
 
 - **Notification of failures.** Failed grabs and failed subtitle fetches are
   recorded and shown; nothing emails or pushes yet.
 - **Sync drift.** Subtitles are written as found. Tools like `ffsubsync` fix a
   subtitle timed for a different release; that step is not wired in.
-- **Usenet.** `core` speaks Torznab/Newznab for search but only Transmission for
-  transfer. Sabnzbd is stopped with the rest of the old stack.
+- **Usenet.** `core` searches Newznab indexers but only transfers through
+  Transmission, so usenet results are filtered out of Prowlarr answers rather
+  than offered and then failing. Sabnzbd is stopped with the rest of the old
+  stack; a second download client is the work this needs.
+- **Prowlarr.** Still running, in the reduced role described above.

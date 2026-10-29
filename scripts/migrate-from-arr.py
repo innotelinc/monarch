@@ -4,7 +4,8 @@
 What is worth migrating is not the *arr databases; it is the decisions a
 person made in them:
 
-  * the indexers Prowlarr was aggregating (name, URL, key, categories);
+  * Prowlarr itself, as one aggregated indexer row — its search API already
+    fans out to every tracker it knows;
   * what Sonarr and Radarr were still *missing* — the monitored episodes and
     films with no file — which becomes the new `wanted` queue;
   * the library itself, which is on disk and is picked up by a scan.
@@ -47,16 +48,6 @@ def api(client: httpx.Client, base: str, key: str, path: str, params: dict | Non
     return response.json()
 
 
-def prowlarr_fields(indexer: dict) -> dict:
-    """Prowlarr keeps everything interesting in a `fields` list."""
-    fields = {f.get("name"): f.get("value") for f in indexer.get("fields", [])}
-    return {
-        "name": indexer.get("name", ""),
-        "url": fields.get("baseUrl") or indexer.get("baseUrl") or "",
-        "api_key": fields.get("apiKey") or "",
-        "cats": ",".join(str(c) for c in (indexer.get("capabilities", {})
-                                          .get("categories") or [])[:12]),
-    }
 
 
 def sonarr_missing(client, base: str, key: str) -> list[dict]:
@@ -135,13 +126,18 @@ def main() -> int:
     with httpx.Client(follow_redirects=True) as client:
         if args.prowlarr:
             print(f"prowlarr: {args.prowlarr}")
-            for indexer in api(client, args.prowlarr, args.prowlarr_key, "/api/v1/indexer"):
-                if not indexer.get("enable", True):
-                    continue
-                row = prowlarr_fields(indexer)
-                if row["name"] and row["url"]:
-                    indexers.append(row)
-            print(f"  {len(indexers)} enabled indexers")
+            # One row, not one per tracker: Prowlarr's own search API already
+            # fans out, and core applies its own ranking and cross-indexer
+            # dedupe to the answer. Usenet indexers are skipped at query time
+            # because Transmission is the only download client.
+            indexers.append({
+                "name": "Prowlarr",
+                "url": args.prowlarr.rstrip("/"),
+                "api_key": args.prowlarr_key,
+                "cats": "",
+                "kind": "prowlarr",
+            })
+            print("  1 aggregated indexer (every tracker Prowlarr knows, torrents only)")
 
         if args.sonarr:
             print(f"sonarr: {args.sonarr}")
@@ -191,10 +187,10 @@ def main() -> int:
                             (row["name"],))
             connection.execute(
                 "INSERT INTO indexers(name, url, api_key, kind, cats, enabled)"
-                " VALUES(?,?,?,'torznab',?,1) ON CONFLICT(name) DO UPDATE SET"
+                " VALUES(?,?,?,?,?,1) ON CONFLICT(name) DO UPDATE SET"
                 " url = excluded.url, api_key = excluded.api_key,"
-                " cats = excluded.cats",
-                (row["name"], row["url"], row["api_key"], row["cats"]),
+                " kind = excluded.kind, cats = excluded.cats",
+                (row["name"], row["url"], row["api_key"], row["kind"], row["cats"]),
             )
             added_indexers += 0 if before else 1
 
