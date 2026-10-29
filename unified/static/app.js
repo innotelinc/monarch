@@ -1,4 +1,4 @@
-/* Monarch core UI.
+/* Gizmo UI.
    One router, seven views, no framework. Every number on the page comes from
    the service's own API — the UI holds no state it cannot rebuild from /api. */
 
@@ -103,7 +103,7 @@ views.home = async () => {
   return `
     <div class="view-head">
       <div>
-        <p class="eyebrow">Monarch</p>
+        <p class="eyebrow">Gizmo</p>
         <h1>Everything, in one place.</h1>
         <p>Library, requests, the download queue and live TV on one page — the eight hostnames this platform used to answer on all land here now.</p>
       </div>
@@ -593,7 +593,7 @@ $("#theme-toggle")?.addEventListener("click", () => {
   const root = document.documentElement;
   const next = root.dataset.theme === "dark" ? "light" : "dark";
   root.dataset.theme = next;
-  localStorage.setItem("monarch.theme", next);
+  localStorage.setItem("gizmo.theme", next);
 });
 
 $("#quick-search")?.addEventListener("submit", (event) => {
@@ -612,7 +612,7 @@ document.addEventListener("keydown", (event) => {
 
 window.addEventListener("hashchange", render);
 
-const saved = localStorage.getItem("monarch.theme");
+const saved = localStorage.getItem("gizmo.theme") || localStorage.getItem("monarch.theme");
 if (saved) document.documentElement.dataset.theme = saved;
 
 refreshHealth();

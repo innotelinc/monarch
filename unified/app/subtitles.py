@@ -305,7 +305,7 @@ class OpenSubtitlesLegacy:
 
     name = "opensubtitles-legacy"
     default_endpoint = "https://api.opensubtitles.org/xml-rpc"
-    user_agent = "MonarchCore v1.0"
+    user_agent = "Gizmo v1.1"
 
     def __init__(self, username: str = "", password: str = "",
                  endpoint: str = "", timeout: float = 30.0) -> None:

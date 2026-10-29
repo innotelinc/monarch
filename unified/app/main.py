@@ -1,4 +1,4 @@
-"""Monarch core — one service for the whole media platform.
+"""Gizmo — one service for the whole media platform.
 
 The eight public hostnames (media/req/movies/tv/index/xxx/mp3/dl) collapse to
 this: one process serves the UI and the API, owns the catalog, searches the
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     scheduler.stop()
 
 
-app = FastAPI(title="Monarch core", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Gizmo", version="1.1.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------- dependencies

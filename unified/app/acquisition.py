@@ -175,12 +175,15 @@ def grab(conn, grab_plan: GrabPlan, client: Transmission,
     return grab_id
 
 
-def import_completed(conn, client: Transmission, settings: Settings) -> list[dict]:
+def import_completed(client: Transmission, settings: Settings) -> list[dict]:
     """Link finished downloads into the library and mark their grabs imported.
 
     A torrent counts as imported only once a file is actually in place; a
     finished torrent with nothing importable stays 'completed' so the next run
     can retry instead of silently losing it.
+
+    The downloader is asked *before* a transaction is opened: holding a write
+    lock across an RPC is how a scheduler pass used to stall every request.
     """
     imported: list[dict] = []
     try:
@@ -188,7 +191,21 @@ def import_completed(conn, client: Transmission, settings: Settings) -> list[dic
     except (TransmissionError, OSError) as exc:
         log.warning("transmission unreachable: %s", exc)
         return imported
+    if not torrents:
+        return imported
 
+    with db.session(settings.db_path) as conn:
+        imported = _import_into(conn, torrents, settings)
+
+    if imported:
+        # The two things the old stack needed other services for: tell Jellyfin
+        # what just arrived, and fetch a subtitle for the new file only.
+        after_import(settings, [Path(row["path"]) for row in imported])
+    return imported
+
+
+def _import_into(conn, torrents, settings: Settings) -> list[dict]:
+    imported: list[dict] = []
     by_download = {
         str(row["download_id"]): row
         for row in db.query(
@@ -225,11 +242,6 @@ def import_completed(conn, client: Transmission, settings: Settings) -> list[dic
         conn.execute("UPDATE wanted SET status = 'imported', updated_at = ? WHERE id = ?",
                      (db.now(), row["wanted_id"]))
         imported.append({"release": release.raw, "path": str(destination), "action": action})
-
-    if imported:
-        # The two things the old stack needed other services for: tell Jellyfin
-        # what just arrived, and fetch a subtitle for the new file only.
-        after_import(conn, settings, [Path(row["path"]) for row in imported])
     return imported
 
 
@@ -242,12 +254,13 @@ def jellyfin_client(settings: Settings) -> jellyfin_mod.Jellyfin:
     return jellyfin_mod.Jellyfin(settings.jellyfin_url, settings.jellyfin_api_key)
 
 
-def after_import(conn, settings: Settings, paths: list[Path],
+def after_import(settings: Settings, paths: list[Path],
                  provider=None, jelly: jellyfin_mod.Jellyfin | None = None) -> dict:
     """Post-import work: Jellyfin notification, then subtitles for those files.
 
     Both steps are optional and none of them may fail an import that already
-    put the file on disk, so each is wrapped and reported separately.
+    put the file on disk, so each is wrapped and reported separately. Jellyfin
+    is told before any transaction is opened, for the same reason the import is.
     """
     report: dict[str, Any] = {}
     if settings.jellyfin_enabled:
@@ -262,13 +275,14 @@ def after_import(conn, settings: Settings, paths: list[Path],
         provider = provider or subtitle_provider(settings)
         if provider is not None and getattr(provider, "configured", True):
             fetched: list[dict] = []
-            for path in paths:
-                try:
-                    fetched.extend(subtitles.fetch_for(conn, path,
-                                                       list(settings.subtitle_languages),
-                                                       provider))
-                except Exception as exc:
-                    log.warning("subtitle fetch failed for %s: %s", path, exc)
+            with db.session(settings.db_path) as conn:
+                for path in paths:
+                    try:
+                        fetched.extend(subtitles.fetch_for(conn, path,
+                                                           list(settings.subtitle_languages),
+                                                           provider))
+                    except Exception as exc:
+                        log.warning("subtitle fetch failed for %s: %s", path, exc)
             report["subtitles"] = fetched
     return report
 
@@ -358,55 +372,69 @@ class Scheduler:
         self._stop.set()
 
     def tick(self) -> dict[str, Any]:
-        """One pass of every job. Safe to call directly in tests."""
+        """One pass of every job. Safe to call directly in tests.
+
+        Each step takes its own short transaction. Search fans out over the
+        network for up to a minute and must not hold a write lock while it does:
+        that is what made a search request wait out its whole busy timeout
+        behind a scheduler pass.
+        """
         result: dict[str, Any] = {}
         client = self.client_factory()
+        path = self.settings.db_path
 
-        with db.session(self.settings.db_path) as conn:
-            result["imported"] = import_completed(conn, client, self.settings)
-            result["downloads"] = client.status()
+        result["imported"] = import_completed(client, self.settings)
+        result["downloads"] = client.status()
 
+        with db.session(path) as conn:
             profile_row = db.get_setting(conn, "profile")
             profile = scoring.DEFAULT_PROFILE
             if profile_row:
                 import json
                 profile = {**scoring.DEFAULT_PROFILE, **json.loads(profile_row)}
-
             indexer_list = indexers_from_db(conn)
             wanted = db.query(
                 conn, "SELECT * FROM wanted WHERE status IN ('wanted','failed') "
                       "ORDER BY id LIMIT ?", (self.settings.search_batch,),
             )
-            grabbed = []
-            for row in wanted:
-                conn.execute("UPDATE wanted SET status = 'searching', updated_at = ? WHERE id = ?",
-                             (db.now(), row["id"]))
+
+        grabbed: list[str] = []
+        for row in wanted:
+            with db.session(path) as conn:
+                conn.execute(
+                    "UPDATE wanted SET status = 'searching', updated_at = ? WHERE id = ?",
+                    (db.now(), row["id"]),
+                )
                 plan_row = plan(conn, row, indexer_list, profile, self.settings)
-                if plan_row is None:
+            if plan_row is None:
+                with db.session(path) as conn:
                     conn.execute(
                         "UPDATE wanted SET status = 'wanted', attempts = attempts + 1,"
                         " last_error = NULL, updated_at = ? WHERE id = ?",
                         (db.now(), row["id"]),
                     )
-                    continue
+                continue
+            with db.session(path) as conn:
                 if grab(conn, plan_row, client, self.settings):
                     grabbed.append(plan_row.release.raw)
-            result["grabbed"] = grabbed
+        result["grabbed"] = grabbed
+
+        with db.session(path) as conn:
             result["stats"] = db.stats(conn)
 
-            # Subtitles are the slowest job here (a network call per file) and
-            # the least urgent, so they run on their own cadence with a small
-            # batch rather than on every pass.
-            due = time.monotonic() >= self._next_subtitles
-            if due and self.settings.subtitles_enabled:
-                try:
+        # Subtitles are the slowest job here (a network call per file) and the
+        # least urgent, so they run on their own cadence with a small batch.
+        due = time.monotonic() >= self._next_subtitles
+        if due and self.settings.subtitles_enabled:
+            try:
+                with db.session(path) as conn:
                     result["subtitles"] = subtitles.run_pass(
                         conn, self.settings, subtitle_provider(self.settings),
                     )
-                except Exception as exc:
-                    log.warning("subtitle pass failed: %s", exc)
-                    result["subtitles"] = {"error": str(exc)}
-                self._next_subtitles = time.monotonic() + self.settings.subtitle_interval
+            except Exception as exc:
+                log.warning("subtitle pass failed: %s", exc)
+                result["subtitles"] = {"error": str(exc)}
+            self._next_subtitles = time.monotonic() + self.settings.subtitle_interval
 
         self.last = {**result, "at": db.now()}
         return self.last

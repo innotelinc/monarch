@@ -164,14 +164,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def session(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """A connection plus a transaction that rolls back on failure."""
+    """A connection plus a transaction that rolls back on failure.
+
+    The transaction is *deferred* on purpose. A caller that only reads (the
+    search endpoint, the scheduler's decision pass) must not take a write lock:
+    those blocks surround network calls that can take a minute, and an
+    immediate lock held for that long made every other request wait out its
+    busy timeout. SQLite upgrades to a write lock at the first write, which is
+    where the transaction actually needs one.
+    """
     conn = connect(db_path)
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("BEGIN")
         yield conn
         conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        # A failed COMMIT (or a failed BEGIN) leaves nothing to roll back; the
+        # rollback must not replace the error that got us here.
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
         raise
     finally:
         conn.close()

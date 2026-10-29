@@ -96,7 +96,7 @@ def test_unknown_api_path_is_404(client):
 def test_ui_is_served(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert "Monarch" in response.text
+    assert "Gizmo" in response.text
 
 
 # ------------------------------------------------------------- manual grab

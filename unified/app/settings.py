@@ -1,4 +1,4 @@
-"""Configuration for the Monarch core service.
+"""Configuration for the Gizmo service.
 
 Everything is environment-driven so the compose file stays the only place a
 deployment is described. The defaults are the ones the live stack uses, so a

@@ -145,7 +145,7 @@ def test_import_completed_links_file_and_marks_imported(conn, settings):
                             percent=1.0, size=2048, rate=0, eta=0,
                             directory=str(download.parent), error="", finished=True)]
 
-    imported = acquisition.import_completed(conn, Ready(), settings)
+    imported = acquisition.import_completed(Ready(), settings)
     assert len(imported) == 1
     assert imported[0]["action"] in {"linked", "copied"}
     assert Path(imported[0]["path"]).exists()
@@ -168,7 +168,7 @@ def test_import_waits_when_file_missing(conn, settings):
                             percent=1.0, size=10, rate=0, eta=0,
                             directory=str(settings.library_root), error="", finished=True)]
 
-    assert acquisition.import_completed(conn, Empty(), settings) == []
+    assert acquisition.import_completed(Empty(), settings) == []
     assert db.one(conn, "SELECT state FROM grabs")[0] == "completed"
 
 
@@ -208,7 +208,7 @@ def test_after_import_notifies_jellyfin_and_fetches_a_subtitle(conn, settings, t
     video.write_bytes(b"x" * 4096)
 
     jelly = Jelly()
-    report = acquisition.after_import(conn, settings, [video], provider=Provider(), jelly=jelly)
+    report = acquisition.after_import(settings, [video], provider=Provider(), jelly=jelly)
     assert jelly.paths == [video]
     assert report["jellyfin"]["refreshed"] is True
     assert [row["status"] for row in report["subtitles"]] == ["ok"]
@@ -227,6 +227,6 @@ def test_after_import_never_lets_jellyfin_break_the_import(conn, settings, tmp_p
     # Subtitles off, so this test exercises the Jellyfin failure only and never
     # reaches the network through the keyless provider.
     no_subs = dataclasses.replace(settings, subtitles_enabled=False)
-    report = acquisition.after_import(conn, no_subs, [tmp_path / "x.mkv"], jelly=Broken())
+    report = acquisition.after_import(no_subs, [tmp_path / "x.mkv"], jelly=Broken())
     assert "boom" in report["jellyfin"]["error"]
     assert "subtitles" not in report

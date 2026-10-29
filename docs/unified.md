@@ -1,4 +1,8 @@
-# The unified platform (`core`)
+# Gizmo — the unified platform (`core`)
+
+**Gizmo** is the product name; `core` is the service that implements it, and the
+repository keeps `monarch` as the infrastructure name (container `monarch-core`,
+project `monarch`) so a rename never depends on a data migration.
 
 Eight hostnames used to answer for one product family: `media`, `req`,
 `movies`, `tv`, `index`, `xxx`, `mp3` and `dl`. Behind them ran nineteen
@@ -121,6 +125,7 @@ integration through the LDAP outpost, unchanged.
 ## Layout
 
 ```
+assets/gizmo/          the product mark and the TV splash (SVG source + rendered PNG)
 unified/
   app/parser.py        release-name parsing (the *arr value, written down)
   app/scoring.py       quality profiles, upgrade rules, the grab decision
@@ -156,6 +161,16 @@ dedupes and filters (usenet answers are dropped, because Transmission is the
 only client). The other four *arr services are gone; Prowlarr is a search proxy
 with a database, not an application anyone signs in to. Retiring it later is a
 matter of adding a native indexer row per tracker and deleting the one row.
+
+## The Jellyfin splash
+
+Jellyfin keeps playing and transcoding, so it keeps its own identity — but that
+identity is Gizmo's. `assets/gizmo/` holds the wordmark and the TV splash in both
+palettes at 1920×1080 and 3840×2160; `render.py` regenerates them from the SVG.
+On the host the dark render is installed at
+`/docker/appdata/jellyfin/data/data/gizmo-splash.png` and `branding.xml` points
+`SplashscreenLocation` at it, with the server name set to Gizmo so a TV client
+shows one product, not two.
 
 ## Open items
 
