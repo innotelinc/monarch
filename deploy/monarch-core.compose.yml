@@ -1,0 +1,119 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# monarch-core.compose.yml — the merged media platform.
+#
+# What this file is: the whole public surface in two services plus the two
+# things that cannot be replaced. Jellyfin still plays and transcodes;
+# Transmission still downloads. Everything else the old stack ran — Sonarr,
+# Radarr, Lidarr, Whisparr, Prowlarr, Jellyseerr, Requestrr, Bazarr, Homarr,
+# Deluge, SABnzbd, autobrr, Dispatcharr, TVHeadend, NextPVR, iptv-epg,
+# ClipBucket and eleven of the twelve oauth2-proxy gateways — is gone, and its
+# job is done by `core`.
+#
+# Cutover order and rollback are in docs/unified.md. Do not run this next to
+# the old stack on the same ports: core owns 8090, and the single SSO gateway
+# owns 4180.
+# ═══════════════════════════════════════════════════════════════════════════
+
+name: monarch-core
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  core:
+    build:
+      context: ../unified
+    image: ghcr.io/innotelinc/monarch-core:latest
+    container_name: monarch-core
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      CORE_DATA_DIR: /data
+      CORE_LIBRARY_ROOT: /media
+      CORE_COMPLETED_ROOT: /downloads/complete
+      CORE_AUTH_HEADER: X-Auth-Request-Email
+      # Set to 1 only when running without the SSO gateway (local development).
+      CORE_AUTH_DISABLED: "${CORE_AUTH_DISABLED:-0}"
+      TRANSMISSION_URL: http://transmission:9091
+      TRANSMISSION_USER: "${TRANSMISSION_USER:-}"
+      TRANSMISSION_PASSWORD: "${TRANSMISSION_PASSWORD:-}"
+      LIVETV_M3U_URL: "${LIVETV_M3U_URL:-}"
+      LIVETV_XMLTV_URL: "${LIVETV_XMLTV_URL:-}"
+      LIVETV_CHANNEL_BASE: "${LIVETV_CHANNEL_BASE:-2}"
+      CORE_SEARCH_INTERVAL: "${CORE_SEARCH_INTERVAL:-900}"
+      CORE_SEARCH_BATCH: "${CORE_SEARCH_BATCH:-4}"
+    volumes:
+      - "${CORE_DATA:-/docker/appdata/core}:/data"
+      - "${MEDIA_ROOT:-/data/media}:/media"
+      - "${DOWNLOADS_ROOT:-/data/downloads}:/downloads"
+    ports:
+      - "${CORE_PORT:-8090}:8090"
+    # The service is small on purpose: one process, one SQLite file, one
+    # scheduler thread. This cap is what the old stack spent on one of its
+    # twelve SSO gateways.
+    mem_limit: 512m
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # The single sign-in for every door that is left. One instance, not twelve:
+  # it sets X-Auth-Request-Email, and core refuses anything without it.
+  sso:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.2
+    container_name: monarch-sso
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - --provider=oidc
+      - --oidc-issuer-url=${OIDC_ISSUER_URL}
+      - --client-id=${OIDC_CLIENT_ID}
+      - --client-secret=${OIDC_CLIENT_SECRET}
+      - --cookie-secret=${OIDC_COOKIE_SECRET}
+      - --cookie-domain=.innotel.us
+      - --cookie-secure=true
+      - --email-domain=*
+      - --reverse-proxy=true
+      - --set-xauthrequest=true
+      - --pass-access-token=false
+      - --skip-provider-button=true
+      - --upstream=http://core:8090/
+      - --http-address=0.0.0.0:4180
+    ports:
+      - "${SSO_PORT:-4180}:4180"
+    depends_on:
+      core:
+        condition: service_started
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      USER: "${TRANSMISSION_USER:-}"
+      PASS: "${TRANSMISSION_PASSWORD:-}"
+    volumes:
+      - "${TRANSMISSION_CONFIG:-/docker/appdata/transmission}:/config"
+      - "${DOWNLOADS_ROOT:-/data/downloads}:/downloads"
+    mem_limit: 512m
+
+# Jellyfin is deliberately not defined here: it is already running, it owns
+# playback and transcoding, and replacing it would mean writing a transcode
+# pipeline for no user-visible gain. Point its users at core for discovery and
+# requests; core does not need to know how it is deployed.
