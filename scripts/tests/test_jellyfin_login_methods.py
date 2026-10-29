@@ -211,6 +211,40 @@ class JellyfinLoginMethods(unittest.TestCase):
 
         self.assertEqual(code, 0)
 
+    def test_the_deployment_env_file_declares_the_tv_login(self):
+        """A run started from /opt/monarch has no exported JELLYFIN_LOCAL_ACCOUNTS.
+
+        The declaration lives in the deployment's `.env`, beside the other
+        Jellyfin settings. Reading only the environment called every declared TV
+        login a stray — and `--apply` would then disable the account the
+        deployment keeps on purpose.
+        """
+        env_file = Path(self.tmp.name) / ".env"
+        env_file.write_text("JELLYFIN_LOCAL_ACCOUNTS=tvbox,cola\n", encoding="utf-8")
+        server = self.fake([account("admin"), account("tvbox"), account("cola")])
+
+        code, out, _ = self.run_script("--url", server.url, "--env-file", str(env_file))
+
+        self.assertEqual(code, 0)
+        self.assertIn("declared in the deployment: 3 (admin, cola, tvbox)", out)
+        self.assertEqual(server.policies, [])
+
+    def test_the_environment_wins_over_the_env_file(self):
+        # Someone debugging a single account sets the variable for the run; the
+        # file must not quietly override that.
+        env_file = Path(self.tmp.name) / ".env"
+        env_file.write_text("JELLYFIN_LOCAL_ACCOUNTS=nobody\n", encoding="utf-8")
+        server = self.fake([account("admin"), account("tvbox")])
+
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"JELLYFIN_LOCAL_ACCOUNTS": "tvbox"}):
+            code, out, _ = self.run_script("--url", server.url, "--env-file", str(env_file))
+
+        self.assertEqual(code, 0)
+        self.assertIn("declared in the deployment: 2 (admin, tvbox)", out)
+
     def test_apply_never_disables_a_declared_local_account(self):
         server = self.fake([account("admin"), account("tvbox"), account("stray")])
 

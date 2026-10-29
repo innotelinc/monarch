@@ -88,7 +88,11 @@ Runs on the media host, where Jellyfin's port is published on loopback
 `/docker/appdata/init/jellyfin-api-key.txt`; `JELLYFIN_API_KEY` overrides it. The
 break-glass account is `JELLYFIN_ADMIN_USER` (default `admin`); further local
 accounts the deployment keeps are `JELLYFIN_LOCAL_ACCOUNTS` (default empty,
-comma-separated).
+comma-separated). Both are read from the deployment's `.env` as well as the
+environment — the environment wins where they disagree — because a run started
+from `/opt/monarch` has no exported JELLYFIN_LOCAL_ACCOUNTS, and reporting every
+declared TV login as a stray is the failure mode that gets `--apply` to disable
+one the deployment keeps on purpose.
 
 Header gotcha, inherited from `jellyfin-admin-password.py` and measured there:
 this build reads the MediaBrowser header from `Authorization` only —
@@ -117,6 +121,10 @@ DEFAULT_URL = "http://127.0.0.1:8097"
 # The server's own database, beside the config it is running from. Consulted only
 # when the API omits the owning provider (see the module docstring).
 DEFAULT_DB_PATH = Path("/docker/appdata/jellyfin/data/data/jellyfin.db")
+# The deployment's own declarations. Without this the run sees an empty
+# JELLYFIN_LOCAL_ACCOUNTS, calls every declared TV login a stray, and `--apply`
+# would disable an account the deployment keeps on purpose.
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 # Jellyfin's own credential store. Anything else is a provider the platform owns.
 DEFAULT_PROVIDER = "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider"
@@ -128,6 +136,32 @@ CLIENT = ('Client="jellyfin-login-methods", Device="Linux", '
 
 class JellyfinError(RuntimeError):
     pass
+
+
+def read_env(path: Path) -> dict[str, str]:
+    """Parse KEY=VALUE lines into a dict (first spelling of a key wins).
+
+    Deliberately not os.environ: reading the deployment's `.env` must not leak
+    into the process that called main(), and the environment still wins where
+    the two disagree.
+    """
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in values:
+            values[key] = value
+    return values
+
+
+def setting(env: dict[str, str], name: str, default: str = "") -> str:
+    """One declaration: the environment first, then the deployment's `.env`."""
+    return os.environ.get(name, "").strip() or env.get(name, "").strip() or default
 
 
 def api_key(path: Path, override: str) -> str:
@@ -342,31 +376,40 @@ def disable(base_url: str, key: str, account: Account) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # --env-file decides what every other default is, so it is read first and the
+    # rest of the parser is built from what the deployment declares.
+    early = argparse.ArgumentParser(add_help=False)
+    early.add_argument("--env-file", type=Path, default=ENV_FILE)
+    env = read_env(early.parse_known_args(argv)[0].env_file)
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--env-file", type=Path, default=ENV_FILE,
+                        help="the deployment's declarations (default <repo>/.env)")
     parser.add_argument("--apply", action="store_true",
                         help="disable the local accounts (default: report only)")
     parser.add_argument("--check", action="store_true", help="report only, the default")
-    parser.add_argument("--url", default=os.environ.get("JELLYFIN_HOST_URL", DEFAULT_URL),
+    parser.add_argument("--url", default=setting(env, "JELLYFIN_HOST_URL", DEFAULT_URL),
                         help=f"Jellyfin base URL (default {DEFAULT_URL})")
     parser.add_argument("--key-file", type=Path,
-                        default=Path(os.environ.get("JELLYFIN_KEY_FILE", str(DEFAULT_KEY_FILE))),
+                        default=Path(setting(env, "JELLYFIN_KEY_FILE", str(DEFAULT_KEY_FILE))),
                         help=f"the exported admin API key (default {DEFAULT_KEY_FILE})")
     parser.add_argument("--db", type=Path,
-                        default=Path(os.environ.get("JELLYFIN_DB", str(DEFAULT_DB_PATH))),
+                        default=Path(setting(env, "JELLYFIN_DB", str(DEFAULT_DB_PATH))),
                         help="Jellyfin's own database, read only for the owning provider "
                              f"when the API does not report it (default {DEFAULT_DB_PATH})")
     parser.add_argument("--break-glass",
-                        default=os.environ.get("JELLYFIN_ADMIN_USER", "admin"),
+                        default=setting(env, "JELLYFIN_ADMIN_USER", "admin"),
                         help="the one local account Monarch keeps (default admin)")
     parser.add_argument("--also-local",
-                        default=os.environ.get("JELLYFIN_LOCAL_ACCOUNTS", ""),
+                        default=setting(env, "JELLYFIN_LOCAL_ACCOUNTS", ""),
                         help="comma-separated further local accounts this deployment "
                              "keeps on purpose (TV/native clients); default empty")
     args = parser.parse_args(argv)
 
     base_url = args.url.rstrip("/")
     try:
-        key = api_key(args.key_file, os.environ.get("JELLYFIN_API_KEY", "").strip())
+        key = api_key(args.key_file, setting(env, "JELLYFIN_API_KEY", ""))
         users = call(base_url, key, "GET", "/Users")
     except JellyfinError as error:
         print(f"jellyfin-login-methods: {error}", file=sys.stderr)
