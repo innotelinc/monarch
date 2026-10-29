@@ -160,6 +160,18 @@ def grab(conn, grab_plan: GrabPlan, client: Transmission,
     conn.execute("UPDATE wanted SET status = 'grabbed', updated_at = ? WHERE id = ?",
                  (db.now(), grab_plan.wanted_id))
 
+    if not link:
+        # Nothing to hand the client. Saying so is the difference between a wanted
+        # item that is retried against another indexer and one that reads as a
+        # download that failed for no stated reason.
+        conn.execute("UPDATE grabs SET state = 'failed' WHERE id = ?", (grab_id,))
+        conn.execute(
+            "UPDATE wanted SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?",
+            (f"{result.indexer}: result carried no download link", db.now(),
+             grab_plan.wanted_id),
+        )
+        return None
+
     try:
         added = client.add(link, labels=[settings.transmission_category])
     except (TransmissionError, OSError) as exc:

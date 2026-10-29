@@ -158,6 +158,39 @@ def test_prowlarr_search_maps_json_and_drops_usenet(monkeypatch):
     assert len(client.calls) == before + 1
 
 
+def test_prowlarr_drops_a_row_with_nothing_to_download():
+    """No downloadUrl and no magnet: the page link is not something a client can take."""
+    from app import indexers
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def get(self, url, params=None, timeout=None):
+            if url.endswith("/api/v1/indexer"):
+                return FakeResponse([{"id": 7, "protocol": "torrent"}])
+            return FakeResponse([
+                # What LimeTorrents and TorrentDownload actually answered with: a guid
+                # to a tracker page, no downloadUrl, no infoHash, no magnet.
+                {"guid": "https://tracker/page.html", "title": "Film.2020.1080p.WEB-DL.x264-GRP",
+                 "indexerId": 7, "indexer": "Tracker", "size": 100, "seeders": 5},
+                {"guid": "g2", "title": "Other.2020.1080p.WEB-DL.x264-GRP", "indexerId": 7,
+                 "indexer": "Tracker", "magnetUrl": "magnet:?xt=urn:btih:ABC"},
+            ])
+
+    indexer = indexers.Indexer(name="Prowlarr", url="http://p", api_key="k", kind="prowlarr")
+    results = indexers.search_prowlarr(indexer, "film", client=FakeClient())
+
+    assert [row.title for row in results] == ["Other.2020.1080p.WEB-DL.x264-GRP"]
+    assert results[0].download_url == "magnet:?xt=urn:btih:ABC"
+
+
 def test_prowlarr_kind_is_dispatched_from_search(monkeypatch):
     from app import indexers
 

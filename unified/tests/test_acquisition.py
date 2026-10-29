@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,28 @@ def test_grab_records_and_marks_wanted(conn, settings):
     assert grab_row["state"] == "grabbed"
     assert grab_row["download_id"] == "1"
     assert db.one(conn, "SELECT status FROM wanted WHERE id = ?", (wanted_id,))[0] == "grabbed"
+
+
+def test_grab_without_a_link_fails_before_the_client_is_asked(conn, settings):
+    """A result with no download and no hash is not handed to Transmission."""
+    wanted_id = db.add_wanted(conn, "movie", "Dune Part Two", 2024)
+    row = db.one(conn, "SELECT * FROM wanted WHERE id = ?", (wanted_id,))
+    bare = dataclasses.replace(
+        result("Dune.Part.Two.2024.2160p.WEB-DL.x265-GRP", infohash=""),
+        download_url="",
+    )
+    plan = acquisition.plan(conn, row, [indexers.Indexer(name="a", url="http://a")],
+                           dict(acquisition.scoring.DEFAULT_PROFILE), settings,
+                           search=lambda *a, **k: [bare])
+    client = FakeTransmission()
+
+    assert acquisition.grab(conn, plan, client, settings) is None
+    assert client.added == [], "an empty filename is not a download request"
+    grab_row = db.one(conn, "SELECT * FROM grabs")
+    assert grab_row["state"] == "failed"
+    assert db.one(conn, "SELECT status FROM wanted")[0] == "failed"
+    error = db.one(conn, "SELECT last_error FROM wanted")[0]
+    assert "tracker-a" in error and "no download link" in error
 
 
 def test_grab_failure_is_recorded(conn, settings):

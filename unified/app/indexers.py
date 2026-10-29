@@ -222,6 +222,12 @@ def search_prowlarr(indexer: Indexer, query: str, *, limit: int = 100,
         download = str(row.get("downloadUrl") or "").strip()
         if download.startswith("/"):
             download = base + download
+        magnet = str(row.get("magnetUrl") or "").strip()
+        if not download and not magnet:
+            # A tracker can answer with a page link and nothing a client can fetch.
+            # Offering that is a grab Transmission answers with "invalid torrent",
+            # i.e. a failed grab and a wanted item that looks attempted.
+            continue
         results.append(IndexerResult(
             indexer=str(row.get("indexer") or indexer.name),
             title=title,
