@@ -19,15 +19,13 @@ set -uo pipefail
 # (systemd/monarch-drift-check.{service,timer}) or cron to alert on drift.
 #
 # Checks (all driven by the invariants manifest):
-#   *arr (sonarr/radarr/lidarr/whisparr):
-#     - API reachable
-#     - authMethod = external: the Cerulean Authentik auth_request gate is the
-#       ONLY login, so the app must not also show its own Forms prompt
-#     - expected media root folder present
-#     - Transmission download client present
+#   Sonarr, Radarr, Lidarr, Whisparr, Jellyseerr, Bazarr and Homarr are RETIRED
+#   (docs/unified.md): core holds the wanted queue, the search and the dedupe,
+#   and the containers are behind profiles: ["retired"]. Their checks and their
+#   manifest keys are gone with them — a check for a service this deployment does
+#   not run can only fail, and a failing check is what hides the real one.
 #   Prowlarr:
 #     - Transmission download client present
-#     - Sonarr/Radarr/Lidarr/Whisparr apps registered
 #   Transmission:
 #     - RPC reachable and download dir is /data/torrents
 #     - no local WebUI login (Cerulean is the only door)
@@ -41,7 +39,7 @@ set -uo pipefail
 #       nothing is listening at all, up to DRIFT_JELLYFIN_BOOT_SEC if Docker says
 #       the container has just been started, which is what a recreate by
 #       watchtower looks like from here)
-#     - the login screen shows Monarch's own splash: the rendered asset is
+#     - the login screen shows the deployment's splash: the 4K Gizmo draw is
 #       installed under the data dir and branding.xml names it, rather than the
 #       poster collage Jellyfin's own post-scan task regenerates
 #       (scripts/jellyfin-splash.py --check, read-only)
@@ -50,15 +48,11 @@ set -uo pipefail
 #       PKCS#12 and readable by the container's user, the served chain verifies
 #       and still matches the material installed beside it
 #       (scripts/jellyfin-tls.py --check, read-only)
-#   Jellyseerr:
-#     - initialized, Jellyfin sign-in enabled
 #   Cerulean Vault (SecretOps):
 #     - .env holds materialized values, with no unresolved vault:// reference
 #   Magnate (RevenueOps, when MAGNATE_URL is set):
 #     - every managed user's Jellyfin policy matches its Magnate tier
 #       (scripts/magnate-entitlements.py --check, read-only)
-#   Bazarr:
-#     - API key readable, basic auth configured
 #   ClipBucket:
 #     - the install is finished, not merely running: schema, version row, admin
 #       password, base_url, and the browser installer locked
@@ -252,26 +246,17 @@ errors = []
 if m.get("version") != 1:
     errors.append("version != 1")
 
-arr = m.get("arr_apps")
-if not isinstance(arr, list) or not arr:
-    errors.append("arr_apps missing/empty")
-else:
-    for a in arr:
-        for key in ("svc", "port", "api", "category", "media", "root_folder"):
-            if key not in a:
-                errors.append(f"arr_apps entry missing '{key}': {a}")
+# arr_apps / arr_allowed_hosts / jellyseerr / bazarr are gone from the manifest:
+# those services are retired (docs/unified.md), and asserting a schema for a
+# service this deployment does not run made the check fail on its own history.
 
 pw = m.get("prowlarr", {})
-if not isinstance(pw.get("apps"), list) or not pw["apps"]:
-    errors.append("prowlarr.apps missing/empty")
 if not isinstance(pw.get("port"), int):
     errors.append("prowlarr.port missing")
 if not pw.get("download_client"):
     errors.append("prowlarr.download_client missing")
 
 tr = m.get("transmission", {})
-if not isinstance(tr.get("categories"), list) or not tr["categories"]:
-    errors.append("transmission.categories missing/empty")
 if not isinstance(tr.get("port"), int):
     errors.append("transmission.port missing")
 if not tr.get("download_dir"):
@@ -283,11 +268,6 @@ if not isinstance(jf.get("libraries"), list) or not jf["libraries"]:
 if not isinstance(jf.get("port"), int):
     errors.append("jellyfin.port missing")
 
-for key in ("jellyseerr", "bazarr"):
-    if not isinstance(m.get(key), dict) or not isinstance(m[key].get("port"), int):
-        errors.append(f"{key}.port missing")
-if not isinstance(m.get("bazarr", {}).get("auth_type"), str):
-    errors.append("bazarr.auth_type missing")
 if not m.get("authentik", {}).get("ldap_outpost"):
     errors.append("authentik.ldap_outpost missing")
 
@@ -412,12 +392,6 @@ api_key_for() {  # api_key_for <svc> -> echoes api key
 
 # ── Load the invariants manifest (single source of truth) ─────────────────
 # Each extractor prints rows consumed by the loops below.
-arr_rows()    { python3 -c "
-import json, sys
-m = json.load(open('$MANIFEST'))
-for a in m['arr_apps']:
-    print(f\"{a['svc']}|{a['port']}|{a['api']}|{a['root_folder']}|{a['media']}\")
-"; }
 manifest_val()  { python3 -c "
 import json, sys
 m = json.load(open('$MANIFEST'))
@@ -430,63 +404,6 @@ for x in m$1:
     print(x)
 "; }
 
-# ───────────────────────────────────────────────────────────────────────────
-# *arr apps
-# ───────────────────────────────────────────────────────────────────────────
-while IFS='|' read -r svc port api root media; do
-  [ -n "$svc" ] || continue
-  key=$(api_key_for "$svc")
-  if [ -z "$key" ]; then
-    fail "$svc: API key not found in /docker/appdata/$svc/config.xml"
-    continue
-  fi
-  hdr=(-H "X-Api-Key: $key")
-
-  body=$(json_get "http://localhost:$port/api/$api/config/host" "${hdr[@]}")
-  if [ -z "$body" ]; then
-    fail "$svc: /api/$api/config/host unreachable (HTTP != 200)"
-    continue
-  fi
-  method=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('authenticationMethod',''))" 2>/dev/null)
-  # `external` is the correct value, not `forms`: init/init.py
-  # set_monarch_app_auth() switches these apps to *arr's "a reverse proxy
-  # already authenticated this user" mode so the Cerulean Authentik gate on
-  # <svc>.MONARCH_DOMAIN is the only login. Forms auth here would be a
-  # SECOND prompt after SSO.
-  if [ "$method" != "external" ]; then
-    fail "$svc: the Cerulean SSO gate is not the only login (authenticationMethod='$method', expected 'external')"
-  fi
-
-  body=$(json_get "http://localhost:$port/api/$api/rootfolder" "${hdr[@]}")
-  found=0
-  if [ -n "$body" ]; then
-    found=$(echo "$body" | python3 -c "
-import sys, json
-try:
-    rfs = json.load(sys.stdin)
-    print(1 if any(str(r.get('path','')).rstrip('/') == '$root'.rstrip('/') for r in rfs) else 0)
-except Exception:
-    print(0)
-" 2>/dev/null)
-  fi
-  [ "$found" = "1" ] || fail "$svc: root folder $root missing"
-
-  body=$(json_get "http://localhost:$port/api/$api/downloadclient" "${hdr[@]}")
-  has_tr=0
-  if [ -n "$body" ]; then
-    has_tr=$(echo "$body" | python3 -c "
-import sys, json
-try:
-    cs = json.load(sys.stdin)
-    print(1 if any(c.get('implementation') == 'Transmission' for c in cs) else 0)
-except Exception:
-    print(0)
-" 2>/dev/null)
-  fi
-  [ "$has_tr" = "1" ] || fail "$svc: Transmission download client missing"
-
-  say "ok: $svc (auth=$method, root=$([ "$found" = 1 ] && echo yes || echo no), transmission=$([ "$has_tr" = 1 ] && echo yes || echo no))"
-done < <(arr_rows)
 
 # ───────────────────────────────────────────────────────────────────────────
 # Prowlarr
@@ -510,25 +427,11 @@ except Exception:
   fi
   [ "$has_tr" = "1" ] || fail "prowlarr: Transmission download client missing"
 
-  body=$(json_get "http://localhost:$PROW_PORT/api/v1/applications" "${phdr[@]}")
-  apps=""
-  if [ -n "$body" ]; then
-    apps=$(echo "$body" | python3 -c "
-import sys, json
-try:
-    print(','.join(sorted(a.get('implementation','') for a in json.load(sys.stdin))))
-except Exception:
-    print('')
-" 2>/dev/null)
-  fi
-  while IFS= read -r want; do
-    [ -n "$want" ] || continue
-    case ",$apps," in
-      *",$want,"*) : ;;
-      *) fail "prowlarr: app $want not registered (have: '$apps')" ;;
-    esac
-  done < <(manifest_list "['prowlarr']['apps']")
-  say "ok: prowlarr (transmission=$([ "$has_tr" = 1 ] && echo yes || echo no), apps='$apps')"
+  # No registered applications any more: Prowlarr is a search proxy for core,
+  # not the download path, so an app row here would be a leftover that grabs a
+  # second copy. Its own download-client row is still what init writes, so that
+  # half stays asserted.
+  say "ok: prowlarr (transmission=$([ "$has_tr" = 1 ] && echo yes || echo no))"
 else
   fail "prowlarr: API key not found"
 fi
@@ -587,21 +490,9 @@ else
   fi
 fi
 
-# The same question asked the other way round: does each *arr tell Transmission
-# the category the manifest names? Servarr sends `category` as a subfolder of the
-# download dir, so a client with no category (or the wrong one) drops the download
-# somewhere the imports do not expect. The apps report this only as a warning on
-# their own Health page, which is why it is checked here.
-dload_cats_out=$(python3 scripts/arr-download-categories.py --check 2>&1)
-dload_cats_code=$?
-if [ "$dload_cats_code" -eq 0 ]; then
-  say "ok: every *arr files its downloads under the manifest's Transmission categories"
-elif [ "$dload_cats_code" -eq 1 ]; then
-  say "note: Transmission or an *arr is not reachable from here (download categories skipped) - $(printf '%s' "$dload_cats_out" | grep -m1 FAIL)"
-else
-  fail "downloads: an *arr sends a category the manifest does not name, or Transmission's download dir drifted (arr-download-categories.py exit $dload_cats_code) - downloads land in a library root; run scripts/arr-download-categories.py (it restarts nothing)"
-  printf '%s\n' "$dload_cats_out" | indent >&2
-fi
+# No per-*arr category check: the apps that sent those categories are gone. Core
+# grabs with its own single category (settings.transmission_category), and the
+# download dir asserted above is what keeps a download out of a library root.
 
 # ───────────────────────────────────────────────────────────────────────────
 # Jellyfin (admin API access + libraries)
@@ -767,49 +658,22 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
-# The apps' own sign-in methods
+# Jellyfin's own sign-in methods
 # ───────────────────────────────────────────────────────────────────────────
 # The gateways prove a Cerulean session for the *name*; they say nothing about
-# the credential form behind it. Two of these apps keep a second, local store of
-# credentials, and each is a way in that no gateway covers: Seerr's
-# email-and-password sign-in, and any Jellyfin account its own database owns
-# instead of the LDAP outpost. That is why a user disabled in Authentik could
-# still sign in to them.
+# the credential form behind it. Jellyfin keeps a second, local store of
+# credentials, and any account its own database owns instead of the LDAP outpost
+# is a way in that no gateway covers — which is why a user disabled in Authentik
+# could still sign in.
 #
-# Neither is configuration in this repo, so nothing else can see it drift back:
-# Seerr re-enables local sign-in on a settings import, and Jellyfin's first-run
-# wizard or an administrator in its UI creates a local account. Both scripts are
-# read-only here — `--apply` is the operator's move (docs/operations.md).
+# That is not configuration in this repo, so nothing else can see it drift back:
+# Jellyfin's first-run wizard, or an administrator in its UI, creates a local
+# account. The script is read-only here — `--apply` is the operator's move
+# (docs/operations.md).
 #
-# Exit 2 is "cannot judge" in both, and it is reported as a skip rather than a
-# pass: a key that could not be read, or a build that does not say which provider
-# owns an account, is not evidence that the posture holds.
-seerr_login_out=$(python3 scripts/seerr-login-methods.py --check 2>&1)
-seerr_login_code=$?
-if [ "$seerr_login_code" -eq 0 ]; then
-  say "ok: Seerr's only sign-in is the Cerulean (Jellyfin) account"
-elif [ "$seerr_login_code" -eq 2 ]; then
-  say "note: Seerr's sign-in methods could not be read (skipped) - $(printf '%s' "$seerr_login_out" | tail -1)"
-else
-  fail "jellyseerr: local (email + password) sign-in is enabled - run scripts/seerr-login-methods.py --apply"
-  printf '%s\n' "$seerr_login_out" | indent >&2
-fi
-
-# Seerr's Owner is a row id, not a permission (`server/routes/user/index.ts`), so
-# an install whose first account was the break-glass admin is owned by an account
-# nobody signs in as - and the badge, plus the right to grant admin, never moves.
-# seerr-owner.py reads the account from the invariants manifest and swaps the two
-# rows; here we only judge it.
-seerr_owner_out=$(python3 scripts/seerr-owner.py --check 2>&1)
-seerr_owner_code=$?
-if [ "$seerr_owner_code" -eq 0 ]; then
-  say "ok: Seerr is owned by the account this estate names - $(printf '%s' "$seerr_owner_out" | grep -m1 'Owner ' | sed 's/^ *//')"
-elif [ "$seerr_owner_code" -eq 2 ]; then
-  say "note: Seerr's owner could not be judged (skipped) - $(printf '%s' "$seerr_owner_out" | tail -1)"
-else
-  fail "jellyseerr: Seerr is not owned by the account the manifest names - run scripts/seerr-owner.py --apply (nothing is deleted: the two accounts are swapped)"
-  printf '%s\n' "$seerr_owner_out" | indent >&2
-fi
+# Exit 2 is "cannot judge", and it is reported as a skip rather than a pass: a
+# key that could not be read, or a build that does not say which provider owns an
+# account, is not evidence that the posture holds.
 
 jellyfin_login_out=$(python3 scripts/jellyfin-login-methods.py --check 2>&1)
 jellyfin_login_code=$?
@@ -1010,28 +874,6 @@ fi
 # over the compose network, were refused before authentication every time. The
 # apps still showed all four registered and an empty indexer list in each of
 # them, which reads like "Prowlarr is not registering" and is not what was wrong.
-# `arr-allowed-hosts.py --check` compares the live apps against the shared list
-# (init/arr-allowlist.txt) and exits 2 on drift, 1 when the apps are not on this
-# host at all - which is a note here, not a failure.
-#
-# The second half is the indexers themselves: one that is present but blocked
-# makes a search look empty rather than unconfigured. The timer asks the cheap
-# question (--offline: Prowlarr holds an enabled indexer) because the deep one -
-# testing every definition, some through FlareSolverr - is thirty requests to
-# public trackers, which is not something to run every six hours. `--check`
-# without --offline is the operator's, and is documented for that. Exit 2 is the
-# finding, 1 is "no Prowlarr here".
-arr_hosts_out=$(python3 scripts/arr-allowed-hosts.py --check 2>&1)
-arr_hosts_code=$?
-if [ "$arr_hosts_code" -eq 0 ]; then
-  say "ok: every *arr answers the names the stack calls it by (Prowlarr's app tests can pass)"
-elif [ "$arr_hosts_code" -eq 1 ]; then
-  say "note: the *arr apps are not reachable from here (skipped) - $(printf '%s' "$arr_hosts_out" | grep -m1 FAIL)"
-else
-  fail "*arr: an app does not answer a name its peers call it by (arr-allowed-hosts.py exit $arr_hosts_code) - Prowlarr's app test and indexer sync fail with HTTP 400, so no indexer reaches that app; run scripts/arr-allowed-hosts.py (it restarts what it changes)"
-  printf '%s\n' "$arr_hosts_out" | indent >&2
-fi
-
 prowlarr_idx_out=$(python3 scripts/prowlarr-indexers.py --check --offline 2>&1)
 prowlarr_idx_code=$?
 if [ "$prowlarr_idx_code" -eq 0 ]; then
@@ -1041,78 +883,6 @@ elif [ "$prowlarr_idx_code" -eq 1 ]; then
 else
   fail "prowlarr: no enabled indexer (prowlarr-indexers.py exit $prowlarr_idx_code) - searches look empty rather than unconfigured; run scripts/prowlarr-indexers.py to add the ones that work, and --check to test the ones already there"
   printf '%s\n' "$prowlarr_idx_out" | indent >&2
-fi
-
-# And the last link: Prowlarr's list only reaches an app during an application
-# sync, so Prowlarr can be full - seventy indexers, every app test green - while
-# every *arr holds none of them. That is the state an operator reads as
-# "Prowlarr is not registering its indexers", and the only thing that separates
-# it from the supported state is a number, so it is counted rather than assumed:
-# each app must hold at least one indexer whose base URL is Prowlarr's own proxy
-# path. Fewer than Prowlarr has is normal (Prowlarr will not sync an indexer that
-# returns no results in that app's categories); none at all is not.
-# Exit 2 is the finding, 1 is "no Prowlarr here".
-arr_sync_out=$(python3 scripts/arr-sync.py --check 2>&1)
-arr_sync_code=$?
-if [ "$arr_sync_code" -eq 0 ]; then
-  say "ok: every *arr holds the indexers Prowlarr syncs to it"
-elif [ "$arr_sync_code" -eq 1 ]; then
-  say "note: Prowlarr or an *arr app is not reachable from here (arr-sync skipped) - $(printf '%s' "$arr_sync_out" | grep -m1 FAIL)"
-else
-  fail "*arr: an app holds none of Prowlarr's indexers, or Prowlarr's own app test fails (arr-sync.py exit $arr_sync_code) - Prowlarr is full and the app searches nothing; run scripts/arr-sync.py to sync the four apps"
-  printf '%s\n' "$arr_sync_out" | indent >&2
-fi
-
-# ───────────────────────────────────────────────────────────────────────────
-# Homarr's integration-secret encryption key
-# ───────────────────────────────────────────────────────────────────────────
-# Homarr encrypts every stored integration secret - including the Jellyfin API
-# key it uses - with SECRET_ENCRYPTION_KEY. That key and the Homarr database are
-# a single artifact: if .env and the running container disagree, Homarr cannot
-# decrypt its own integrations. The dashboard stays up and the tiles simply
-# stop working, which looks like a broken Jellyfin integration and not at all
-# like a key problem. Assert the two sides agree rather than assume it.
-#
-# Never "fix" a mismatch by rotating: the running container's value is the one
-# the stored ciphertext was made with. Put .env back to it (and restore them
-# together - docs/operations.md -> Homarr).
-homarr_key=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' homarr 2>/dev/null \
-  | sed -n 's/^SECRET_ENCRYPTION_KEY=//p' | head -1)
-if [ -z "$homarr_key" ]; then
-  say "ok: Homarr encryption key (skipped - homarr not running)"
-elif [ -z "${SECRET_ENCRYPTION_KEY:-}" ]; then
-  fail "homarr: .env carries no SECRET_ENCRYPTION_KEY while the running container has one - its stored integration secrets cannot be read back"
-elif [ "$SECRET_ENCRYPTION_KEY" = "$homarr_key" ]; then
-  say "ok: .env and the running Homarr share one SECRET_ENCRYPTION_KEY"
-else
-  fail "homarr: SECRET_ENCRYPTION_KEY in .env does not match the running container - Homarr cannot decrypt its stored integration secrets (the Jellyfin API key among them). Restore the container's value; do NOT rotate"
-fi
-
-# ───────────────────────────────────────────────────────────────────────────
-# Is the database Homarr has open the one on disk?
-# ───────────────────────────────────────────────────────────────────────────
-# SQLite is opened by inode. Replace db.sqlite under a *running* container - a
-# migration, a restore - and the copy unlinks the file the server is using, so
-# the server keeps reading a deleted inode while the real data sits on disk
-# untouched. The symptom is not an error: Homarr looks freshly installed and
-# redirects every route to the /init wizard, which on this SSO-only deployment
-# cannot be completed at all (there is no username/password form) - the
-# instance is simply unenterable. Measured on `.56` after the move: the DB on
-# disk held the user, the board and its 44 items while `ls -l /proc/*/fd` in the
-# container showed `/appdata/db/db.sqlite (deleted)`. `docker restart homarr` is
-# the fix; this check is what turns it into a reported drift instead of an
-# unexplained sign-in failure.
-if ! docker inspect homarr >/dev/null 2>&1; then
-  say "ok: Homarr database file (skipped - no homarr container)"
-elif [ "$(docker inspect -f '{{.State.Running}}' homarr 2>/dev/null)" != "true" ]; then
-  say "ok: Homarr database file (skipped - homarr not running)"
-else
-  homarr_deleted=$(docker exec homarr sh -c 'ls -l /proc/[0-9]*/fd 2>/dev/null | grep "db.sqlite (deleted)" | wc -l' 2>/dev/null || printf '0')
-  case "$homarr_deleted" in
-    ''|*[!0-9]*) say "ok: Homarr database file (not readable from this host)" ;;
-    0) say "ok: the database Homarr has open is the file on disk" ;;
-    *) fail "homarr: the running container still holds a DELETED db.sqlite open ($homarr_deleted handle(s)) - it is reading the file that was replaced under it, so it behaves like a fresh install: every route redirects to the /init wizard, which an SSO-only deployment cannot complete. Restart it: docker restart homarr" ;;
-  esac
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -1156,55 +926,8 @@ else
   say "ok: Magnate entitlements (skipped - MAGNATE_URL not set)"
 fi
 
-# ───────────────────────────────────────────────────────────────────────────
-# Jellyseerr (initialized + Jellyfin sign-in)
-# ───────────────────────────────────────────────────────────────────────────
-JSERR_PORT=$(manifest_val "['jellyseerr']['port']")
-js_body=$(json_get "http://localhost:$JSERR_PORT/api/v1/settings/public")
-if [ -z "$js_body" ]; then
-  fail "jellyseerr: /api/v1/settings/public unreachable"
-else
-  js_init=$(echo "$js_body" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('initialized') else 'no')" 2>/dev/null)
-  js_login=$(echo "$js_body" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('mediaServerLogin') else 'no')" 2>/dev/null)
-  [ "$js_init" = "yes" ] || fail "jellyseerr: not initialized (run monarch-init)"
-  [ "$js_login" = "yes" ] || fail "jellyseerr: Jellyfin sign-in not enabled"
-  say "ok: jellyseerr (initialized=$js_init, jellyfinLogin=$js_login)"
-fi
-
-# ───────────────────────────────────────────────────────────────────────────
-# Bazarr (auth configured)
-# ───────────────────────────────────────────────────────────────────────────
-BZ_PORT=$(manifest_val "['bazarr']['port']")
-BZ_AUTH_TYPE=$(manifest_val "['bazarr']['auth_type']")
-bz_key=""
-if [ -f /docker/appdata/bazarr/config/config.yaml ]; then
-  bz_key=$(grep -oP '^\s*apikey:\s*\K[^\s]+' /docker/appdata/bazarr/config/config.yaml 2>/dev/null | head -1)
-fi
-if [ -z "$bz_key" ]; then
-  fail "bazarr: API key not found in config.yaml"
-else
-  bz_body=$(json_get "http://localhost:$BZ_PORT/api/system/settings" -H "X-API-KEY: $bz_key")
-  if [ -z "$bz_body" ]; then
-    fail "bazarr: /api/system/settings unreachable with API key"
-  else
-    # Bazarr must keep NO local login - bazarr.$MONARCH_DOMAIN carries the
-    # Cerulean Authentik gate, and init deliberately leaves settings-auth-type
-    # alone (Bazarr's API cannot express "no auth": it accepts only
-    # None/basic/form and rejects an empty value with HTTP 406). The live API
-    # reports type null for "no login", so normalise both sides: the manifest
-    # may carry either the machine value ("none") or the older description.
-    bz_type=$(echo "$bz_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('type') or 'none')" 2>/dev/null)
-    bz_want=$(printf '%s' "$BZ_AUTH_TYPE" | tr '[:upper:]' '[:lower:]')
-    case "$bz_want" in
-      *sso*|*none*) bz_want="none" ;;
-    esac
-    case "$bz_type" in
-      ""|none|None|null) bz_type="none" ;;
-    esac
-    [ "$bz_type" = "$bz_want" ] || fail "bazarr: expected no local login (got type='$bz_type')"
-    say "ok: bazarr (auth type='$bz_type')"
-  fi
-fi
+# Jellyseerr and Bazarr are retired (docs/unified.md). Requests go through core
+# now, and subtitles are core's own task, so neither has an endpoint to probe.
 
 # ───────────────────────────────────────────────────────────────────────────
 # Authentik LDAP outpost (only when the API is reachable/configured)
@@ -1506,12 +1229,17 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       fi
     fi
     say "ok: infra container $cname (restarts=$rc)"
-  done < <({ arr_rows | cut -d'|' -f1; echo prowlarr; echo transmission; echo jellyfin; echo jellyseerr; echo bazarr; echo homarr; echo nginx-proxy-manager; echo authentik-ldap; } | sort -u)
+  # The containers this deployment runs. The *arr apps, Jellyseerr, Bazarr and
+  # Homarr are retired (docs/unified.md); listing them here is how the check kept
+  # reporting containers that no longer exist as "restarts=0".
+  done < <(printf '%s\n' prowlarr transmission jellyfin monarch-core \
+             monarch-core-sso jellyfin-sso flaresolverr iptv authentik-ldap | sort -u)
 
-  # 3. Memory overcommit. Redis (inside homarr) asks the kernel for it and logs
-  #    "Memory overcommit must be enabled!" on every start without it. The value
-  #    is global and not namespaced, so it cannot be set from this container:
-  #    what is read here is the Incus host's (i1). See docs/operations.md.
+  # 3. Memory overcommit. Redis (the one the metrics stack runs) asks the kernel
+  #    for it and logs "Memory overcommit must be enabled!" on every start
+  #    without it. The value is global and not namespaced, so it cannot be set
+  #    from this container: what is read here is the Incus host's (i1). See
+  #    docs/operations.md.
   oc=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo "")
   if [ "$oc" = "1" ]; then
     say "ok: infra host vm.overcommit_memory=1 (redis background saves)"

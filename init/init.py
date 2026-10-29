@@ -2861,36 +2861,21 @@ def build_invariants() -> dict:
     truth means the two can never drift apart. Ports are the host-published
     ones (drift-check probes localhost).
     """
-    arr_apps = []
-    for app in MONARCH_APPS:
-        arr_apps.append({
-            "svc": app["svc"],
-            "port": PORTS[app["svc"]],
-            "api": app["api"],
-            "category": app["category"],
-            "media": app["media"],
-            "root_folder": f"/data/media/{app['media']}",
-        })
+    # No arr_apps / arr_allowed_hosts / jellyseerr / bazarr any more: those
+    # services are retired (docs/unified.md), and an invariant for a service
+    # this deployment does not run is a check that fails forever. Core replaced
+    # them, and it keeps its own state; what is left here is what init still
+    # configures on the merged stack.
     return {
         "version": 1,
-        "arr_apps": arr_apps,
-        # The names every one of those apps must answer, as written by init and
-        # checkable from the host (scripts/arr-allowed-hosts.py --check).
-        "arr_allowed_hosts": arr_allowlist(),
         "prowlarr": {
             "port": PORTS["prowlarr"],
-            "apps": [PROWLARR_APP_IMPLS[app["svc"]] for app in MONARCH_APPS],
+            # One search proxy, no registered applications: nothing downloads
+            # through Prowlarr itself any more, core asks it for results.
             "download_client": "Transmission",
         },
         "transmission": {
             "port": PORTS["transmission"],
-            "categories": sorted(TRANSMISSION_CATEGORIES.keys()),
-            # name -> folder, so the host side (scripts/arr-download-
-            # categories.py) reconciles the same map init just applied instead
-            # of carrying a second copy of it. A category whose NAME is right
-            # and whose folder sits inside a library root is the failure that
-            # went unnoticed - both halves have to be checkable.
-            "category_paths": TRANSMISSION_CATEGORIES,
             "download_dir": "/data/torrents",
             # The WebUI keeps no local login: it is loopback-only and
             # transmission-sso is the sole route, so Cerulean is the only door.
@@ -2908,15 +2893,6 @@ def build_invariants() -> dict:
             "oidc_client_id": MONARCH_SSO_CLIENT_ID,
             "plugin_pins": _pin_summary(),
         },
-        "jellyseerr": {
-            "port": PORTS["jellyseerr"],
-            # Who owns it (Seerr's Owner is row id 1). Asserted live by
-            # drift-check through scripts/seerr-owner.py --check.
-            "owner": SEERR_OWNER,
-        },
-        # Bazarr keeps no local login: the Cerulean Authentik gate on
-        # bazarr.<domain> is the only one (drift-check asserts exactly that).
-        "bazarr": {"port": PORTS["bazarr"], "auth_type": "none"},
         "authentik": {"ldap_outpost": LDAP_OUTPOST_NAME},
     }
 

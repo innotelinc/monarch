@@ -105,9 +105,10 @@ class DriftCheckAlerts(unittest.TestCase):
         # the real manifest so the shape cannot drift from init's.
         closed = dead_port()
         self.manifest = init_mod.build_invariants()
-        for app in self.manifest["arr_apps"]:
-            app["port"] = closed
-        for key in ("prowlarr", "transmission", "jellyfin", "jellyseerr", "bazarr"):
+        # `arr_apps`/`jellyseerr`/`bazarr` are no longer in the manifest: those
+        # services are retired (docs/unified.md), so the check has nothing to
+        # probe for them and neither does this fixture.
+        for key in ("prowlarr", "transmission", "jellyfin"):
             self.manifest[key]["port"] = closed
 
     # ── helpers ─────────────────────────────────────────────────────────
