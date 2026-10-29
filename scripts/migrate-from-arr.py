@@ -114,6 +114,16 @@ def main() -> int:
     parser.add_argument("--radarr-key", default="")
     parser.add_argument("--dry-run", action="store_true",
                         help="report what would be written, change nothing")
+    # A monitored Sonarr list is mostly back-catalogue: the first real library
+    # here had 1800+ missing episodes of shows nobody is collecting. The queue
+    # is only useful if it holds what someone actually wants now, so both
+    # filters exist to keep a migration from starting a download stampede.
+    parser.add_argument("--skip-episodes", action="store_true",
+                        help="do not queue missing TV episodes")
+    parser.add_argument("--skip-movies", action="store_true",
+                        help="do not queue missing films")
+    parser.add_argument("--limit", type=int, default=0, metavar="N",
+                        help="queue at most N wanted items (films first); 0 = all")
     args = parser.parse_args()
 
     if not any((args.prowlarr, args.sonarr, args.radarr)):
@@ -144,6 +154,16 @@ def main() -> int:
             movies = radarr_missing(client, args.radarr, args.radarr_key)
             wanted.extend(movies)
             print(f"  {len(movies)} missing films")
+
+    if args.skip_episodes:
+        wanted = [row for row in wanted if row["kind"] != "episode"]
+    if args.skip_movies:
+        wanted = [row for row in wanted if row["kind"] != "movie"]
+    wanted.sort(key=lambda row: (row["kind"] != "movie", row["title"].lower(),
+                                 row["season"] or 0, row["episode"] or 0))
+    if args.limit and len(wanted) > args.limit:
+        print(f"limit: keeping {args.limit} of {len(wanted)} wanted items", file=sys.stderr)
+        wanted = wanted[:args.limit]
 
     print(f"\ntotal: {len(indexers)} indexers, {len(wanted)} wanted items")
     if args.dry_run:
