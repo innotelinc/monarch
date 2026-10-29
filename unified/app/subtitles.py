@@ -294,6 +294,141 @@ class OpenSubtitles:
             return payload.content
 
 
+class OpenSubtitlesLegacy:
+    """The older OpenSubtitles.org XML-RPC service.
+
+    It needs no API key — an anonymous session is enough — which is why it is the
+    fallback: a platform that has never had a subtitle provider gets working
+    subtitles without anyone signing up for anything first. The `.com` provider
+    is preferred when a key exists because it is the maintained API.
+    """
+
+    name = "opensubtitles-legacy"
+    default_endpoint = "https://api.opensubtitles.org/xml-rpc"
+    user_agent = "MonarchCore v1.0"
+
+    def __init__(self, username: str = "", password: str = "",
+                 endpoint: str = "", timeout: float = 30.0) -> None:
+        self.username = username
+        self.password = password
+        self.endpoint = endpoint or self.default_endpoint
+        self.timeout = timeout
+        self.token = ""
+        self.configured = True  # anonymous access is a supported session
+
+    def _call(self, method: str, *params: Any) -> Any:
+        import xmlrpc.client
+
+        payload = xmlrpc.client.dumps(params, methodname=method, allow_none=True).encode()
+        response = httpx.post(
+            self.endpoint, content=payload,
+            headers={"Content-Type": "text/xml", "User-Agent": self.user_agent},
+            timeout=self.timeout,
+        )
+        if response.status_code != 200:
+            raise SubtitleError(f"xml-rpc returned {response.status_code}")
+        # A methodResponse yields ((value,), None) — one parameter, no name.
+        loaded, _method = xmlrpc.client.loads(response.text)
+        if isinstance(loaded, (tuple, list)):
+            loaded = loaded[0] if loaded else {}
+        result = loaded
+        if not isinstance(result, dict):
+            raise SubtitleError("unexpected xml-rpc reply")
+        status = str(result.get("status") or "")
+        if not status.startswith("200"):
+            raise SubtitleError(f"xml-rpc status {status or 'missing'}")
+        return result
+
+    def login(self) -> str:
+        if self.token:
+            return self.token
+        result = self._call("LogIn", self.username, self.password, "en", self.user_agent)
+        self.token = str(result.get("token") or "")
+        if not self.token:
+            raise SubtitleError("no session token")
+        return self.token
+
+    def search(self, request: SubtitleRequest, languages: list[str]) -> list[Candidate]:
+        candidates: list[Candidate] = []
+        try:
+            token = self.login()
+        except (SubtitleError, httpx.HTTPError, OSError) as exc:
+            log.warning("opensubtitles.org login failed: %s", exc)
+            return candidates
+
+        for language in languages:
+            queries: list[dict[str, Any]] = []
+            if request.hash:
+                queries.append({"sublanguageid": language, "moviehash": request.hash,
+                                "moviebytesize": str(request.size)})
+            queries.append({"sublanguageid": language, "query": request.title})
+            for query in queries:
+                try:
+                    result = self._call("SearchSubtitles", token, [query], {"limit": "25"})
+                except (SubtitleError, httpx.HTTPError, OSError) as exc:
+                    log.warning("opensubtitles.org search failed: %s", exc)
+                    break
+                rows = result.get("data") or []
+                found = legacy_candidates(rows)
+                candidates.extend(found)
+                # A hash query that hit does not need the looser title query.
+                if any(c.hash_match for c in found):
+                    break
+        return candidates
+
+    def download(self, candidate: Candidate) -> bytes:
+        token = self.login()
+        result = self._call("DownloadSubtitles", token, [candidate.identifier])
+        rows = result.get("data") or []
+        if not rows:
+            raise SubtitleError("no download link")
+        link = str(rows[0].get("SubDownloadLink") or "")
+        if not link:
+            raise SubtitleError("no download link")
+        response = httpx.get(link, timeout=self.timeout, follow_redirects=True,
+                             headers={"User-Agent": self.user_agent})
+        if response.status_code != 200 or not response.content:
+            raise SubtitleError(f"subtitle fetch failed: {response.status_code}")
+        return response.content
+
+
+def legacy_candidates(rows: Iterable[dict]) -> list[Candidate]:
+    """Map OpenSubtitles.org rows onto the shared candidate shape."""
+    found: list[Candidate] = []
+    for row in rows:
+        identifier = str(row.get("IDSubtitleFile") or row.get("IDSubtitle") or "")
+        if not identifier:
+            continue
+        language = normalise_language(str(row.get("SubLanguageID") or ""))
+        found.append(Candidate(
+            provider=OpenSubtitlesLegacy.name,
+            identifier=identifier,
+            language=language,
+            release=str(row.get("MovieReleaseName") or row.get("SubFileName") or ""),
+            downloads=int(float(row.get("SubDownloadsCnt") or 0)),
+            rating=float(row.get("SubRating") or 0) / 2.0,
+            hash_match=str(row.get("MatchedBy") or "") == "moviehash",
+            format=str(row.get("SubFormat") or "srt").lower(),
+        ))
+    return found
+
+
+def make_provider(settings) -> Provider | None:
+    """Pick a provider: `.com` when a key exists, the keyless legacy one otherwise."""
+    choice = (getattr(settings, "subtitle_provider", "") or "auto").lower()
+    if choice in {"auto", "opensubtitles"} and settings.opensubtitles_api_key:
+        return OpenSubtitles(
+            settings.opensubtitles_api_key, settings.opensubtitles_username,
+            settings.opensubtitles_password, base=settings.opensubtitles_base_url,
+        )
+    if choice in {"auto", "legacy"}:
+        return OpenSubtitlesLegacy(
+            settings.opensubtitles_username, settings.opensubtitles_password,
+            endpoint=getattr(settings, "subtitles_legacy_url", ""),
+        )
+    return None
+
+
 # ------------------------------------------------------------------ choosing
 
 def pick_best(candidates: Iterable[Candidate], language: str) -> Candidate | None:
@@ -451,13 +586,10 @@ def pending_files(conn, root: Path, languages: list[str], limit: int = 25,
 def run_pass(conn, settings, provider: Provider | None, limit: int | None = None,
              delay: float | None = None) -> dict[str, Any]:
     """One subtitle pass over the library. Returns what it did, including gaps."""
-    if provider is None:
-        provider = OpenSubtitles(
-            settings.opensubtitles_api_key, settings.opensubtitles_username,
-            settings.opensubtitles_password, base=settings.opensubtitles_base_url,
-        )
+    provider = provider or make_provider(settings)
     languages = list(settings.subtitle_languages)
-    if not settings.subtitles_enabled or not getattr(provider, "configured", True):
+    if not settings.subtitles_enabled or provider is None \
+            or not getattr(provider, "configured", True):
         return {"enabled": False, "fetched": [], "count": 0,
                 "reason": "no subtitle provider configured"}
 

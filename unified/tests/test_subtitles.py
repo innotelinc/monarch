@@ -158,10 +158,13 @@ def test_fetch_for_records_a_miss_and_a_bad_payload(tmp_path, conn):
 
 def test_run_pass_respects_the_batch_and_reports_disabled(conn):
     # run_pass works on the configured library root, which is the test sandbox.
+    import dataclasses
+
     for index in range(3):
         make_video(settings.library_root / "tv" / f"Batch{index}" / f"Batch{index}.mkv")
 
-    disabled = subtitles.run_pass(conn, settings, None)
+    off = dataclasses.replace(settings, subtitles_enabled=False)
+    disabled = subtitles.run_pass(conn, off, None)
     assert disabled["enabled"] is False
     assert "no subtitle provider" in disabled["reason"]
 
@@ -259,6 +262,104 @@ def test_opensubtitles_stays_quiet_without_a_key(tmp_path):
     provider = subtitles.OpenSubtitles("")
     assert provider.configured is False
     assert provider.search(subtitles.request_for(make_video(tmp_path / "x.mkv")), ["en"]) == []
+
+
+def test_make_provider_prefers_the_keyed_api_and_falls_back(tmp_path):
+    import dataclasses
+
+    with_key = dataclasses.replace(settings, opensubtitles_api_key="key")
+    assert subtitles.make_provider(with_key).name == "opensubtitles"
+
+    without = dataclasses.replace(settings, opensubtitles_api_key="")
+    keyless = subtitles.make_provider(without)
+    assert keyless.name == "opensubtitles-legacy"
+    assert keyless.configured is True
+
+    forced = dataclasses.replace(settings, subtitle_provider="legacy", opensubtitles_api_key="key")
+    assert subtitles.make_provider(forced).name == "opensubtitles-legacy"
+
+
+def test_legacy_candidates_map_the_xml_rpc_rows():
+    rows = [{
+        "IDSubtitleFile": "1953123456", "SubLanguageID": "eng",
+        "MovieReleaseName": "Film.2020.1080p-GRP", "SubDownloadsCnt": "12345",
+        "SubRating": "8.0", "MatchedBy": "moviehash", "SubFormat": "srt",
+    }, {"SubLanguageID": "eng"}]
+    found = subtitles.legacy_candidates(rows)
+    assert len(found) == 1  # the row with no id cannot be downloaded
+    assert found[0].language == "en"
+    assert found[0].hash_match is True
+    assert found[0].downloads == 12345
+
+
+def test_legacy_provider_searches_and_downloads(monkeypatch, tmp_path):
+    """The keyless provider against a fake XML-RPC service."""
+    import gzip
+    import threading
+    import xmlrpc.client
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    subtitle_text = b"1\n00:00:09,000 --> 00:00:11,000\nLegacy\n"
+    seen: dict[str, object] = {}
+
+    class Api(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _reply(self, result):
+            body = xmlrpc.client.dumps((result,), methodresponse=True).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            params, method = xmlrpc.client.loads(self.rfile.read(length))
+            seen[method] = params
+            if method == "LogIn":
+                return self._reply({"status": "200 OK", "token": "tok"})
+            if method == "SearchSubtitles":
+                query = (params[1] or [{}])[0]
+                seen["search_query"] = query
+                return self._reply({"status": "200 OK", "data": [{
+                    "IDSubtitleFile": "77", "SubLanguageID": query["sublanguageid"],
+                    "MovieReleaseName": "Film.2020-GRP", "SubDownloadsCnt": "900",
+                    "SubRating": "7.0", "MatchedBy": "moviehash", "SubFormat": "srt",
+                }]})
+            if method == "DownloadSubtitles":
+                return self._reply({"status": "200 OK", "data": [{
+                    "SubDownloadLink": f"http://127.0.0.1:{self.server.server_port}/file.gz"}]})
+            return self._reply({"status": "406 No such method"})
+
+        def do_GET(self):
+            payload = gzip.compress(subtitle_text)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Api)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        endpoint = f"http://127.0.0.1:{httpd.server_port}/xml-rpc"
+        provider = subtitles.OpenSubtitlesLegacy(endpoint=endpoint)
+        video = make_video(tmp_path / "Film (2020)" / "Film.2020.1080p.mkv")
+        request = subtitles.request_for(video, "movie")
+
+        candidates = provider.search(request, ["en"])
+        assert [c.identifier for c in candidates] == ["77"]
+        assert candidates[0].hash_match is True
+        assert seen["search_query"]["moviehash"] == request.hash
+        assert seen["search_query"]["sublanguageid"] == "en"
+
+        target = subtitles.write_subtitle(video, "en", provider.download(candidates[0]))
+        assert target.read_bytes() == subtitle_text
+        assert seen["DownloadSubtitles"] == ("tok", ["77"])
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_missing_report_counts_without_the_network(tmp_path):

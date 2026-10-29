@@ -190,18 +190,19 @@ def test_manual_grab_links_to_a_wanted_row(client, downloader):
 
 # ------------------------------------------------- subtitles and Jellyfin
 
-def test_subtitles_report_is_honest_about_being_unconfigured(client):
+def test_subtitles_are_on_by_default_through_the_keyless_provider(client):
     body = client.get("/api/subtitles").json()
-    assert body["enabled"] is False
-    assert body["provider"] == ""
+    assert body["enabled"] is True
+    assert body["provider"] == "opensubtitles-legacy"
     assert body["languages"] == ["en"]
     assert body["ok"] >= 0
 
 
-def test_subtitle_fetch_refuses_without_a_provider(client):
+def test_subtitle_fetch_refuses_when_no_provider_is_available(client, monkeypatch):
+    monkeypatch.setattr("app.main.subtitle_provider", lambda _settings: None)
     response = client.post("/api/subtitles/fetch")
     assert response.status_code == 409
-    assert "OPENSUBTITLES_API_KEY" in response.json()["detail"]
+    assert "CORE_SUBTITLE_PROVIDER" in response.json()["detail"]
 
 
 def test_jellyfin_reports_unconfigured_and_refuses_to_refresh(client):

@@ -234,13 +234,8 @@ def import_completed(conn, client: Transmission, settings: Settings) -> list[dic
 
 
 def subtitle_provider(settings: Settings):
-    """The configured subtitle provider, or None when there is no API key."""
-    if not settings.opensubtitles_api_key:
-        return None
-    return subtitles.OpenSubtitles(
-        settings.opensubtitles_api_key, settings.opensubtitles_username,
-        settings.opensubtitles_password, base=settings.opensubtitles_base_url,
-    )
+    """The best available subtitle provider for this configuration."""
+    return subtitles.make_provider(settings)
 
 
 def jellyfin_client(settings: Settings) -> jellyfin_mod.Jellyfin:
@@ -370,7 +365,7 @@ class Scheduler:
             # the least urgent, so they run on their own cadence with a small
             # batch rather than on every pass.
             due = time.monotonic() >= self._next_subtitles
-            if due and self.settings.subtitles_enabled and self.settings.opensubtitles_api_key:
+            if due and self.settings.subtitles_enabled:
                 try:
                     result["subtitles"] = subtitles.run_pass(
                         conn, self.settings, subtitle_provider(self.settings),

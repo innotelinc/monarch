@@ -216,12 +216,17 @@ def test_after_import_notifies_jellyfin_and_fetches_a_subtitle(conn, settings, t
 
 
 def test_after_import_never_lets_jellyfin_break_the_import(conn, settings, tmp_path):
+    import dataclasses
+
     class Broken:
         configured = True
 
         def refresh(self, paths=(), full=True):
             raise RuntimeError("boom")
 
-    report = acquisition.after_import(conn, settings, [tmp_path / "x.mkv"], jelly=Broken())
+    # Subtitles off, so this test exercises the Jellyfin failure only and never
+    # reaches the network through the keyless provider.
+    no_subs = dataclasses.replace(settings, subtitles_enabled=False)
+    report = acquisition.after_import(conn, no_subs, [tmp_path / "x.mkv"], jelly=Broken())
     assert "boom" in report["jellyfin"]["error"]
-    assert "subtitles" not in report  # no provider configured in the test environment
+    assert "subtitles" not in report

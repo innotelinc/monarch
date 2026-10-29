@@ -17,7 +17,7 @@ state and the channel lineup, and it serves the only UI anyone signs in to.
 | Sonarr, Radarr, Lidarr, Whisparr | one service per media type: monitor, search, decide, import | `core`: one `wanted` table, one profile, one engine |
 | Prowlarr | normalise and fan out indexer searches | `core/indexers.py`: Torznab/Newznab directly, deduped by infohash |
 | Jellyseerr, Requestrr | two request frontends over the same catalog | `core` Requests view; one queue, one dedupe key |
-| Bazarr | subtitle fetch and sync | `core/subtitles.py`: OpenSubtitles hash + title search, written next to the video, misses recorded |
+| Bazarr | subtitle fetch and sync | `core/subtitles.py`: hash + title search, written next to the video, misses recorded |
 | Homarr, `monarch-landing` | two front doors onto the same stack | the `core` UI (this is the only one left) |
 | Deluge, SABnzbd | two more download clients | Transmission only |
 | TVHeadend, NextPVR, Dispatcharr, autobrr, iptv-epg | four ways to make a playlist playable | `core/livetv.py`: M3U tuner + XMLTV guide read natively |
@@ -51,7 +51,10 @@ import, in the same pass that links the file:
   finds the release. The subtitle is written next to the file as
   `Name.en.srt` — never over one that exists — and the outcome is recorded, so a
   file with genuinely no subtitle is not re-queried every pass. Languages come
-  from `CORE_SUBTITLE_LANGS`; the provider is `OPENSUBTITLES_API_KEY`.
+  from `CORE_SUBTITLE_LANGS`. Two providers ship: the OpenSubtitles.com API when
+  `OPENSUBTITLES_API_KEY` is set, and the keyless OpenSubtitles.org XML-RPC
+  service otherwise — so subtitles work before anyone creates an account, and
+  improve (quota, maintained API) when a key is added.
 - **Jellyfin.** `POST /Library/Media/Updated` names the folder that appeared and
   `POST /Library/Refresh` covers the rest. An unreachable Jellyfin is reported
   in Settings and never fails an import that already put the file on disk.

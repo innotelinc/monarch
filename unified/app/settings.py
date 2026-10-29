@@ -62,6 +62,9 @@ class Settings:
     opensubtitles_password: str = os.environ.get("OPENSUBTITLES_PASSWORD", "")
     opensubtitles_base_url: str = os.environ.get("OPENSUBTITLES_BASE_URL", "")
     subtitles_enabled: bool = _bool("CORE_SUBTITLES_ENABLED", True)
+    # auto: the .com API when a key is set, the keyless legacy service otherwise.
+    subtitle_provider: str = os.environ.get("CORE_SUBTITLE_PROVIDER", "auto")
+    subtitles_legacy_url: str = os.environ.get("OPENSUBTITLES_LEGACY_URL", "")
     subtitle_languages_raw: str = os.environ.get("CORE_SUBTITLE_LANGS", "en")
     subtitle_batch: int = _int("CORE_SUBTITLE_BATCH", 15)
     subtitle_interval: int = _int("CORE_SUBTITLE_INTERVAL", 21600)

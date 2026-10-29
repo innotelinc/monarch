@@ -331,11 +331,12 @@ def subtitles_status(preview: int = Query(default=0, ge=0, le=100),
                      _: str = Depends(current_user)) -> dict[str, Any]:
     with conn_scope() as conn:
         report = subtitles.stats(conn)
+    provider = subtitle_provider(settings)
     payload: dict[str, Any] = {
         **report,
         "languages": list(settings.subtitle_languages),
-        "provider": "opensubtitles" if settings.opensubtitles_api_key else "",
-        "enabled": bool(settings.subtitles_enabled and settings.opensubtitles_api_key),
+        "provider": provider.name if provider else "",
+        "enabled": bool(settings.subtitles_enabled and provider is not None),
     }
     if preview:
         payload["library"] = subtitles.missing_report(
@@ -352,7 +353,8 @@ def subtitles_fetch(limit: int = Query(default=0, ge=0, le=200),
     if provider is None:
         raise HTTPException(
             status_code=409,
-            detail="no subtitle provider configured — set OPENSUBTITLES_API_KEY",
+            detail="no subtitle provider configured — set CORE_SUBTITLE_PROVIDER "
+                   "(auto/opensubtitles/legacy) or OPENSUBTITLES_API_KEY",
         )
     with conn_scope() as conn:
         result = subtitles.run_pass(conn, settings, provider,
