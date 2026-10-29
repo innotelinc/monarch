@@ -65,7 +65,10 @@ def _api_key() -> str:
 
 
 def _headers() -> dict:
-    return {"X-Emby-Token": _api_key(), "Accept": "application/json"}
+    # `Authorization: MediaBrowser Token=` is the only spelling this Jellyfin
+    # accepts; X-Emby-Token and ?api_key= both answer 401.
+    return {"Authorization": f"MediaBrowser Token={_api_key()}",
+            "Accept": "application/json"}
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +83,10 @@ class Jellyfin:
         self._client = httpx.Client(base_url=JELLYFIN_URL, timeout=30)
 
     def get(self, path: str, **params):
-        params["api_key"] = _api_key()
+        # The token travels in a header. Jellyfin rejects `?api_key=` outright
+        # now, which turned every library scan into a 401.
         try:
-            r = self._client.get(path, params=params)
+            r = self._client.get(path, params=params, headers=_headers())
             r.raise_for_status()
             return r.json()
         except Exception as exc:  # noqa: BLE001
