@@ -101,6 +101,18 @@ Order matters, and each step is reversible until the last one.
    gateway and the other six hostnames (`movies`, `req`, `index`, `xxx`, `mp3`,
    `dl`) are 301s to it. `tv.innotel.us` is the exception: it points at Jellyfin,
    because playing is the one thing Gizmo hands off (see below).
+
+   The hostnames were the easy half. Four **proxy** hosts still forwarded to
+   ports nothing listened on — `xxx` (ClipBucket), `tube`, `requestrr.monarch`
+   and `sabnzbd.monarch` — which is a 502 nobody sees until the name is typed.
+   They are 301s now, and the `*.monarch` names for Sonarr, Radarr, Lidarr and
+   Whisparr point straight at `media` instead of at each other's redirect. Two
+   NPM details cost a round trip each: a new host is refused while the domain is
+   still claimed (delete, then create — the old definition is saved to
+   `/root/npm-retired-hosts.json` first), and a redirection host does **not**
+   inherit the wildcard it needs — a certificate copied from another host made
+   every one of the four fail TLS with `no alternative certificate subject
+   name matches`. Each kept its original `certificate_id`.
 8. **Stop the retired containers** ✅ done: twenty stopped — Sonarr, Radarr,
    Lidarr, Whisparr, Bazarr, Jellyseerr, Requestrr, Sabnzbd, Homarr, ClipBucket
    and the ten gateways that existed only to give them identity, plus the old
