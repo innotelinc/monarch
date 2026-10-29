@@ -209,6 +209,19 @@ class CommittedAsset(unittest.TestCase):
         colour_type = asset.read_bytes()[25]
         self.assertIn(colour_type, (2, 6), "expected a truecolour PNG")
 
+    def test_the_installed_splash_is_the_gizmo_4k_draw(self):
+        """The login screen is Gizmo's face now, at 4K (docs/unified.md).
+
+        The Monarch design above is still renderable, but installing it would put
+        the old product name on the one page every identity sees first — which is
+        the state this deployment was found in.
+        """
+        asset = splash.SPLASH_ASSET
+        self.assertTrue(asset.is_file(), f"{asset.relative_to(REPO_ROOT)} is not committed")
+        self.assertEqual(splash.png_dimensions(asset), splash.SPLASH_SIZE)
+        self.assertEqual(splash.SPLASH_SIZE, (3840, 2160))
+        self.assertEqual(splash.INSTALLED_NAME, "gizmo-splash.png")
+
     def test_asset_is_a_flat_design_not_a_photo_collage(self):
         # The splash this replaces is Jellyfin's generated collage: 1920×1080 and
         # 4.1 MB, because it is photographs. A flat design with gradients is
@@ -257,13 +270,13 @@ class CheckAndApply(unittest.TestCase):
             code, out, _ = run("--apply", "--appdata", str(root))
             self.assertEqual(code, 0, out)
             data = root / "jellyfin" / "data" / "data"
-            asset = REPO_ROOT / "assets" / "monarch-splash.png"
-            self.assertTrue(splash.same_bytes(data / "monarch-splash.png", asset))
+            asset = splash.SPLASH_ASSET
+            self.assertTrue(splash.same_bytes(data / splash.INSTALLED_NAME, asset))
             self.assertTrue(splash.same_bytes(data / "splashscreen.png", asset),
                             "the file Jellyfin regenerates should carry the design too")
             branding = splash.read_branding(root / "jellyfin")
             self.assertTrue(branding["enabled"])
-            self.assertEqual(branding["location"], "/config/data/data/monarch-splash.png")
+            self.assertEqual(branding["location"], "/config/data/data/gizmo-splash.png")
             # And the check now passes.
             code, out, _ = run("--check", "--appdata", str(root))
             self.assertEqual(code, 0, out)
@@ -284,7 +297,7 @@ class CheckAndApply(unittest.TestCase):
             self.assertIn("Use your Cerulean account", text)
             self.assertIn(".detailPagePrimaryContainer", text)
             self.assertIn("<SplashscreenEnabled>true</SplashscreenEnabled>", text)
-            self.assertIn("/config/data/data/monarch-splash.png", text)
+            self.assertIn("/config/data/data/gizmo-splash.png", text)
 
     def test_check_flags_a_switched_off_splash(self):
         with TemporaryDirectory() as tmp:
@@ -303,7 +316,7 @@ class CheckAndApply(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = appdata(Path(tmp))
             run("--apply", "--appdata", str(root))
-            (root / "jellyfin" / "data" / "data" / "monarch-splash.png").write_bytes(b"not the asset")
+            (root / "jellyfin" / "data" / "data" / splash.INSTALLED_NAME).write_bytes(b"not the asset")
             code, out, _ = run("--check", "--appdata", str(root))
             self.assertEqual(code, 1)
             self.assertIn("has been replaced", out)
@@ -322,7 +335,7 @@ class CheckAndApply(unittest.TestCase):
             root = appdata(Path(tmp))
             run("--apply", "--appdata", str(root), "--container-data-path", "/data")
             self.assertEqual(splash.read_branding(root / "jellyfin")["location"],
-                             "/data/monarch-splash.png")
+                             "/data/gizmo-splash.png")
             self.assertNotIn(str(root), (root / "jellyfin" / "branding.xml").read_text(encoding="utf-8"))
 
 

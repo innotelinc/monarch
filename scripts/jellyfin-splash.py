@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""jellyfin-splash.py — Monarch's splash screen, reproduced from the repo.
+"""jellyfin-splash.py — the splash on Jellyfin's login screen, from this repo.
 
 WHY THIS EXISTS
 ---------------
-The mission claims a branded splash ("the obsidian/champagne splash, source SVG
-in `assets/`, installed 1920×1080 PNG"), and nothing in this repo ever made it:
+The mission claims a branded splash ("a product splash, source SVG in
+`assets/`, installed as a PNG"), and nothing in this repo ever made it:
 no script rendered the SVG and no script put the result where Jellyfin reads it.
 What is actually on disk on the media host is Jellyfin's **own generated
 collage** — `SplashscreenPostScanTask` builds it from up to 30 random posters and
@@ -26,8 +26,8 @@ HOW JELLYFIN PICKS THE IMAGE (read off the server, not guessed)
   irrelevant — **but only a location that exists**. A `SplashscreenLocation`
   naming a path that is not there is not an error the server reports: it serves
   `{DataPath}/splashscreen.png` instead, which is the collage again. The first
-  version of this script recorded `/config/data/monarch-splash.png` while
-  installing to `/config/data/data/monarch-splash.png` (this image's data dir is
+  version of this script recorded `/config/data/splash.png` while installing to
+  `/config/data/data/splash.png` (this image's data dir is
   `{config}/data/data`), and the measurement that caught it was putting a
   *different* image in the collage's place and watching which one came back from
   `/Branding/Splashscreen`. `--check` now maps the recorded path back through the
@@ -56,11 +56,18 @@ USAGE
 Runs on a host that mounts the media host's appdata (`APPDATA`, default
 `/docker/appdata`), or inside a container that has it. Paths:
 
-    asset           assets/monarch-splash.png           (this repo)
-    config          $APPDATA/jellyfin/branding.xml      (Jellyfin's /config)
-    installed       $APPDATA/jellyfin/data/data/monarch-splash.png
-                    recorded in branding.xml as /config/data/data/monarch-splash.png
+    asset           assets/gizmo/gizmo-splash-dark-3840.png   (this repo)
+    config          $APPDATA/jellyfin/branding.xml            (Jellyfin's /config)
+    installed       $APPDATA/jellyfin/data/data/gizmo-splash.png
+                    recorded in branding.xml as /config/data/data/gizmo-splash.png
                     (the *container* path Jellyfin resolves, not the host one)
+
+The product is Gizmo, so the splash a client sees is Gizmo's: the 4K dark draw
+from `assets/gizmo/` (regenerate it with `assets/gizmo/render.py`), installed at
+4K because a TV client upscales 1080p visibly on a 4K panel. The Monarch design
+below is the renderer that produced the earlier artwork (`--render` still writes
+`assets/monarch-splash*.png`), kept because its geometry is pinned against the
+SVG by the test suite.
 
 Exit codes: 0 = the branded splash is installed and wired; 1 = it is not (a
 finding is printed); 2 = cannot run (no asset and no Pillow, or no appdata).
@@ -183,7 +190,12 @@ FONTS = {
 }
 
 BRANDING_FILE = "branding.xml"
-INSTALLED_NAME = "monarch-splash.png"
+# The splash this deployment shows (`docs/unified.md`), and what gets checked
+# against what is installed. WAS `monarch-splash.png` at 1920×1080: that art is
+# still renderable, but it is no longer the product's face on the login screen.
+SPLASH_ASSET = ASSET_DIR / "gizmo" / "gizmo-splash-dark-3840.png"
+SPLASH_SIZE = (3840, 2160)
+INSTALLED_NAME = "gizmo-splash.png"
 # The path recorded in branding.xml is resolved by the *server*, i.e. inside the
 # Jellyfin container, where the appdata mount is /config and the data dir is
 # {config}/data/data — the directory the generated collage and jellyfin.db live
@@ -503,8 +515,9 @@ def check(args) -> int:
         except CannotRun as error:
             findings.append(str(error))
         else:
-            if (width, height) != (WIDTH, HEIGHT):
-                findings.append(f"{asset} is {width}×{height}, expected {WIDTH}×{HEIGHT}")
+            if (width, height) != SPLASH_SIZE:
+                findings.append(f"{asset} is {width}×{height}, expected "
+                                f"{SPLASH_SIZE[0]}×{SPLASH_SIZE[1]}")
 
     installed = data_dir / INSTALLED_NAME
     if not installed.is_file():
@@ -549,10 +562,11 @@ def check(args) -> int:
               "(SplashscreenPostScanTask rewrites it after every scan); the "
               "SplashscreenLocation above is what overrides it")
     if findings:
-        print(f"\nFAIL — {len(findings)} problem(s): the login screen is not showing Monarch's "
-              "splash. Apply it with: python3 scripts/jellyfin-splash.py --apply")
+        print(f"\nFAIL — {len(findings)} problem(s): the login screen is not showing the "
+              "deployment's splash. Apply it with: python3 scripts/jellyfin-splash.py --apply")
         return 1
-    print(f"  ok    {installed.name} is installed ({WIDTH}×{HEIGHT}) and "
+    print(f"  ok    {installed.name} is installed "
+          f"({SPLASH_SIZE[0]}×{SPLASH_SIZE[1]}) and "
           f"{branding['path'].name} points at {expected}")
     return 0
 
@@ -566,8 +580,9 @@ def apply(args) -> int:
         else:
             raise CannotRun(f"{asset} is missing; run --render first")
     width, height = png_dimensions(asset)
-    if (width, height) != (WIDTH, HEIGHT):
-        raise CannotRun(f"{asset} is {width}×{height}, expected {WIDTH}×{HEIGHT}")
+    if (width, height) != SPLASH_SIZE:
+        raise CannotRun(f"{asset} is {width}×{height}, expected "
+                        f"{SPLASH_SIZE[0]}×{SPLASH_SIZE[1]}")
 
     data_dir = Path(args.data_path)
     if not data_dir.is_dir():
@@ -625,7 +640,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="install the splash and point branding at it")
     parser.add_argument("--render", action="store_true", help="re-render the asset from the design (needs Pillow)")
     parser.add_argument("--variant", choices=sorted(DESIGN), default="dark")
-    parser.add_argument("--asset", default="", help="the rendered PNG (default assets/<variant>.png)")
+    parser.add_argument("--asset", default="",
+                        help="the PNG to install (default assets/gizmo/"
+                             "gizmo-splash-dark-3840.png; --render writes assets/<variant>.png)")
     parser.add_argument("--appdata", default=os.environ.get("APPDATA", "/docker/appdata"))
     parser.add_argument("--data-path", default="", help="Jellyfin's data dir (default <appdata>/jellyfin/data/data)")
     parser.add_argument("--config-dir", default="", help="Jellyfin's config dir (default <appdata>/jellyfin)")
@@ -644,15 +661,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     appdata = Path(args.appdata)
-    args.asset = args.asset or str(ASSET_DIR / DESIGN[args.variant]["asset"])
+    # `--render` writes the design it is named for; everything else reads the
+    # deployed splash, which is Gizmo's.
+    render_target = Path(args.asset) if args.asset else ASSET_DIR / DESIGN[args.variant]["asset"]
+    args.asset = args.asset or str(SPLASH_ASSET)
     args.data_path = args.data_path or str(appdata / "jellyfin" / "data" / "data")
     args.config_dir = args.config_dir or str(appdata / "jellyfin")
     args.api_key_file = args.api_key_file or str(appdata / "init" / "jellyfin-api-key.txt")
 
     try:
         if args.render and not args.apply:
-            render(args.variant, Path(args.asset), args.font_serif, args.font_sans)
-            print(f"rendered     {args.asset}")
+            render(args.variant, render_target, args.font_serif, args.font_sans)
+            print(f"rendered     {render_target}")
             return 0
         if args.apply:
             code = apply(args)
