@@ -97,12 +97,25 @@ Order matters, and each step is reversible until the last one.
    anything: the report is evidence, the removal is a separate decision.
 6. **Let the scheduler run for a day** with the old stack still up. The two do
    not fight: `core` only searches for items in its own `wanted` queue.
-7. **Collapse the edge**: point `media.innotel.us` at the single gateway, and
-   make the other seven hostnames 301 to it. In Nginx Proxy Manager each becomes
-   a redirection host — no certificate of its own beyond the wildcard.
-8. **Stop the retired containers** and remove their NPM proxy hosts. Keep their
-   appdata for a rollback window; `docker compose down` (without `-v`) is
-   enough.
+7. **Collapse the edge** ✅ done: `media.innotel.us` answers for the single
+   gateway and the other six hostnames (`movies`, `req`, `index`, `xxx`, `mp3`,
+   `dl`) are 301s to it. `tv.innotel.us` is the exception: it points at Jellyfin,
+   because playing is the one thing Gizmo hands off (see below).
+8. **Stop the retired containers** ✅ done: twenty stopped — Sonarr, Radarr,
+   Lidarr, Whisparr, Bazarr, Jellyseerr, Requestrr, Sabnzbd, Homarr, ClipBucket
+   and the ten gateways that existed only to give them identity, plus the old
+   `monarch-landing` nginx page. Eighteen containers are left: core and its
+gateway, Jellyfin and its gateway, Transmission, Prowlarr, FlareSolverr, IPTV,
+   Authentik LDAP, Watchtower, the three metric exporters and the health pinger.
+   Appdata is untouched, so rollback is still `docker compose up -d <service>`.
+
+### Playing is a link, not a page
+
+Gizmo decides what should exist; Jellyfin plays it. So the UI keeps one door out:
+`tv.innotel.us` forwards to `jellyfin-sso` (port 14010) with playback-friendly
+timeouts and buffering off, and the sidebar's **Watch** link opens it in a new
+tab. Jellyfin's own accounts still work there (TV and native clients cannot
+complete a browser OIDC flow), which is why that hostname is not a 301.
 
 ### Rollback
 
@@ -167,10 +180,11 @@ matter of adding a native indexer row per tracker and deleting the one row.
 Jellyfin keeps playing and transcoding, so it keeps its own identity — but that
 identity is Gizmo's. `assets/gizmo/` holds the wordmark and the TV splash in both
 palettes at 1920×1080 and 3840×2160; `render.py` regenerates them from the SVG.
-On the host the dark render is installed at
-`/docker/appdata/jellyfin/data/data/gizmo-splash.png` and `branding.xml` points
-`SplashscreenLocation` at it, with the server name set to Gizmo so a TV client
-shows one product, not two.
+On the host the **4K dark** render is installed at
+`/docker/appdata/jellyfin/data/data/gizmo-splash.png` and the branding config
+points `SplashscreenLocation` at it with `SplashscreenEnabled`, with the server
+name set to Gizmo so a TV client shows one product, not two. Verified by reading
+it back from `GET /Branding/Splashscreen` (image/png, 3840×2160).
 
 ## Open items
 
