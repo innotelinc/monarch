@@ -637,7 +637,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--font-serif", default="")
     parser.add_argument("--font-sans", default="")
     parser.add_argument("--restart", action="store_true", help="POST /System/Restart after applying")
-    parser.add_argument("--jellyfin-url", default=os.environ.get("JELLYFIN_URL", "http://127.0.0.1:8097"))
+    parser.add_argument("--jellyfin-url",
+                        default=os.environ.get("JELLYFIN_HOST_URL", "http://127.0.0.1:8097"))
     parser.add_argument("--api-key", default=os.environ.get("JELLYFIN_API_KEY", ""))
     parser.add_argument("--api-key-file", default="", help="default <appdata>/init/jellyfin-api-key.txt")
     args = parser.parse_args(argv)

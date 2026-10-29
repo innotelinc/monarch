@@ -1178,7 +1178,10 @@ session too; its callback is registered on the `monarch-media` provider. It is a
 **Authentik self-service** page (password reset) — a different thing from the
 subscribe page. See `.env.sample` for `SUBSCRIBE_URL` / `APP_URL`,
 `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `JELLYFIN_URL` /
-`JELLYFIN_API_KEY` and `ACCOUNT_PORTAL_URL` / `REQUEST_URL`.
+`JELLYFIN_HOST_URL` / `JELLYFIN_API_KEY` and `ACCOUNT_PORTAL_URL` /
+`REQUEST_URL`. `JELLYFIN_URL` is the compose-network address containers use;
+`JELLYFIN_HOST_URL` is the published `127.0.0.1:8097` that the host-side
+`scripts/jellyfin-*.py` and `scripts/magnate-entitlements.py` talk to.
 
 #### Entitlements — Magnate's decision, Monarch's policy
 

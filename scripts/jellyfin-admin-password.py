@@ -402,7 +402,7 @@ def main():
     args = parser.parse_args()
 
     load_env(ENV_FILE)
-    base = env("JELLYFIN_URL", DEFAULT_JELLYFIN_URL)
+    base = env("JELLYFIN_HOST_URL", DEFAULT_JELLYFIN_URL)
     user = env("JELLYFIN_ADMIN_USER", "admin")
     password = env("MONARCH_PASSWORD")
     key_name = env("JELLYFIN_API_KEY_NAME", DEFAULT_KEY_NAME)

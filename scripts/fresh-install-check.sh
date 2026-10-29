@@ -430,6 +430,7 @@ if [ "$FULL_STACK" = "1" ]; then
   sed -i -e 's|^AUTHENTIK_BASE_URL=.*|AUTHENTIK_BASE_URL=|' \
          -e 's|^AUTHENTIK_BOOTSTRAP_TOKEN=.*|AUTHENTIK_BOOTSTRAP_TOKEN=|' \
          -e 's|^JELLYFIN_URL=.*|JELLYFIN_URL=http://jellyfin:8096|' \
+         -e 's|^JELLYFIN_HOST_URL=.*|JELLYFIN_HOST_URL=http://127.0.0.1:8097|' \
          -e 's|^REQUEST_URL=.*|REQUEST_URL=https://req.monarch-check.test|' \
          "$SCRATCH/.env"
   cat > "$SCRATCH/no-authentik.yml" <<EOF

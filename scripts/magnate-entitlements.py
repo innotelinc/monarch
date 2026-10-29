@@ -199,7 +199,7 @@ def main():
     plan = env("MAGNATE_ENTITLEMENTS_PLAN", tiers.get("default_plan", "basic"))
     magnate_url = env("MAGNATE_URL", DEFAULT_MAGNATE_URL)
     ent_token = env("ENTITLEMENTS_API_TOKEN")
-    jellyfin_url = env("JELLYFIN_URL", DEFAULT_JELLYFIN_URL)
+    jellyfin_url = env("JELLYFIN_HOST_URL", DEFAULT_JELLYFIN_URL)
     jellyfin_key = env("JELLYFIN_API_KEY")
     if not jellyfin_key and JELLYFIN_KEY_FILE.is_file():
         jellyfin_key = JELLYFIN_KEY_FILE.read_text().strip()

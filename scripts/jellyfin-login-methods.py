@@ -346,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true",
                         help="disable the local accounts (default: report only)")
     parser.add_argument("--check", action="store_true", help="report only, the default")
-    parser.add_argument("--url", default=os.environ.get("JELLYFIN_URL", DEFAULT_URL),
+    parser.add_argument("--url", default=os.environ.get("JELLYFIN_HOST_URL", DEFAULT_URL),
                         help=f"Jellyfin base URL (default {DEFAULT_URL})")
     parser.add_argument("--key-file", type=Path,
                         default=Path(os.environ.get("JELLYFIN_KEY_FILE", str(DEFAULT_KEY_FILE))),
