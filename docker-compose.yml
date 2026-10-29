@@ -132,6 +132,23 @@ services:
     # stack's biggest consumer; cap and keep swap off.
     mem_limit: 4g
     memswap_limit: 4g
+    healthcheck:
+      # The image's first start after a recreate can stall in its own init: the
+      # container reports Up while the app service never starts, and nothing that
+      # asks the edge sees the difference until a person tries to play something.
+      # Jellyfin answers /System/Info/Public before it has a database, so this is
+      # the process being alive rather than the library being ready.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null",
+             "http://127.0.0.1:8096/System/Info/Public"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Not 180s. The image's first start in a *new* container chowns the whole
+      # web client (`init-setup-app`), and on overlayfs every chown copies the
+      # file up: measured at ~1,600 paths left after thirteen minutes, against
+      # instant once the ownership is in the container's layer. Twenty minutes
+      # is the honest window before "unhealthy" means anything here.
+      start_period: 1200s
     ports:
       # Host 8097 → container 8096: 8096 on this host belongs to the capstone
       # Control Center (dashboard), so Jellyfin shifts to the next free port.
