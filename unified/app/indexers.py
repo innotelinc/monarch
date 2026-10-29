@@ -192,6 +192,12 @@ def search_prowlarr(indexer: Indexer, query: str, *, limit: int = 100,
     """Prowlarr's aggregated search: every indexer it knows, in one call."""
     # Prowlarr wants categories as repeated parameters: a comma-separated value
     # is a 400 (measured against a live Prowlarr, not assumed).
+    # A live Prowlarr fans out to every tracker it knows: measured at ~40 s for
+    # fifty results and ~60 s for a hundred, against ~40 indexers. Asking for
+    # more than fifty buys nothing (core dedupes and shows the best sixty) and
+    # costs twenty seconds, so the aggregate query is capped. Its timeout is its
+    # own, well above the per-indexer default.
+    limit = min(limit, 50)
     params: list[tuple[str, str]] = [
         ("query", query), ("type", "search"), ("limit", str(limit)),
         ("apikey", indexer.api_key),
@@ -200,7 +206,7 @@ def search_prowlarr(indexer: Indexer, query: str, *, limit: int = 100,
         if category:
             params.append(("categories", category))
     response = client.get(f"{indexer.url.rstrip('/')}/api/v1/search",
-                          params=params, timeout=max(timeout, 45.0))
+                          params=params, timeout=max(timeout, 150.0))
     if response.status_code != 200:
         return []
     protocols = prowlarr_protocols(indexer, client, timeout)

@@ -145,6 +145,13 @@ def test_prowlarr_search_maps_json_and_drops_usenet(monkeypatch):
     sent_categories = [value for key, value in params if key == "categories"]
     assert sent_categories == indexers.CATEGORY_MOVIE.split(",")
 
+    # The aggregate query is capped: more than fifty results costs ~20 s more
+    # and is thrown away by the dedupe anyway.
+    client.calls.clear()
+    indexers.search_prowlarr(indexer, "Film 2020", limit=200, client=client)
+    _, capped = next(call for call in client.calls if call[0].endswith("/api/v1/search"))
+    assert dict(capped)["limit"] == "50"
+
     # The protocol map is cached, so a second search only asks for results.
     before = len(client.calls)
     indexers.search_prowlarr(indexer, "Film 2020", client=client)
