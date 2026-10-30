@@ -378,6 +378,18 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **drift-check now judges Jellyfin's local accounts instead of skipping.** The
+  check ran `jellyfin-login-methods.py --check` with whatever `.env` carries, and
+  `.env` carries the *container* URL (`http://jellyfin:8096`), which does not
+  resolve from the host: every run answered "Temporary failure in name
+  resolution", exited 2, and was reported as a note — so the one posture that
+  decides whether a user disabled in Authentik can still sign in with a password
+  was never being judged. Measured on monarch 2026-10-30: given the published
+  port, the checker answers in full, and it finds a stray — `cola` (a migrated
+  paid profile) has local sign-in enabled and is not in `JELLYFIN_LOCAL_ACCOUNTS`.
+  The check passes `--url "${JELLYFIN_CHECK_URL:-http://127.0.0.1:8097}"` now, so
+  that is a finding rather than a skip; declaring the account or running the
+  script with `--apply` is the operator's call, not this change's.
 - **The login screen's stylesheet no longer carries Gizmo's art.** Reverting to
   the *arr stack left `CustomCss` holding the fenced
   `/* gizmo-light-splash */` block from the Gizmo era, so a light-mode login

@@ -803,7 +803,13 @@ fi
 # key that could not be read, or a build that does not say which provider owns an
 # account, is not evidence that the posture holds.
 
-jellyfin_login_out=$(python3 scripts/jellyfin-login-methods.py --check 2>&1)
+# `.env` carries the *container* URL (`http://jellyfin:8096`), which does not
+# resolve from the host: the checker read it, could not connect, and skipped
+# itself with "Temporary failure in name resolution" on every run - a note nobody
+# reads, on a posture nobody was therefore judging. The published port is what
+# this host can reach, so it is passed explicitly. JELLYFIN_CHECK_URL overrides it.
+jellyfin_login_out=$(python3 scripts/jellyfin-login-methods.py --check \
+  --url "${JELLYFIN_CHECK_URL:-http://127.0.0.1:8097}" 2>&1)
 jellyfin_login_code=$?
 # The local accounts the deployment *keeps* are declared, not exempted in
 # code: `JELLYFIN_LOCAL_ACCOUNTS` in .env lists the logins that cannot use the

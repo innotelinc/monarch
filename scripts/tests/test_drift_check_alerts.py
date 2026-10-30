@@ -276,6 +276,25 @@ class DriftCheckAlerts(unittest.TestCase):
         self.assertIn("the container has been up", self.alert_text())
         self.assertLess(elapsed, 60, "a container that has been up an hour is not waited for")
 
+    # ── the login-methods probe's address ───────────────────────────────
+    def test_the_login_methods_check_is_given_an_address_this_host_can_reach(self):
+        """Left to `.env`, it was given a name that does not resolve from a host.
+
+        `.env` carries `http://jellyfin:8096` for the containers. Measured on
+        monarch 2026-10-30: pointed there from a shell the checker answered
+        "Temporary failure in name resolution" and exit 2, which the check reports
+        as a note — so the posture was skipped on every run and nobody noticed.
+        The published port is what this host can reach, and the test is the
+        sentence in the script rather than a run, because reproducing it needs a
+        name that does not resolve and a stack to sit behind that name.
+        """
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r'jellyfin-login-methods\.py --check \\\n\s*'
+            r'--url "\$\{JELLYFIN_CHECK_URL:-http://127\.0\.0\.1:8097\}"',
+        )
+
     # ── the splash: which draw this host is meant to be carrying ────────
     def splash_appdata(self, asset_name: str) -> Path:
         """A scratch appdata with one Monarch draw installed and recorded.
