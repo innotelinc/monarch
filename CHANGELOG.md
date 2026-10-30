@@ -30,9 +30,15 @@ are written by hand and describe the behaviour change, not the commits.
   the live-TV feeds the monitor marked down, grouped by cause and then by channel.
   It renders the same two facts as `/splash/health` and `/livetv/health`, which
   answer 503 when their section needs attention — what the dashboard's dots read.
-  It is not published at a name yet: `health.monarch.innotel.us` has no DNS record,
-  and the ready line in `scripts/npm-hosts.conf` says so rather than creating a
-  proxy host for a name that cannot resolve. `check-board-tiles.py` now also probes
+  It is published at **`https://health.monarch.innotel.us/status`** — public and
+  read-only by design, on the existing `*.monarch.innotel.us` wildcard — with the
+  record added as `CNAME innotel.us` like every sibling, because the zone has no
+  wildcard and a proxy host for a name that does not resolve is the dead tile this
+  repo removes. That exposed a real defect: for a new row
+  `npm-proxy-hosts.py` wrote an **A record of `NPM_FORWARD_HOST`**, the media
+  host's LAN address, so publishing a public name would have meant
+  `192.168.1.56` in a public zone. It writes a CNAME to the zone apex when the
+  target is private now. `check-board-tiles.py` now also probes
   each app's `ping_url`, so a dot whose endpoint is down is a finding (a
   docker-internal name that cannot resolve from a shell is a note, because Homarr
   probes it from its own network). Triage of the live dial on 2026-10-30: 221 of

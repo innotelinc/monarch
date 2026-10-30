@@ -545,8 +545,10 @@ def dns_upsert_cerulean(cfg, fqdn, ip, ttl=300, dry_run=False):
     so only a name with no record gets one.
     """
     url, token, zone = cfg
+    private = is_private_address(ip)
     if dry_run:
-        print(f"  [dry-run] would DNS: {fqdn} A {ip} via Cerulean bridge {url} "
+        what = f"CNAME {zone}" if private else f"A {ip}"
+        print(f"  [dry-run] would DNS: {fqdn} {what} via Cerulean bridge {url} "
               f"(zone {zone}; if it has no record yet)")
         return True
     try:
@@ -559,9 +561,15 @@ def dns_upsert_cerulean(cfg, fqdn, ip, ttl=300, dry_run=False):
                               for r in existing)
             print(f"  DNS: {fqdn} already resolves ({kinds}) - left as is")
             return True
+        # A private target becomes a CNAME to the apex (which holds the A
+        # record); anything else is written as the A record it is.
+        body = {"zone": zone, "name": fqdn, "ttl": ttl}
+        if private:
+            body.update({"type": "CNAME", "value": zone + "."})
+        else:
+            body.update({"type": "A", "value": ip})
         cerulean_api(url, token, "/api/service/dns/records", method="POST",
-                     body={"zone": zone, "type": "A", "name": fqdn,
-                           "value": ip, "ttl": ttl})
+                     body=body)
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
@@ -577,7 +585,11 @@ def dns_upsert_cerulean(cfg, fqdn, ip, ttl=300, dry_run=False):
     except (urllib.error.URLError, OSError, ValueError) as exc:
         print(f"  ERROR: Cerulean DNS update failed for {fqdn}: {exc}")
         return False
-    print(f"  DNS: {fqdn} -> {ip} (A, TTL {ttl}) via Cerulean bridge ({zone})")
+    if private:
+        print(f"  DNS: {fqdn} CNAME {zone} (TTL {ttl}) via Cerulean bridge "
+              f"({zone}; {ip} is private, so no A record)")
+    else:
+        print(f"  DNS: {fqdn} -> {ip} (A, TTL {ttl}) via Cerulean bridge ({zone})")
     return True
 
 
@@ -650,8 +662,10 @@ def dns_upsert_technitium(cfg, fqdn, ip, ttl=300, dry_run=False):
     newly added subdomain in npm-hosts.conf).
     """
     url, token = cfg
+    private = is_private_address(ip)
     if dry_run:
-        print(f"  [dry-run] would DNS: {fqdn} A {ip} via Technitium {url} "
+        what = "CNAME to the zone apex" if private else f"A {ip}"
+        print(f"  [dry-run] would DNS: {fqdn} {what} via Technitium {url} "
               "(if it has no record yet)")
         return True
     try:
@@ -665,9 +679,12 @@ def dns_upsert_technitium(cfg, fqdn, ip, ttl=300, dry_run=False):
             kinds = ", ".join(f"{t} {v}".strip() for t, v in existing)
             print(f"  DNS: {fqdn} already resolves ({kinds}) - left as is")
             return True
-        data = technitium_api(url, "/api/zones/records/add", {
-            "domain": fqdn, "zone": zone, "type": "A",
-            "ipAddress": ip, "ttl": ttl, "overwrite": "true"}, token)
+        params = {"domain": fqdn, "zone": zone, "ttl": ttl, "overwrite": "true"}
+        if private:
+            params.update({"type": "CNAME", "cname": zone})
+        else:
+            params.update({"type": "A", "ipAddress": ip})
+        data = technitium_api(url, "/api/zones/records/add", params, token)
     except (urllib.error.URLError, OSError, ValueError, RuntimeError) as exc:
         print(f"  ERROR: Technitium DNS update failed for {fqdn}: {exc}")
         return False
@@ -679,7 +696,11 @@ def dns_upsert_technitium(cfg, fqdn, ip, ttl=300, dry_run=False):
             return True
         print(f"  ERROR: Technitium refused {fqdn} -> {ip}: {message}")
         return False
-    print(f"  DNS: {fqdn} -> {ip} (A, TTL {ttl}) via Technitium ({zone})")
+    if private:
+        print(f"  DNS: {fqdn} CNAME {zone} (TTL {ttl}) via Technitium "
+              f"({zone}; {ip} is private, so no A record)")
+    else:
+        print(f"  DNS: {fqdn} -> {ip} (A, TTL {ttl}) via Technitium ({zone})")
     return True
 
 
@@ -703,6 +724,24 @@ def is_ip_address(value):
         import ipaddress
         ipaddress.ip_address(value)
         return True
+    except ValueError:
+        return False
+
+
+def is_private_address(value):
+    """True for an address the public zone must not hold (RFC1918, loopback).
+
+    NPM_FORWARD_HOST is this host's LAN address (192.168.1.56), added on
+    2026-10-30 when the first new subdomain in years was added: writing the A
+    record the script used to write would have published a private address into
+    a public zone - a name that resolves for nobody outside the LAN, and one
+    leak of the internal topology. The zone's own convention is a CNAME to
+    `innotel.us`, which holds the A record (`grep` the zone: every sibling name
+    is `CNAME innotel.us`), so a private target is written that way instead.
+    """
+    import ipaddress
+    try:
+        return ipaddress.ip_address(value).is_private
     except ValueError:
         return False
 

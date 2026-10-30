@@ -1053,11 +1053,29 @@ Both statuses are readable in words at `http://<media host>:8003/status`
 (`monarch-health`): the splash section names the installed draw and the last guard
 verdict, and the live-TV section lists the down feeds grouped by cause, then by
 channel. It is the same facts as `/splash/health` and `/livetv/health`, which
-answer 503 when their section needs attention. It is **not published at a name
-yet** — `health.monarch.innotel.us` has no DNS record (every other Monarch name
-resolves individually; there is no wildcard), and the ready line sits commented in
-`scripts/npm-hosts.conf` with that reason. A proxy host for a name that does not
-resolve is the dead tile this repo removes.
+answer 503 when their section needs attention, and 503 is what `/status` returns
+while a section does, so the page is honest rather than decorative.
+
+It is published at **`https://health.monarch.innotel.us/status`**, public on
+purpose and read-only: a status page nobody can reach is not a status page, while
+every other surface on this host stays behind a gateway. The row is in
+`scripts/npm-hosts.conf` (`health -> monarch-health:8003`, so the edge reaches the
+service on the media host).
+
+The record is the part that had to be added by hand: the zone has no wildcard, and
+every sibling name is `CNAME innotel.us`, which is where the A record lives —
+`health.monarch.innotel.us CNAME innotel.us`, TTL 300, added through Cerulean's
+Technitium API on the proxy host and verified authoritatively and from a public
+resolver (`73.68.203.71`). Order matters: a proxy host for a name that does not
+resolve is the dead tile this repo removes, and NPM's HTTP-01 certificate path
+needs the name to resolve first. The host itself takes the existing wildcard
+(`*.monarch.innotel.us`, certificate #48) rather than requesting a new one.
+
+`npm-proxy-hosts.py` would have written that record for a new row only as an
+**A record pointing at `NPM_FORWARD_HOST`**, which is the media host's LAN address
+(`192.168.1.56`): a public name resolving for nobody outside the LAN, plus the
+internal topology in a public zone. It writes a `CNAME` to the zone apex for a
+private target now, which is the shape every sibling already has.
 
 The live-TV half is a triage list, not a cleanup. On 2026-10-30 the monitor marked
 **221 of 1556 rows** down: 33 HTTP 404, 24 hostnames that no longer resolve, 24
