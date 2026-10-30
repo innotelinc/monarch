@@ -263,6 +263,18 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **A 5xx from Telegram no longer drops the alert.** The send was one `curl`: a
+  gateway timeout or a `502` from `api.telegram.org` returned non-zero, the
+  caller's `|| true` swallowed it, and the one message that said the stack was
+  broken was the thing lost. The alert path now reads the HTTP status and tries
+  once more when it is a `5xx` or no answer at all (`000`), after
+  `DRIFT_TELEGRAM_RETRY_SEC` (default 2s); a `4xx` is an answer and a `429`
+  already means “you are asking too often”, so neither is repeated, and a send
+  that still fails says so on stderr rather than leaving a quiet timer looking
+  like a timer that found nothing. Three cases — transient, refused, still down —
+  are pinned in `test_drift_check_alerts.py` with a `curl` shim first on `PATH`,
+  so the retry is exercised without a bot and without a request leaving the host.
+
 - **Jellyfin Live TV now actually uses the Comcast dial, and channel 42 is back.**
   The dial existed in `/opt/epg`, but `monarch-init` still added the raw
   iptv-org tuner and `guide.xml`, so Jellyfin imported both and showed every

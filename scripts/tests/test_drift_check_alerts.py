@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -179,6 +180,39 @@ class DriftCheckAlerts(unittest.TestCase):
 
     def docker_calls(self) -> str:
         return self.docker_log.read_text() if self.docker_log.exists() else ""
+
+    def install_curl_shim(self, failures: int, status: int = 502) -> Path:
+        """A curl that fails the Telegram send `failures` times, then works.
+
+        Every other URL goes to the real curl, so the probes this run makes are
+        the ones the rest of the suite already expects. Returns the log of the
+        Telegram attempts - a retry is a second line, and no retry is one.
+        """
+        real = shutil.which("curl", path=os.environ.get("PATH", ""))
+        self.assertIsNotNone(real, "no curl to pass the probes through to")
+        log = self.tmp / "telegram-attempts"
+        bad = '{"ok":false,"description":"Bad Gateway"}'
+        good = '{"ok":true,"result":{}}'
+        shim = self.shim / "curl"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            "  *api.telegram.org*)\n"
+            '    echo attempt >> "' + str(log) + '"\n'
+            '    if [ "$(wc -l < "' + str(log) + '")" -le ' + str(failures) + ' ]; then\n'
+            "      printf '%s\\n%s' '" + bad + "' " + str(status) + "\n"
+            "      exit 0\n"
+            "    fi\n"
+            "    printf '%s\\n%s' '" + good + "' 200\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            'exec "' + real + '" "$@"\n'
+        )
+        shim.chmod(0o755)
+        return log
+
+    def telegram_attempts(self, log: Path) -> int:
+        return len(log.read_text().split()) if log.exists() else 0
 
     def status(self) -> dict:
         text = (self.state / "drift-last").read_text()
@@ -427,6 +461,44 @@ class DriftCheckAlerts(unittest.TestCase):
         missing = self.run_check("--status")
         self.assertEqual(missing.returncode, 2)
         self.assertIn("no verdict recorded", missing.stderr)
+
+    # ── the send the gateway did not carry ─────────────────────────────
+    def test_a_gateway_error_is_retried_once_before_the_alert_is_lost(self):
+        # A 502 is the gateway failing to carry the message, not Telegram refusing
+        # it, and a failure somebody else caused is not a reason to drop the page.
+        log = self.install_curl_shim(failures=1)
+        res = self.run_check(
+            own_manifest=True,
+            env={"DRIFT_TELEGRAM_CMD": "", "DRIFT_TELEGRAM_RETRY_SEC": "0"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual(self.telegram_attempts(log), 2, "the alert was tried once and dropped")
+        self.assertIn("trying the alert once more", res.stderr)
+        self.assertNotIn("Telegram send failed", res.stderr)
+
+    def test_an_answer_that_is_not_a_gateway_failure_is_not_repeated(self):
+        # 4xx is an answer: a wrong chat id stays wrong however often it is told.
+        log = self.install_curl_shim(failures=99, status=400)
+        res = self.run_check(
+            own_manifest=True,
+            env={"DRIFT_TELEGRAM_CMD": "", "DRIFT_TELEGRAM_RETRY_SEC": "0"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual(self.telegram_attempts(log), 1, "a refusal was retried")
+        self.assertIn("Telegram send failed: Bad Gateway", res.stderr)
+
+    def test_a_gateway_that_keeps_failing_is_reported_not_swallowed(self):
+        # One retry, not a loop: after it the run says the page did not go, and
+        # its verdict is still the one the stack earned.
+        log = self.install_curl_shim(failures=99)
+        res = self.run_check(
+            own_manifest=True,
+            env={"DRIFT_TELEGRAM_CMD": "", "DRIFT_TELEGRAM_RETRY_SEC": "0"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual(self.telegram_attempts(log), 2, "the send was retried more than once")
+        self.assertIn("Telegram send failed: Bad Gateway", res.stderr)
+        self.assertEqual(self.status()["verdict"], "drift")
 
 
 if __name__ == "__main__":

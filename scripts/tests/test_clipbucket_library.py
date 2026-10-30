@@ -187,6 +187,12 @@ class QualityLabels(unittest.TestCase):
 
     def test_a_file_ffprobe_cannot_read_is_not_complete(self):
         # What an interrupted remux actually leaves behind: bytes, not a video.
+        # The suite runs on hosts without ffmpeg as well as on the one that does
+        # (see test_the_ffprobe_form_is_one_ffprobe_accepts), and this assertion
+        # needs the tool: without it probe() cannot be reached at all, and the
+        # error it raises is about the missing binary, not about the file.
+        if shutil.which("ffprobe") is None:
+            self.skipTest("ffprobe is not installed here")
         with tempfile.TemporaryDirectory() as tmp:
             partial = os.path.join(tmp, "partial-1080.mp4")
             with open(partial, "wb") as fh:

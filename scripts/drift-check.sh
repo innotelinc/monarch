@@ -360,12 +360,36 @@ notify_telegram() {  # notify_telegram <subject> <message...> -> 0 on success
       bash -c "$DRIFT_TELEGRAM_CMD"
     return $?
   fi
-  local reply
-  reply=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-    --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
-    --data-urlencode "text=$msg" \
-    --data-urlencode "disable_web_page_preview=true")
-  echo "$reply" | grep -q '"ok":true' || { echo "Telegram send failed: $(echo "$reply" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("description",d))' 2>/dev/null || echo "$reply")" >&2; return 1; }
+  # A 5xx - or a connection that never got an answer at all - is the gateway
+  # failing to carry the message, not Telegram refusing it, and dropping a page
+  # for it is the one failure this function exists to avoid. So those are tried
+  # once more before the run gives up and says so. A 4xx is an answer (a wrong
+  # chat id stays wrong however often it is told) and a 429 already means "you
+  # are asking too often", so neither is repeated: the check's own repeat rules
+  # are the answer to 429, not a retry loop.
+  local attempt reply code
+  for attempt in 1 2; do
+    reply=$(curl -s -w $'\n%{http_code}' -X POST \
+      "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+      --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+      --data-urlencode "text=$msg" \
+      --data-urlencode "disable_web_page_preview=true")
+    # The status is the last line; the body is what came before it, newlines and
+    # all (a Telegram body has none, but the seam above writes one).
+    code=${reply##*$'\n'}
+    reply=${reply%$'\n'*}
+    echo "$reply" | grep -q '"ok":true' && return 0
+    case "$code" in
+      5*|000)
+        [ "$attempt" -eq 1 ] || break
+        echo "drift-check: Telegram answered ${code} - trying the alert once more in ${DRIFT_TELEGRAM_RETRY_SEC:-2}s" >&2
+        sleep "${DRIFT_TELEGRAM_RETRY_SEC:-2}"
+        ;;
+      *) break ;;
+    esac
+  done
+  echo "Telegram send failed: $(echo "$reply" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("description",d))' 2>/dev/null || echo "$reply")" >&2
+  return 1
 }
 
 json_get() {  # json_get <url> <header...> -> echoes body, 0 on HTTP 200

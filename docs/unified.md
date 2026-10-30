@@ -106,7 +106,12 @@ Order matters, and each step is reversible until the last one.
    ports nothing listened on — `xxx` (ClipBucket), `tube`, `requestrr.monarch`
    and `sabnzbd.monarch` — which is a 502 nobody sees until the name is typed.
    They are 301s now, and the `*.monarch` names for Sonarr, Radarr, Lidarr and
-   Whisparr point straight at `media` instead of at each other's redirect. Two
+   Whisparr point straight at `media` instead of at each other's redirect.
+   `req.monarch.innotel.us` (Jellyseerr) was the one name missed: its proxy host
+   was marked deleted rather than converted, so NPM had no server block for it
+   and the edge answered the TLS handshake with `unrecognized name` — which reads
+   as "the whole edge is down" in a browser. It is a 301 like its siblings now.
+   Two
    NPM details cost a round trip each: a new host is refused while the domain is
    still claimed (delete, then create — the old definition is saved to
    `/root/npm-retired-hosts.json` first), and a redirection host does **not**
