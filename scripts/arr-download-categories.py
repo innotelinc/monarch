@@ -88,7 +88,12 @@ def call(url: str, method: str = "GET", body: dict | None = None, raw_form: bool
     try:
         return send()
     except urllib.error.HTTPError as error:
-        raw = error.read()
+        # An HTTPError is the response object: it keeps its socket open until
+        # close(), and urllib does not close it for you.
+        try:
+            raw = error.read()
+        finally:
+            error.close()
         try:
             return error.code, json.loads(raw or b"null")
         except ValueError:
@@ -143,8 +148,11 @@ def transmission_rpc(base: str, method: str, arguments: dict | None = None) -> d
             with opener.open(request, timeout=20) as response:
                 parsed = json.loads(response.read() or b"{}")
         except urllib.error.HTTPError as error:
+            # 409 is the handshake, but the error object still owns its socket;
+            # left open it leaked one connection per handshake per run.
+            session_id = error.headers.get("X-Transmission-Session-Id", "") if error.code == 409 else ""
+            error.close()
             if error.code == 409 and attempt == 1:
-                session_id = error.headers.get("X-Transmission-Session-Id", "")
                 continue
             raise Drift(f"Transmission RPC {method} failed (HTTP {error.code})") from error
         except (urllib.error.URLError, OSError) as error:

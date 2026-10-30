@@ -84,7 +84,11 @@ class Prowlarr:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as error:
-            raw = error.read()
+            # The error is the response and holds its socket until close().
+            try:
+                raw = error.read()
+            finally:
+                error.close()
             try:
                 return error.code, json.loads(raw or b"null")
             except ValueError:

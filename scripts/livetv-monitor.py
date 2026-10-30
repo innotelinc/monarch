@@ -198,6 +198,10 @@ def probe(url: str, user_agent: str = "", referrer: str = "", timeout: float = 1
         status, body, final_url, content_type = _fetch(url, headers, timeout,
                                                       limit=512 * 1024)
     except urllib.error.HTTPError as exc:
+        # An HTTPError is the response and holds its socket until close(). A run
+        # probes 1500+ feeds, so every 404 left one to the garbage collector -
+        # the single ResourceWarning the suite reported from this module.
+        exc.close()
         return ProbeResult(False, exc.code, f"HTTP {exc.code}", _ms(started))
     except urllib.error.URLError as exc:
         return ProbeResult(False, None, f"unreachable: {exc.reason}", _ms(started))
@@ -228,6 +232,7 @@ def probe(url: str, user_agent: str = "", referrer: str = "", timeout: float = 1
                 child, headers, timeout, limit=8192,
                 extra={"Range": "bytes=0-8191"})
         except urllib.error.HTTPError as exc:
+            exc.close()
             return ProbeResult(False, exc.code, f"variant/segment HTTP {exc.code}", _ms(started))
         except Exception as exc:
             return ProbeResult(False, None, f"variant/segment {type(exc).__name__}: {exc}",

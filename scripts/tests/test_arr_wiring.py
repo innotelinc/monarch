@@ -654,6 +654,11 @@ class WhereADownloadLands(unittest.TestCase):
             session = categories.transmission_rpc(base, "session-get")
         finally:
             server.shutdown()
+            # shutdown() stops serve_forever() but leaves the listening socket
+            # bound; only server_close() releases it, and the fixture's own port
+            # was the "unclosed <socket.socket ... laddr=('127.0.0.1', ...)>"
+            # the suite reported at finalization.
+            server.server_close()
         self.assertEqual(session.get("download-dir"), "/data/torrents")
         self.assertEqual(seen, ["", "abc123"])
 

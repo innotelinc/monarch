@@ -288,8 +288,9 @@ class EndToEnd(unittest.TestCase):
                 summary = json.loads(output.getvalue())
                 self.assertEqual((summary["rows"], summary["ok"], summary["failed"]),
                                  (1, 1, 0))
-                row = sqlite3.connect(db).execute(
-                    "SELECT status FROM channels WHERE number='5'").fetchone()
+                with contextlib.closing(sqlite3.connect(db)) as check:
+                    row = check.execute(
+                        "SELECT status FROM channels WHERE number='5'").fetchone()
                 self.assertEqual(row[0], "ok")
                 status = root / "monitor.json"
                 self.assertEqual(json.loads(status.read_text(encoding="utf-8"))["rows"], 1)

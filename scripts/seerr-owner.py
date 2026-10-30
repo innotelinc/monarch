@@ -292,10 +292,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"seerr-owner [{'apply' if args.apply else 'check'}] {args.db}")
     try:
         db = connect(args.db)
-        owner = identity(db, OWNER_ID)
     except SeerrError as error:
         print(f"seerr-owner: {error}", file=sys.stderr)
         return 2
+    # Closed on every path, including each early return below. An unclosed
+    # sqlite3.Connection is a leaked file descriptor and its own ResourceWarning;
+    # `main()` is called many times in a test run, so relying on the garbage
+    # collector here produced sixteen of them in one suite run.
+    try:
+        return report(db, args, account)
+    finally:
+        db.close()
+
+
+def report(db: sqlite3.Connection, args, account: str) -> int:
+    """Everything after the database is open, so `main` alone owns closing it."""
+    owner = identity(db, OWNER_ID)
     if owner is None:
         print("seerr-owner: no user row 1 — Seerr has not been set up yet", file=sys.stderr)
         return 2
