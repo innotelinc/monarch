@@ -254,13 +254,23 @@ matter of adding a native indexer row per tracker and deleting the one row.
 
 Jellyfin keeps playing and transcoding, but the login screen is the one page
 every identity sees before it has a session, so it wears **Monarch's** mark, not
-a second product's. `assets/monarch-splash.svg` is the design;
+a second product's — and the TV clients (Android TV, Roku, Fire TV) ask the same
+endpoint on launch, so one artwork covers the login card and the living room.
+`assets/monarch-splash.svg` is the design;
 `scripts/jellyfin-splash.py` renders and installs it as
-`/docker/appdata/jellyfin/data/data/monarch-splash.png` (1920×1080) and points
+`/docker/appdata/jellyfin/data/data/monarch-splash.png` (3840×2160) and points
 `SplashscreenLocation` at that path with `SplashscreenEnabled`. The API cannot
 set the location — `BrandingOptionsDto` omits it — so the file is the only way,
 and `GET /Branding/Splashscreen` is the read-back that proves which image a
 client is actually handed.
+
+The 2026-10 design is *Celestial Cinema*: a seeded star field over obsidian,
+film-strip perforations down both edges, a twelve-blade aperture iris closed on
+a golden play mark inside a 72-tick bezel and 48-ray crown, two orbit paths with
+satellites, and mirrored equaliser wings either side of the wordmark. It is
+4K because a TV upscales 1080p visibly on a 4K panel, and it is drawn from one
+primitive list with two backends, so the committed SVG and the installed PNG
+cannot drift apart.
 
 There is no second splash setting, so the light theme is not a `@media` rule in
 the branding CSS: the whole backdrop is one stylesheet

@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch Jellyfin's generated splash collage for the post-scan rewrite
+Documentation=https://github.com/innotelinc/monarch
+# The file is rewritten after *every* library scan, so this is an event, not a
+# clock: a timer would leave a poster wall in place for its whole interval.
+# PathChanged fires on an atomic replace, PathModified on an in-place write; the
+# server has done both across versions, so both are watched.
+[Path]
+PathChanged=/docker/appdata/jellyfin/data/data/splashscreen.png
+PathModified=/docker/appdata/jellyfin/data/data/splashscreen.png
+Unit=monarch-splash-guard.service
+
+[Install]
+WantedBy=paths.target

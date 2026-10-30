@@ -12,24 +12,24 @@ file has to be written, and that is what `jellyfin-splash.py` does.
 
 Three things are pinned here, because each of them is wrong quietly:
 
-  * **The renderer and the design agree.** `assets/monarch-splash.svg` is the
-    design and `DESIGN` in the script is a second copy of it (Pillow cannot
-    rasterize SVG, and the hosts that install the splash have no rasterizer at
-    all). Two copies drift, so the SVG is read back and every number and colour
-    the renderer draws with must appear in it. Change the art, update the
-    constants, or this fails.
-  * **The installed file is the asset, and the recorded path is Jellyfin's.** The
-    path written into `branding.xml` is resolved *inside the container*
-    (`/config/data/data/...`), not on the host — recording the host path would point
-    the server at a file it cannot see while the check reported success. And
-    `--check` must fail when what is installed is not the asset, which is exactly
-    the state the media host was found in.
+  * **The committed SVG is the renderer's own output.** The design is a list of
+    primitives (`build_plan`) with two backends: the Pillow renderer that
+    produces the installed 4K PNG, and an SVG writer that produces
+    `assets/monarch-splash.svg`. `assets/…svg` is the design of record, so it is
+    compared to a fresh `svg()` call byte for byte; if the plan changes without
+    the art being regenerated, this fails.
+  * **The installed file is the 4K asset, and the recorded path is Jellyfin's.**
+    The path written into `branding.xml` is resolved *inside the container*
+    (`/config/data/data/...`), not on the host — recording the host path would
+    point the server at a file it cannot see while the check reported success.
+    And `--check` must fail when what is installed is not the asset, which is
+    exactly the state the media host was found in.
   * **`--apply` does not lose the rest of the branding.** `branding.xml` also
     carries `LoginDisclaimer` and `CustomCss`; a wholesale rewrite drops them,
     and an API-side branding write is what erases `SplashscreenLocation` in the
     first place (jellyfin/jellyfin#13744). The file is edited, not replaced.
 
-Everything except the renderer's own tests runs without Pillow, because CI and
+Everything except the rasterizer's own tests runs without Pillow, because CI and
 the media host's peers do not have it: the committed PNG is what gets installed.
 
 The module under test has a hyphen in its filename, so it is loaded by path.
@@ -40,7 +40,6 @@ import importlib.util
 import struct
 import sys
 import unittest
-import xml.etree.ElementTree as ET
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -50,6 +49,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "jellyfin-splash.py"
 SVG = {"dark": REPO_ROOT / "assets" / "monarch-splash.svg",
        "light": REPO_ROOT / "assets" / "monarch-splash-light.svg"}
+PNG = {"dark": REPO_ROOT / "assets" / "monarch-splash.png",
+       "light": REPO_ROOT / "assets" / "monarch-splash-light.png"}
 
 try:
     import PIL  # noqa: F401
@@ -92,155 +93,103 @@ def appdata(tmp: Path, *, branding: str | None = None, collage: bool = True) -> 
     return tmp
 
 
-class DesignMatchesTheSvg(unittest.TestCase):
-    """The renderer is a second copy of the art; this is what stops the drift."""
+class DesignOfRecord(unittest.TestCase):
+    """The SVG is generated from the plan; this is what stops the drift."""
 
-    def test_dark_design_is_the_dark_svg(self):
+    def test_committed_svg_is_drawn_from_the_plan(self):
+        for variant in ("dark", "light"):
+            committed = SVG[variant].read_text(encoding="utf-8")
+            self.assertEqual(committed, splash.svg(variant),
+                             f"assets/{SVG[variant].name} is not what build_plan() draws — "
+                             "re-run --svg and commit it")
+
+    def test_the_plan_draws_the_media_motif(self):
+        # The count of each instrument is the design's contract: a bezel with
+        # 71 ticks is a design change, not a rounding difference.
+        geo = splash.GEOMETRY
+        self.assertEqual(geo["ticks"]["count"], 72)
+        self.assertEqual(geo["emblem"]["blades"], 12)
+        self.assertEqual(geo["emblem"]["rays"], 48)
+        self.assertEqual(len(geo["orbits"]), 2)
+        self.assertEqual(geo["stars"], 170)
+        self.assertEqual(geo["sparkles"], 9)
+        self.assertEqual(len(geo["rings"]), 4)
+        plan = splash.build_plan("dark")
+        self.assertEqual(sum(1 for op in plan if op["t"] == "polygon"), 12 + 2,
+                         "twelve iris blades and the two play-mark facets")
+        self.assertEqual(sum(1 for op in plan if op["t"] == "bloom"), 2)
+        self.assertEqual(sum(1 for op in plan if op["t"] == "polyline"), 3,
+                         "two orbits and the play mark's outline")
+        self.assertEqual(sum(1 for op in plan if op["t"] == "text"), len(splash.TEXT))
+
+    def test_the_svg_names_every_text_run_with_its_tracking(self):
         svg = SVG["dark"].read_text(encoding="utf-8")
-        design = splash.DESIGN["dark"]
-        # Background: the SVG's 0,0 → 1,1 gradient and its three stops.
-        self.assertIn('width="1920" height="1080"', svg)
-        self.assertIn("#08090b", svg)
-        self.assertIn("#111316", svg)
-        self.assertIn("#070809", svg)
-        self.assertEqual([c for _, c in design["bg"]], ["#08090b", "#111316", "#070809"])
-        # The radial wash and the two hairline circles under the monogram.
-        self.assertIn('cx="960" cy="430" rx="570" ry="450"', svg)
-        glow = design["glow"]
-        self.assertEqual((glow["cx"], glow["cy"], glow["rx"], glow["ry"]), (960, 430, 570, 450))
-        self.assertIn('<circle cx="960" cy="420" r="290"', svg)
-        self.assertIn('<circle cx="960" cy="420" r="370"', svg)
-        self.assertEqual(tuple(design["rings"]["radii"]), (290, 370))
-        # Corner rules and the four dots that end them.
-        for literal in ("M160 124H540", "M1380 124H1760", "M160 956H540", "M1380 956H1760"):
-            self.assertIn(literal, svg)
-        self.assertIn('<circle cx="560" cy="124" r="3"/>', svg)
-        self.assertIn('<circle cx="1360" cy="956" r="3"/>', svg)
-        self.assertEqual(set(design["dots"]["points"]), {(560, 124), (1360, 124), (560, 956), (1360, 956)})
-        # The monogram: translate, the two rings, the two bars, both wing cubics,
-        # the antennae and their tips.
-        self.assertIn('transform="translate(960 365)"', svg)
-        self.assertEqual((design["monogram"]["cx"], design["monogram"]["cy"]), (960, 365))
-        for literal in ('<circle r="190"', '<circle r="142"', '<circle r="129"'):
-            self.assertIn(literal, svg)
-        self.assertEqual(design["monogram"]["halo"]["r"], 190)
-        self.assertEqual(design["monogram"]["ring_outer"]["r"], 142)
-        self.assertEqual(design["monogram"]["ring_inner"]["r"], 129)
-        self.assertIn("M-12 92V-67M12 92V-67", svg)
-        self.assertEqual(design["monogram"]["bars"]["xs"], (-12, 12))
-        self.assertEqual((design["monogram"]["bars"]["from_y"], design["monogram"]["bars"]["to_y"]), (92, -67))
-        self.assertIn("M-8-58C-56-114-87-122-110-99C-136-74-108-28-19 14", svg)
-        self.assertIn("M-18 15C-89 65-111 93-83 106C-52 121-24 87-7 42", svg)
-        self.assertEqual(design["monogram"]["wings"][0]["path"],
-                         ((-8, -58), (-56, -114), (-87, -122), (-110, -99)))
-        self.assertEqual(design["monogram"]["wings"][1]["path"],
-                         ((-18, 15), (-89, 65), (-111, 93), (-83, 106)))
-        self.assertIn("M-6-75C-28-111-39-126-59-139", svg)
-        self.assertEqual(design["monogram"]["antennae"]["path"],
-                         ((-6, -75), (-28, -111), (-39, -126), (-59, -139)))
-        self.assertIn('cx="-61" cy="-141" r="4"', svg)
-        self.assertIn('cx="61" cy="-141" r="4"', svg)
-        # The three text runs, with the tracking the SVG sets.
-        for y, size, tracking in ((690, 108, 25), (765, 22, 12), (872, 20, 6)):
-            self.assertIn(f'y="{y}"', svg)
-            self.assertIn(f'font-size="{size}"', svg)
-            self.assertIn(f'letter-spacing="{tracking}"', svg)
-        strings = [t["string"] for t in design["text"]]
-        self.assertEqual(strings, ["MONARCH", "MEDIA PLATFORM", "YOUR LIBRARY · BEAUTIFULLY ORGANIZED"])
-        for text in design["text"]:
-            self.assertEqual((text["y"], text["size"], text["tracking"]),
-                             {"MONARCH": (690, 108, 25), "MEDIA PLATFORM": (765, 22, 12),
-                              "YOUR LIBRARY · BEAUTIFULLY ORGANIZED": (872, 20, 6)}[text["string"]])
-        self.assertIn("M780 816H1140", svg)
-        self.assertEqual(design["text_rule"]["y"], 816)
-        self.assertEqual(tuple(design["text_rule"]["x"]), (780, 1140))
-        # Every colour the renderer paints with is one the design names.
-        palette = set()
-        for key in ("rings", "dots", "text_rule"):
-            palette.add(design[key]["colour"])
-        palette.add(design["glow"]["colour"])
-        palette.add(design["glow"]["fade"])
-        palette.add(design["monogram"]["halo"]["colour"])
-        palette.add(design["monogram"]["ring_inner"]["colour"])
-        palette.add(design["monogram"]["bars"]["colour"])
-        palette.add(design["monogram"]["antennae"]["colour"])
-        palette.add(design["monogram"]["antenna_dots"]["colour"])
-        palette.update(text["colour"] for text in design["text"])
-        palette.update(colour for _, colour in splash.GOLD["dark"])
-        for colour in palette:
-            self.assertIn(colour, svg.lower(), f"{colour} is drawn but not in the design")
+        for spec in splash.TEXT:
+            self.assertIn(f'>{spec["string"]}</text>', svg)
+            self.assertIn(f'font-size="{spec["size"]}"', svg)
+            self.assertIn(f'letter-spacing="{spec["tracking"]}"', svg)
+        self.assertIn("MONARCH", svg)
+        self.assertIn("FILM · SERIES · LIVE TELEVISION", svg)
+        self.assertIn("EVERY FRAME, IN ITS PLACE", svg)
 
-    def test_light_design_is_the_light_svg(self):
-        svg = SVG["light"].read_text(encoding="utf-8")
-        design = splash.DESIGN["light"]
-        self.assertIn("#faf7ef", svg)
-        self.assertIn("#ebe3d2", svg)
-        self.assertEqual([c for _, c in design["bg"]], ["#faf7ef", "#ebe3d2"])
-        self.assertIn('<circle cx="960" cy="410" r="330"', svg)
-        self.assertEqual((design["glow"]["cx"], design["glow"]["cy"], design["glow"]["rx"]), (960, 410, 330))
-        self.assertIn('<circle cx="960" cy="410" r="290"', svg)
-        self.assertIn('<circle cx="960" cy="410" r="370"', svg)
-        self.assertEqual(tuple(design["rings"]["radii"]), (290, 370))
-        self.assertIn("M-10 88V-70M10 88V-70", svg)
-        self.assertEqual((design["monogram"]["bars"]["xs"],
-                          design["monogram"]["bars"]["from_y"],
-                          design["monogram"]["bars"]["to_y"]), ((-10, 10), 88, -70))
-        self.assertIn("M-8-58C-58-115-88-122-112-98", svg)
-        self.assertIn("M-18 15C-90 65-110 94-82 106", svg)
-        self.assertIn("M-7-75C-30-112-40-126-60-139", svg)
-        self.assertIn('y="690"', svg)
-        self.assertIn('font-size="108"', svg)
-        for colour in (t["colour"] for t in design["text"]):
-            self.assertIn(colour, svg)
-        self.assertEqual([t["colour"] for t in design["text"]], ["#25231f", "#8e6b36", "#70695f"])
-        for colour in ("#8e6b36", "#caa35d", "#6e5228"):
-            self.assertIn(colour, svg)
-        for _, colour in splash.GOLD["light"]:
-            self.assertIn(colour, svg)
+    def test_the_svg_carries_both_variants_palettes(self):
+        for variant in ("dark", "light"):
+            design = splash.DESIGN[variant]
+            svg = SVG[variant].read_text(encoding="utf-8").lower()
+            for _, colour in design["bg"]:
+                self.assertIn(colour, svg)
+            for _, colour in design["gold"]:
+                self.assertIn(colour, svg)
+            for key in ("line", "ink", "mid", "muted"):
+                self.assertIn(design[key], svg)
+
+    def test_the_two_variants_are_the_same_drawing(self):
+        # Same geometry, different paint: the light theme is the engraver's-ink
+        # rendering, not a different composition.
+        shapes = ("dot", "line", "circle", "polygon", "polyline", "round_rect", "diamond")
+        for kind in shapes:
+            dark = sum(1 for op in splash.build_plan("dark") if op["t"] == kind)
+            light = sum(1 for op in splash.build_plan("light") if op["t"] == kind)
+            self.assertEqual(dark, light, f"{kind} count differs between the variants")
+
+    def test_the_plan_is_deterministic(self):
+        # The star field is seeded rather than drawn from `random`, so a re-render
+        # is byte-identical and a committed PNG can be compared at all.
+        self.assertEqual(splash.build_plan("dark"), splash.build_plan("dark"))
 
 
 class CommittedAsset(unittest.TestCase):
     """The asset is what gets installed, so its shape is asserted, not assumed."""
 
-    def test_dark_asset_is_a_1080p_rgb_png(self):
-        asset = REPO_ROOT / "assets" / "monarch-splash.png"
-        self.assertTrue(asset.is_file(), "assets/monarch-splash.png is not committed")
-        self.assertEqual(splash.png_dimensions(asset), (1920, 1080))
-        colour_type = asset.read_bytes()[25]
-        self.assertIn(colour_type, (2, 6), "expected a truecolour PNG")
-
-    def test_the_installed_splash_is_the_gizmo_4k_draw(self):
-        """The login screen is Gizmo's face now, at 4K (docs/unified.md).
-
-        The Monarch design above is still renderable, but installing it would put
-        the old product name on the one page every identity sees first — which is
-        the state this deployment was found in.
-        """
-        asset = splash.SPLASH_ASSET
-        self.assertTrue(asset.is_file(), f"{asset.relative_to(REPO_ROOT)} is not committed")
-        self.assertEqual(splash.png_dimensions(asset), splash.SPLASH_SIZE)
+    def test_each_variant_is_a_4k_rgb_png(self):
+        for variant, asset in PNG.items():
+            self.assertTrue(asset.is_file(), f"{asset.relative_to(REPO_ROOT)} is not committed")
+            self.assertEqual(splash.png_dimensions(asset), splash.SPLASH_SIZE)
+            colour_type = asset.read_bytes()[25]
+            self.assertIn(colour_type, (2, 6), "expected a truecolour PNG")
         self.assertEqual(splash.SPLASH_SIZE, (3840, 2160))
-        self.assertEqual(splash.INSTALLED_NAME, "gizmo-splash.png")
+        self.assertEqual(splash.INSTALLED_NAME, "monarch-splash.png")
 
     def test_asset_is_a_flat_design_not_a_photo_collage(self):
         # The splash this replaces is Jellyfin's generated collage: 1920×1080 and
-        # 4.1 MB, because it is photographs. A flat design with gradients is
-        # fractions of that, so an accidental re-import of a collage is caught.
-        asset = REPO_ROOT / "assets" / "monarch-splash.png"
-        self.assertLess(asset.stat().st_size, 500_000,
-                        "the asset is as large as a photo collage — is this Jellyfin's "
-                        "generated splash rather than the rendered design?")
+        # ~4.1 MB, because it is photographs. A flat design with gradients is
+        # fractions of that even at 4K, so an accidental re-import is caught.
+        for asset in PNG.values():
+            self.assertLess(asset.stat().st_size, 1_500_000,
+                            f"{asset.name} is as large as a photo collage — is this "
+                            "Jellyfin's generated splash rather than the rendered design?")
 
     def test_committed_png_matches_a_fresh_render(self):
         if not HAVE_PILLOW:
             self.skipTest("Pillow is not installed; only the committed asset is judged here")
-        with TemporaryDirectory() as tmp:
-            fresh = Path(tmp) / "fresh.png"
-            splash.render("dark", fresh)
-            self.assertEqual(splash.png_dimensions(fresh), (1920, 1080))
-            self.assertTrue(splash.same_bytes(fresh, REPO_ROOT / "assets" / "monarch-splash.png"),
-                            "the committed asset is not what this design renders — "
-                            "re-run --render and commit the result")
+        for variant, asset in PNG.items():
+            with TemporaryDirectory() as tmp:
+                fresh = Path(tmp) / "fresh.png"
+                splash.render(variant, fresh)
+                self.assertEqual(splash.png_dimensions(fresh), splash.SPLASH_SIZE)
+                self.assertTrue(splash.same_bytes(fresh, asset),
+                                f"assets/{asset.name} is not what this design renders — "
+                                "re-run --render and commit the result")
 
     def test_render_is_deterministic(self):
         if not HAVE_PILLOW:
@@ -276,7 +225,7 @@ class CheckAndApply(unittest.TestCase):
                             "the file Jellyfin regenerates should carry the design too")
             branding = splash.read_branding(root / "jellyfin")
             self.assertTrue(branding["enabled"])
-            self.assertEqual(branding["location"], "/config/data/data/gizmo-splash.png")
+            self.assertEqual(branding["location"], "/config/data/data/monarch-splash.png")
             # And the check now passes.
             code, out, _ = run("--check", "--appdata", str(root))
             self.assertEqual(code, 0, out)
@@ -297,7 +246,7 @@ class CheckAndApply(unittest.TestCase):
             self.assertIn("Use your Cerulean account", text)
             self.assertIn(".detailPagePrimaryContainer", text)
             self.assertIn("<SplashscreenEnabled>true</SplashscreenEnabled>", text)
-            self.assertIn("/config/data/data/gizmo-splash.png", text)
+            self.assertIn("/config/data/data/monarch-splash.png", text)
 
     def test_check_flags_a_switched_off_splash(self):
         with TemporaryDirectory() as tmp:
@@ -335,7 +284,7 @@ class CheckAndApply(unittest.TestCase):
             root = appdata(Path(tmp))
             run("--apply", "--appdata", str(root), "--container-data-path", "/data")
             self.assertEqual(splash.read_branding(root / "jellyfin")["location"],
-                             "/data/gizmo-splash.png")
+                             "/data/monarch-splash.png")
             self.assertNotIn(str(root), (root / "jellyfin" / "branding.xml").read_text(encoding="utf-8"))
 
 
@@ -348,14 +297,14 @@ class Renderer(unittest.TestCase):
         for forbidden in ("cairosvg", "rsvg", "inkscape", "wand", "svglib"):
             self.assertNotIn(forbidden, source)
 
-    def test_render_produces_the_design_at_1080p(self):
+    def test_render_produces_the_design_at_4k(self):
         if not HAVE_PILLOW:
             self.skipTest("Pillow is not installed")
         from PIL import Image, ImageStat
         with TemporaryDirectory() as tmp:
             dark = Path(tmp) / "dark.png"
             splash.render("dark", dark)
-            self.assertEqual(splash.png_dimensions(dark), (1920, 1080))
+            self.assertEqual(splash.png_dimensions(dark), (3840, 2160))
             mean = ImageStat.Stat(Image.open(dark).convert("RGB")).mean
             self.assertLess(mean[0], 60, "the dark design is an obsidian field, not a bright image")
             light = Path(tmp) / "light.png"
@@ -371,7 +320,7 @@ class Renderer(unittest.TestCase):
             splash.render("dark", out)
             header = out.read_bytes()[:26]
             self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
-            self.assertEqual(struct.unpack(">II", header[16:24]), (1920, 1080))
+            self.assertEqual(struct.unpack(">II", header[16:24]), (3840, 2160))
             self.assertEqual(header[24:26], b"\x08\x02", "8-bit truecolour RGB, no alpha surprises")
 
 

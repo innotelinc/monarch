@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep Jellyfin's generated splash collage replaced by Monarch's artwork
+Documentation=https://github.com/innotelinc/monarch
+After=docker.service
+
+[Service]
+Type=oneshot
+# Idempotent: it exits without writing when the collage already matches, which
+# is what stops the path unit below from looping on its own write.
+ExecStart=/bin/sh /opt/monarch/scripts/restore-splash-collage.sh
+
+StandardOutput=journal
+StandardError=journal

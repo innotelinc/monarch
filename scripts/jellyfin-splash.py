@@ -6,9 +6,9 @@ WHY THIS EXISTS
 The mission claims a branded splash ("a product splash, source SVG in
 `assets/`, installed as a PNG"), and nothing in this repo ever made it:
 no script rendered the SVG and no script put the result where Jellyfin reads it.
-What is actually on disk on the media host is Jellyfin's **own generated
-collage** — `SplashscreenPostScanTask` builds it from up to 30 random posters and
-30 thumbnails after *every* library scan and writes it to
+What is actually on disk on the media host by default is Jellyfin's **own
+generated collage** — `SplashscreenPostScanTask` builds it from up to 30 random
+posters and 30 thumbnails after *every* library scan and writes it to
 `{DataPath}/splashscreen.png` (1920×1080). So the file a client shows is a poster
 wall, and any hand-copied image put in its place is overwritten by the next scan.
 That is the whole reason this is a script and not a one-off `cp`.
@@ -39,35 +39,49 @@ in `branding.xml` as the custom splash. It also leaves a copy at
 `{DataPath}/splashscreen.png`, because that is the file the collage overwrites
 and the file a client shows when the location is not honoured.
 
-The image itself is **rendered from this repo** (`assets/monarch-splash.svg` is
-the design; the geometry and palette below are its, and
-`scripts/tests/test_jellyfin_splash.py` fails when the two drift). Rendering
-needs Pillow, which is why the rendered PNG is committed beside the SVG:
-`--check` and `--apply` are stdlib-only and work on a host that has no rasterizer
-at all (neither `.30` nor this repo's CI has one). `--render` regenerates it.
+THE ART (2026-10 redesign)
+--------------------------
+One artwork serves three surfaces, because Jellyfin has exactly one splash
+setting: the **web login screen** (`/Branding/Splashscreen` before a session),
+the **TV client** (Android TV / Roku / Fire TV draw the same endpoint on launch),
+and the **collage file** `splashscreen.png` that a client falls back to.
+
+The design is *Celestial Cinema*: an obsidian field of deterministic stars and
+sparkles; a film-strip perforation band along the top and bottom edges; an
+aperture iris whose twelve blades close around a golden play mark, ringed by a
+72-tick measurement bezel, fine orbit paths with two satellites, and a 48-ray
+crown; mirrored equaliser wings flanking the wordmark; corner brackets. Nothing
+in it is photographic, so the PNG is a few hundred kilobytes instead of the
+collage's four megabytes, and nothing is random at render time — the same plan
+always produces the same bytes.
+
+The renderer is expressed as a **drawing plan** (a list of primitives) with two
+backends: Pillow, and an SVG writer. `--render` writes the 4K PNG, `--svg`
+writes `assets/monarch-splash.svg`, and both come from the same list, so the
+committed design cannot drift from the installed pixels. Rendering needs
+Pillow, which is why the PNG is committed beside the SVG: `--check` and
+`--apply` are stdlib-only and work on a host with no rasterizer at all.
 
 USAGE
 -----
     python3 scripts/jellyfin-splash.py --check        # report only (default)
     python3 scripts/jellyfin-splash.py --apply        # install + point branding at it
-    python3 scripts/jellyfin-splash.py --render       # re-render assets/*.png (needs Pillow)
+    python3 scripts/jellyfin-splash.py --render       # re-render assets/monarch-splash.png (needs Pillow)
+    python3 scripts/jellyfin-splash.py --svg          # rewrite assets/monarch-splash.svg
     python3 scripts/jellyfin-splash.py --apply --variant light
 
 Runs on a host that mounts the media host's appdata (`APPDATA`, default
 `/docker/appdata`), or inside a container that has it. Paths:
 
-    asset           assets/gizmo/gizmo-splash-dark-3840.png   (this repo)
+    asset           assets/monarch-splash.png                 (this repo, 3840×2160)
     config          $APPDATA/jellyfin/branding.xml            (Jellyfin's /config)
-    installed       $APPDATA/jellyfin/data/data/gizmo-splash.png
-                    recorded in branding.xml as /config/data/data/gizmo-splash.png
+    installed       $APPDATA/jellyfin/data/data/monarch-splash.png
+                    recorded in branding.xml as /config/data/data/monarch-splash.png
                     (the *container* path Jellyfin resolves, not the host one)
 
-The product is Gizmo, so the splash a client sees is Gizmo's: the 4K dark draw
-from `assets/gizmo/` (regenerate it with `assets/gizmo/render.py`), installed at
-4K because a TV client upscales 1080p visibly on a 4K panel. The Monarch design
-below is the renderer that produced the earlier artwork (`--render` still writes
-`assets/monarch-splash*.png`), kept because its geometry is pinned against the
-SVG by the test suite.
+The installed draw is 4K because a TV client upscales 1080p visibly on a 4K
+panel, and because the same file is what a 4K web session paints behind the
+login card.
 
 Exit codes: 0 = the branded splash is installed and wired; 1 = it is not (a
 finding is printed); 2 = cannot run (no asset and no Pillow, or no appdata).
@@ -76,6 +90,7 @@ finding is printed); 2 = cannot run (no asset and no Pillow, or no appdata).
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import struct
@@ -86,97 +101,78 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ASSET_DIR = REPO_ROOT / "assets"
 
-# The design. Every value here is the SVG's (`assets/monarch-splash.svg` for the
-# dark variant, `-light` for the other) — the test suite reads the SVG back and
-# fails when these stop matching, so they are not free parameters.
+# The design is laid out on a 1920×1080 grid and rendered at 2× (4K). Every
+# coordinate below is in that grid.
+WIDTH, HEIGHT = 1920, 1080
+SCALE = 2
+SPLASH_SIZE = (WIDTH * SCALE, HEIGHT * SCALE)
+
+# Geometry, shared by both variants and by both backends. Counts are here rather
+# than inline because the tests pin them: the motif is a measurement instrument
+# as much as a picture, and a missing tick row is a design change, not a detail.
+GEOMETRY = {
+    "emblem": {"cx": 960, "cy": 372, "r": 150, "blades": 12, "rays": 48},
+    "rings": (214, 236, 296, 326),
+    "ticks": {"r0": 244, "r1": 274, "long_to": 288, "count": 72, "long_every": 6},
+    "orbits": ((430, 168, -15.0), (468, 206, 21.0)),
+    "filmstrip": {"rows": (40, 1040), "pitch": 72, "hole": (28, 14), "radius": 4},
+    "wave": {"left": 352, "right": 1568, "bars": 21, "pitch": 13, "base": 878,
+             "height": 74},
+    "brackets": {"inset": 60, "arm": 92},
+    "stars": 170,
+    "sparkles": 9,
+}
+
+# Per-variant paint. `gold` is the gradient used for the emblem's play mark and
+# the wordmark accents; `line` is every hairline; the alphas scale each layer's
+# weight so the light theme is the same drawing in engraver's ink, not a filter.
 DESIGN = {
     "dark": {
         "asset": "monarch-splash.png",
-        "bg": ((0.0, "#08090b"), (0.52, "#111316"), (1.0, "#070809")),
-        "glow": {
-            "colour": "#d8b56d", "alpha": 0.12, "fade": "#8e6b36", "fade_alpha": 0.035,
-            "cx": 960, "cy": 430, "rx": 570, "ry": 450,
+        "svg": "monarch-splash.svg",
+        "bg": ((0.0, "#06070a"), (0.52, "#101319"), (1.0, "#04050a")),
+        "bloom": ("#d8b56d", 0.12),
+        "bloom_cool": ("#3d5b91", 0.10),
+        "gold": ((0.0, "#f8e3ab"), (0.42, "#e2c07a"), (0.72, "#caa35d"), (1.0, "#8a6733")),
+        "line": "#d8b56d",
+        "ink": "#f6f1e6",
+        "mid": "#cfae73",
+        "muted": "#9d988e",
+        "alphas": {
+            "rings": 0.30, "ticks": 0.30, "orbits": 0.20, "filmstrip": 0.16,
+            "stars": 0.62, "sparkles": 0.70, "wave": 0.62, "brackets": 0.42,
+            "rays": 0.34, "blades": 0.12, "play_glow": 0.10,
         },
-        "rings": {"colour": "#caa35d", "alpha": 0.18, "cy": 420, "radii": (290, 370)},
-        "rules": {"colour": "#caa35d", "alpha": 0.5, "rows": (124, 956), "spans": ((160, 540), (1380, 1760))},
-        "dots": {"colour": "#d8b56d", "r": 3, "points": ((560, 124), (1360, 124), (560, 956), (1360, 956))},
-        "monogram": {
-            "cx": 960, "cy": 365,
-            "halo": {"colour": "#d8b56d", "alpha": 0.07, "r": 190, "blur": 26},
-            "ring_outer": {"gradient": True, "width": 2, "alpha": 0.9, "r": 142},
-            "ring_inner": {"colour": "#caa35d", "width": 1, "alpha": 0.3, "r": 129},
-            "bars": {"colour": "#f2d99a", "width": 7, "from_y": 92, "to_y": -67, "xs": (-12, 12)},
-            # Each wing is the left-hand cubic; the right one is its mirror, which
-            # is how the SVG spells it out (M-8 -58… / M8 -58… are mirror images).
-            "wings": [
-                {"width": 9, "gradient": True, "alpha": 1.0,
-                 "path": ((-8, -58), (-56, -114), (-87, -122), (-110, -99)),
-                 "mirror": True},
-                {"width": 8, "colour": "#caa35d", "alpha": 1.0,
-                 "path": ((-18, 15), (-89, 65), (-111, 93), (-83, 106)), "mirror": True},
-            ],
-            "antennae": {"colour": "#f2d99a", "width": 3,
-                         "path": ((-6, -75), (-28, -111), (-39, -126), (-59, -139))},
-            "antenna_dots": {"colour": "#f2d99a", "r": 4, "points": ((-61, -141), (61, -141))},
-        },
-        "text": [
-            {"string": "MONARCH", "y": 690, "size": 108, "tracking": 25,
-             "colour": "#f5f0e4", "font": "serif"},
-            {"string": "MEDIA PLATFORM", "y": 765, "size": 22, "tracking": 12,
-             "colour": "#d8b56d", "font": "sans-semibold"},
-            {"string": "YOUR LIBRARY · BEAUTIFULLY ORGANIZED", "y": 872, "size": 20,
-             "tracking": 6, "colour": "#aaa69d", "font": "sans"},
-        ],
-        "text_rule": {"y": 816, "x": (780, 1140), "colour": "#caa35d", "width": 1},
     },
     "light": {
         "asset": "monarch-splash-light.png",
-        "bg": ((0.0, "#faf7ef"), (1.0, "#ebe3d2")),
-        "glow": {"colour": "#caa35d", "alpha": 0.08, "fade": "#caa35d", "fade_alpha": 0.0,
-                 "cx": 960, "cy": 410, "rx": 330, "ry": 330},
-        "rings": {"colour": "#8e6b36", "alpha": 0.42, "cy": 410, "radii": (290, 370)},
-        "rules": {"colour": "#8e6b36", "alpha": 0.0, "rows": (), "spans": ()},
-        "dots": {"colour": "#8e6b36", "r": 0, "points": ()},
-        "monogram": {
-            "cx": 960, "cy": 365,
-            "halo": {"colour": "#caa35d", "alpha": 0.0, "r": 190, "blur": 26},
-            "ring_outer": {"gradient": True, "width": 2, "alpha": 1.0, "r": 142},
-            "ring_inner": {"colour": "#8e6b36", "width": 0, "alpha": 0.0, "r": 129},
-            "bars": {"colour": "#8e6b36", "width": 7, "from_y": 88, "to_y": -70, "xs": (-10, 10)},
-            "wings": [
-                {"width": 9, "gradient": True, "alpha": 1.0,
-                 "path": ((-8, -58), (-58, -115), (-88, -122), (-112, -98)), "mirror": True},
-                {"width": 9, "gradient": True, "alpha": 1.0,
-                 "path": ((-18, 15), (-90, 65), (-110, 94), (-82, 106)), "mirror": True},
-            ],
-            "antennae": {"colour": "#8e6b36", "width": 3,
-                         "path": ((-7, -75), (-30, -112), (-40, -126), (-60, -139))},
-            "antenna_dots": {"colour": "#8e6b36", "r": 4, "points": ((-61, -141), (61, -141))},
+        "svg": "monarch-splash-light.svg",
+        "bg": ((0.0, "#fbf8f0"), (1.0, "#ece3d1")),
+        "bloom": ("#caa35d", 0.10),
+        "bloom_cool": ("#caa35d", 0.0),
+        "gold": ((0.0, "#6e5228"), (0.5, "#a9854a"), (1.0, "#6e5228")),
+        "line": "#8e6b36",
+        "ink": "#221f1a",
+        "mid": "#8e6b36",
+        "muted": "#6c655a",
+        "alphas": {
+            "rings": 0.55, "ticks": 0.38, "orbits": 0.26, "filmstrip": 0.12,
+            "stars": 0.30, "sparkles": 0.38, "wave": 0.50, "brackets": 0.55,
+            "rays": 0.34, "blades": 0.10, "play_glow": 0.0,
         },
-        "text": [
-            {"string": "MONARCH", "y": 690, "size": 108, "tracking": 25,
-             "colour": "#25231f", "font": "serif"},
-            {"string": "MEDIA PLATFORM", "y": 765, "size": 22, "tracking": 12,
-             "colour": "#8e6b36", "font": "sans-semibold"},
-            {"string": "YOUR LIBRARY · BEAUTIFULLY ORGANIZED", "y": 872, "size": 20,
-             "tracking": 6, "colour": "#70695f", "font": "sans"},
-        ],
-        "text_rule": {"y": 816, "x": (780, 1140), "colour": "#caa35d", "width": 1},
     },
 }
 
-# The gold used for the monogram's gradient strokes (both variants name their own
-# stops in their SVG; the dark one is shared with the wordmark accents).
-GOLD = {
-    "dark": ((0.0, "#f2d99a"), (0.48, "#caa35d"), (1.0, "#8e6b36")),
-    "light": ((0.0, "#8e6b36"), (0.5, "#caa35d"), (1.0, "#6e5228")),
-}
+# Text runs, baseline-relative, in the 1920×1080 grid.
+TEXT = (
+    {"string": "MONARCH", "y": 812, "size": 104, "tracking": 26,
+     "colour": "ink", "font": "serif"},
+    {"string": "FILM · SERIES · LIVE TELEVISION", "y": 866, "size": 21,
+     "tracking": 11, "colour": "mid", "font": "sans-semibold"},
+    {"string": "EVERY FRAME, IN ITS PLACE", "y": 936, "size": 17,
+     "tracking": 9, "colour": "muted", "font": "sans"},
+)
 
-WIDTH, HEIGHT = 1920, 1080
-
-# Georgia is not on a Linux host and DejaVu is; the SVG names a family chain, so
-# the first available of each kind is the faithful-enough substitute. Override
-# with --font-serif/--font-sans when a host has better ones.
 FONTS = {
     "serif": ("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
               "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
@@ -190,12 +186,8 @@ FONTS = {
 }
 
 BRANDING_FILE = "branding.xml"
-# The splash this deployment shows (`docs/unified.md`), and what gets checked
-# against what is installed. WAS `monarch-splash.png` at 1920×1080: that art is
-# still renderable, but it is no longer the product's face on the login screen.
-SPLASH_ASSET = ASSET_DIR / "gizmo" / "gizmo-splash-dark-3840.png"
-SPLASH_SIZE = (3840, 2160)
-INSTALLED_NAME = "gizmo-splash.png"
+SPLASH_ASSET = ASSET_DIR / "monarch-splash.png"
+INSTALLED_NAME = "monarch-splash.png"
 # The path recorded in branding.xml is resolved by the *server*, i.e. inside the
 # Jellyfin container, where the appdata mount is /config and the data dir is
 # {config}/data/data — the directory the generated collage and jellyfin.db live
@@ -252,7 +244,7 @@ def same_bytes(a: Path, b: Path) -> bool:
         return False
 
 
-# ── the renderer (Pillow only; --check and --apply never import it) ─────────
+# ── colours ─────────────────────────────────────────────────────────────────
 
 def _rgb(colour: str) -> tuple[int, int, int]:
     colour = colour.lstrip("#")
@@ -270,28 +262,302 @@ def _lerp_stops(stops, t: float) -> tuple[float, float, float]:
     return tuple(float(c) for c in _rgb(stops[-1][1]))
 
 
-def _cubic(points, steps: int = 40):
-    """Sample one cubic `<path>` segment into (x, y) points."""
-    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = points
-    out = []
+def _gradient_at(stops, t: float) -> str:
+    return "#%02x%02x%02x" % tuple(int(c) for c in _lerp_stops(stops, t))
+
+
+# ── the drawing plan ────────────────────────────────────────────────────────
+
+def _lcg(seed: int):
+    """A tiny deterministic generator (no `random` state, no host entropy)."""
+    state = seed & 0xFFFFFFFF
+
+    def nxt() -> float:
+        nonlocal state
+        state = (1103515245 * state + 12345) & 0x7FFFFFFF
+        return state / 0x7FFFFFFF
+
+    return nxt
+
+
+def _rotated_ellipse(cx: float, cy: float, rx: float, ry: float, angle: float,
+                     steps: int = 180):
+    cos_a, sin_a = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    points = []
     for index in range(steps + 1):
-        t = index / steps
-        u = 1 - t
-        out.append((
-            u ** 3 * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t ** 3 * x3,
-            u ** 3 * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t ** 3 * y3,
-        ))
-    return out
+        t = 2 * math.pi * index / steps
+        x, y = rx * math.cos(t), ry * math.sin(t)
+        points.append((cx + x * cos_a - y * sin_a, cy + x * sin_a + y * cos_a))
+    return points
 
 
-def _draw_polyline(draw, points, colour, width: int) -> None:
-    if width <= 0 or len(points) < 2:
-        return
-    draw.line([(round(x), round(y)) for x, y in points], fill=colour, width=width, joint="curve")
+def _aperture_blades(cx: float, cy: float, r_in: float, r_out: float, count: int):
+    """The iris: `count` wedges, each an arc at `r_in` closed out to `r_out`."""
+    blades = []
+    for index in range(count):
+        a0 = 2 * math.pi * index / count - math.pi / 2
+        a1 = 2 * math.pi * (index + 1) / count - math.pi / 2
+        inner = [(cx + r_in * math.cos(a0 + (a1 - a0) * k / 8),
+                  cy + r_in * math.sin(a0 + (a1 - a0) * k / 8)) for k in range(9)]
+        outer = [(cx + r_out * math.cos(a1 - (a1 - a0) * k / 8),
+                  cy + r_out * math.sin(a1 - (a1 - a0) * k / 8)) for k in range(9)]
+        blades.append(inner + outer)
+    return blades
 
 
-def render(variant: str, out_path: Path, font_serif: str = "", font_sans: str = "") -> Path:
-    """Render the design to `out_path`. Needs Pillow (and a font) on this host."""
+def build_plan(variant: str) -> list[dict]:
+    """Every primitive, in paint order. Both backends draw this list verbatim."""
+    design = DESIGN[variant]
+    geo = GEOMETRY
+    alpha = design["alphas"]
+    emblem = geo["emblem"]
+    cx, cy, r = emblem["cx"], emblem["cy"], emblem["r"]
+    ops: list[dict] = []
+
+    # Two washes: warm behind the emblem, a cool one low-left for depth.
+    ops.append({"t": "bloom", "cx": cx, "cy": cy - 30, "rx": 760, "ry": 620,
+                "colour": design["bloom"][0], "alpha": design["bloom"][1]})
+    if design["bloom_cool"][1] > 0:
+        ops.append({"t": "bloom", "cx": 250, "cy": 1010, "rx": 720, "ry": 540,
+                    "colour": design["bloom_cool"][0], "alpha": design["bloom_cool"][1]})
+
+    # Star field, then the handful of four-point sparkles that read at TV
+    # distance. Seeded, so a re-render is byte-identical.
+    rand = _lcg(20261029)
+    for _ in range(geo["stars"]):
+        x, y = rand() * WIDTH, rand() * HEIGHT
+        radius = 0.45 + rand() * 1.35
+        ops.append({"t": "dot", "cx": x, "cy": y, "r": radius,
+                    "colour": design["line"], "alpha": alpha["stars"] * (0.35 + rand() * 0.65)})
+    rand = _lcg(971)
+    for _ in range(geo["sparkles"]):
+        x, y = 120 + rand() * (WIDTH - 240), 120 + rand() * (HEIGHT - 240)
+        size = 4 + rand() * 6
+        a = alpha["sparkles"] * (0.5 + rand() * 0.5)
+        for dx, dy in ((size, 0), (-size, 0), (0, size), (0, -size)):
+            ops.append({"t": "line", "x0": x - dx, "y0": y - dy, "x1": x + dx,
+                        "y1": y + dy, "colour": design["line"], "width": 1, "alpha": a})
+        ops.append({"t": "dot", "cx": x, "cy": y, "r": 1.4,
+                    "colour": design["line"], "alpha": min(1.0, a * 1.6)})
+
+    # Film-strip bands: the media motif at the very top and bottom edge.
+    strip = geo["filmstrip"]
+    hole_w, hole_h = strip["hole"]
+    for row in strip["rows"]:
+        for x in range(strip["pitch"] // 2, WIDTH + strip["pitch"], strip["pitch"]):
+            ops.append({"t": "round_rect", "x0": x - hole_w / 2, "y0": row - hole_h / 2,
+                        "x1": x + hole_w / 2, "y1": row + hole_h / 2,
+                        "radius": strip["radius"], "stroke": design["line"],
+                        "width": 1, "alpha": alpha["filmstrip"]})
+        ops.append({"t": "line", "x0": 0, "y0": row + 26, "x1": WIDTH, "y1": row + 26,
+                    "colour": design["line"], "width": 1, "alpha": alpha["filmstrip"] * 0.5})
+
+    # Corner brackets: two strokes and a diamond, at all four corners.
+    inset, arm = geo["brackets"]["inset"], geo["brackets"]["arm"]
+    for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+        x = inset if sx > 0 else WIDTH - inset
+        y = inset + 14 if sy > 0 else HEIGHT - inset - 14
+        ops.append({"t": "line", "x0": x, "y0": y, "x1": x, "y1": y + sy * arm,
+                    "colour": design["line"], "width": 2, "alpha": alpha["brackets"]})
+        ops.append({"t": "line", "x0": x, "y0": y, "x1": x + sx * arm, "y1": y,
+                    "colour": design["line"], "width": 2, "alpha": alpha["brackets"]})
+        ops.append({"t": "line", "x0": x + sx * 8, "y0": y + sy * 8,
+                    "x1": x + sx * (arm * 0.6), "y1": y + sy * 8,
+                    "colour": design["line"], "width": 1, "alpha": alpha["brackets"] * 0.6})
+        ops.append({"t": "line", "x0": x + sx * 8, "y0": y + sy * 8,
+                    "x1": x + sx * 8, "y1": y + sy * (arm * 0.6),
+                    "colour": design["line"], "width": 1, "alpha": alpha["brackets"] * 0.6})
+        ops.append({"t": "diamond", "cx": x + sx * 12, "cy": y + sy * 12, "r": 4,
+                    "colour": design["line"], "alpha": alpha["brackets"]})
+
+    # Orbit paths and their satellites, drawn under the bezel.
+    for index, (rx, ry, angle) in enumerate(geo["orbits"]):
+        ops.append({"t": "polyline", "points": _rotated_ellipse(cx, cy, rx, ry, angle),
+                    "stroke": design["line"], "width": 1,
+                    "alpha": alpha["orbits"] * (1.0 if index == 0 else 0.65)})
+        sx = cx + rx * math.cos(math.radians(angle + 32))
+        sy = cy + ry * math.sin(math.radians(angle + 32))
+        ops.append({"t": "dot", "cx": sx, "cy": sy, "r": 3.2,
+                    "colour": design["mid"], "alpha": min(1.0, alpha["orbits"] * 3.2)})
+
+    # The bezel: four rings, the 72-tick measurement band, and a ray crown.
+    for index, radius in enumerate(geo["rings"]):
+        ops.append({"t": "circle", "cx": cx, "cy": cy, "r": radius,
+                    "stroke": design["line"], "width": 1,
+                    "alpha": alpha["rings"] * (1.0 if index < 2 else 0.55)})
+    ticks = geo["ticks"]
+    for index in range(ticks["count"]):
+        angle = 2 * math.pi * index / ticks["count"] - math.pi / 2
+        outer = ticks["long_to"] if index % ticks["long_every"] == 0 else ticks["r1"]
+        ops.append({"t": "line",
+                    "x0": cx + ticks["r0"] * math.cos(angle),
+                    "y0": cy + ticks["r0"] * math.sin(angle),
+                    "x1": cx + outer * math.cos(angle),
+                    "y1": cy + outer * math.sin(angle),
+                    "colour": design["line"], "width": 1, "alpha": alpha["ticks"]})
+    for index in range(emblem["rays"]):
+        angle = 2 * math.pi * index / emblem["rays"] - math.pi / 2
+        inner = 334 if index % 2 == 0 else 338
+        outer = 350 if index % 2 == 0 else 344
+        ops.append({"t": "line",
+                    "x0": cx + inner * math.cos(angle), "y0": cy + inner * math.sin(angle),
+                    "x1": cx + outer * math.cos(angle), "y1": cy + outer * math.sin(angle),
+                    "colour": design["line"], "width": 1, "alpha": alpha["rays"]})
+
+    # The iris: soft halo, twelve blades, inner rings, the play mark.
+    if alpha["play_glow"] > 0:
+        ops.append({"t": "glow", "cx": cx, "cy": cy, "r": r * 1.35,
+                    "colour": design["gold"][1][1], "alpha": alpha["play_glow"]})
+    for index, blade in enumerate(_aperture_blades(cx, cy, 96, r, emblem["blades"])):
+        ops.append({"t": "polygon", "points": blade, "fill": design["gold"][2][1],
+                    "alpha": alpha["blades"] * (1.0 if index % 2 == 0 else 0.5)})
+    ops.append({"t": "circle", "cx": cx, "cy": cy, "r": r, "stroke": design["gold"][1][1],
+                "width": 2, "alpha": 0.95})
+    ops.append({"t": "circle", "cx": cx, "cy": cy, "r": r - 8, "stroke": design["line"],
+                "width": 1, "alpha": 0.45})
+    ops.append({"t": "circle", "cx": cx, "cy": cy, "r": 92, "stroke": design["line"],
+                "width": 1, "alpha": 0.55})
+    ops.append({"t": "circle", "cx": cx, "cy": cy, "r": 84, "stroke": design["line"],
+                "width": 1, "alpha": 0.22})
+
+    # The play mark: a triangle with a darker lower facet for depth.
+    play = [(cx - 30, cy - 44), (cx + 52, cy), (cx - 30, cy + 44)]
+    ops.append({"t": "polygon", "points": play, "fill": design["gold"][0][1],
+                "alpha": 1.0})
+    ops.append({"t": "polygon",
+                "points": [(cx - 30, cy - 4), (cx + 52, cy), (cx - 30, cy + 44)],
+                "fill": design["gold"][2][1], "alpha": 0.55})
+    ops.append({"t": "polyline", "points": play + [play[0]], "stroke": design["gold"][-1][1],
+                "width": 2, "alpha": 0.9})
+
+    # Equaliser wings flanking the wordmark: mirrored bars, tallest inboard.
+    wave = geo["wave"]
+    for side in (-1, 1):
+        for index in range(wave["bars"]):
+            x = (wave["left"] if side < 0 else wave["right"]) + side * index * wave["pitch"]
+            k = 1 - index / wave["bars"]
+            height = wave["height"] * (0.18 + 0.82 * abs(math.sin((index + 1) * 0.62))) * (0.35 + 0.65 * k)
+            ops.append({"t": "line", "x0": x, "y0": wave["base"], "x1": x,
+                        "y1": wave["base"] - height, "colour": design["line"],
+                        "width": 3, "alpha": alpha["wave"] * (0.45 + 0.55 * k)})
+            if index % 4 == 0:
+                ops.append({"t": "dot", "cx": x, "cy": wave["base"] - height - 6, "r": 2,
+                            "colour": design["line"], "alpha": alpha["wave"] * 0.8})
+
+    # Rules above and below the strapline, with end ticks.
+    for y, half, a in ((900, 210, 0.65), (958, 130, 0.30)):
+        ops.append({"t": "line", "x0": cx - half, "y0": y, "x1": cx + half, "y1": y,
+                    "colour": design["line"], "width": 1, "alpha": a})
+        for end in (-half, half):
+            ops.append({"t": "line", "x0": cx + end, "y0": y - 5, "x1": cx + end, "y1": y + 5,
+                        "colour": design["line"], "width": 1, "alpha": a})
+
+    # Text last: it must never be crossed by a hairline.
+    for spec in TEXT:
+        ops.append({"t": "text", "string": spec["string"], "x": cx, "y": spec["y"],
+                    "size": spec["size"], "tracking": spec["tracking"],
+                    "colour": design[spec["colour"]], "font": spec["font"]})
+    return ops
+
+
+# ── SVG backend ─────────────────────────────────────────────────────────────
+
+def _svg_paint(op: dict) -> str:
+    if op.get("fill"):
+        return f'fill="{op["fill"]}" stroke="none"'
+    return f'stroke="{op["stroke"]}" fill="none" stroke-width="{max(1, round(op["width"]))}"'
+
+
+def svg(variant: str) -> str:
+    """The committed design-of-record, drawn from the same plan as the PNG."""
+    design = DESIGN[variant]
+    ops = build_plan(variant)
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" '
+        f'viewBox="0 0 {WIDTH} {HEIGHT}" role="img" aria-labelledby="title desc">',
+        '  <title id="title">Monarch Media</title>',
+        '  <desc id="desc">Celestial Cinema: an aperture iris closing on a golden play mark, '
+        'inside a tick bezel and orbit paths, over an obsidian starfield with film-strip '
+        'perforations and equaliser wings.</desc>',
+        "  <defs>",
+        '    <linearGradient id="field" x1="0" y1="0" x2="1" y2="1">'
+        + "".join(f'<stop offset="{o}" stop-color="{c}"/>' for o, c in design["bg"])
+        + "</linearGradient>",
+        '    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">'
+        + "".join(f'<stop offset="{o}" stop-color="{c}"/>' for o, c in design["gold"])
+        + "</linearGradient>",
+        "  </defs>",
+        f'  <rect width="{WIDTH}" height="{HEIGHT}" fill="url(#field)"/>',
+    ]
+    bloom_index = 0
+    bloom_defs: list[str] = []
+    for op in ops:
+        a = round(op.get("alpha", 1.0), 3)
+        if op["t"] == "bloom":
+            bloom_index += 1
+            bloom_defs.append(
+                f'    <radialGradient id="bloom{bloom_index}">'
+                f'<stop stop-color="{op["colour"]}" stop-opacity="{a}"/>'
+                f'<stop offset="1" stop-color="{op["colour"]}" stop-opacity="0"/>'
+                "</radialGradient>")
+            lines.append(f'  <ellipse cx="{op["cx"]:.0f}" cy="{op["cy"]:.0f}" '
+                         f'rx="{op["rx"]:.0f}" ry="{op["ry"]:.0f}" fill="url(#bloom{bloom_index})"/>')
+        elif op["t"] == "glow":
+            lines.append(f'  <circle cx="{op["cx"]:.0f}" cy="{op["cy"]:.0f}" r="{op["r"]:.0f}" '
+                         f'fill="{op["colour"]}" opacity="{a}" filter="blur(24)"/>')
+        elif op["t"] == "dot":
+            lines.append(f'  <circle cx="{op["cx"]:.1f}" cy="{op["cy"]:.1f}" '
+                         f'r="{op["r"]:.2f}" fill="{op["colour"]}" opacity="{a}"/>')
+        elif op["t"] == "circle":
+            lines.append(f'  <circle cx="{op["cx"]:.0f}" cy="{op["cy"]:.0f}" r="{op["r"]:.0f}" '
+                         f'stroke="{op["stroke"]}" fill="none" '
+                         f'stroke-width="{max(1, round(op["width"]))}" opacity="{a}"/>')
+        elif op["t"] == "line":
+            lines.append(f'  <line x1="{op["x0"]:.1f}" y1="{op["y0"]:.1f}" '
+                         f'x2="{op["x1"]:.1f}" y2="{op["y1"]:.1f}" '
+                         f'stroke="{op["colour"]}" stroke-width="{max(1, round(op["width"]))}" '
+                         f'opacity="{a}"/>')
+        elif op["t"] in ("polygon", "polyline"):
+            tag = "polygon" if op["t"] == "polygon" else "polyline"
+            points = " ".join(f"{x:.1f},{y:.1f}" for x, y in op["points"])
+            lines.append(f'  <{tag} points="{points}" {_svg_paint(op)} opacity="{a}"/>')
+        elif op["t"] == "round_rect":
+            lines.append(f'  <rect x="{op["x0"]:.1f}" y="{op["y0"]:.1f}" '
+                         f'width="{op["x1"] - op["x0"]:.1f}" height="{op["y1"] - op["y0"]:.1f}" '
+                         f'rx="{op["radius"]}" fill="none" stroke="{op["stroke"]}" '
+                         f'stroke-width="{max(1, round(op["width"]))}" opacity="{a}"/>')
+        elif op["t"] == "diamond":
+            x, y, d = op["cx"], op["cy"], op["r"]
+            lines.append(f'  <polygon points="{x:.1f},{y - d:.1f} {x + d:.1f},{y:.1f} '
+                         f'{x:.1f},{y + d:.1f} {x - d:.1f},{y:.1f}" '
+                         f'fill="{op["colour"]}" opacity="{a}"/>')
+        elif op["t"] == "text":
+            family = ("Georgia,Times New Roman,serif" if op["font"] == "serif"
+                      else "Inter,Segoe UI,Arial,sans-serif")
+            weight = "600" if op["font"] == "sans-semibold" else "400"
+            lines.append(f'  <text x="{op["x"]}" y="{op["y"]}" text-anchor="middle" '
+                         f'fill="{op["colour"]}" font-family="{family}" '
+                         f'font-size="{op["size"]}" font-weight="{weight}" '
+                         f'letter-spacing="{op["tracking"]}">{op["string"]}</text>')
+    lines[lines.index("  </defs>"):lines.index("  </defs>")] = bloom_defs
+    lines.append("</svg>")
+    return "\n".join(lines) + "\n"
+
+
+# ── Pillow backend ──────────────────────────────────────────────────────────
+
+def _font_path(kind: str, override: str) -> str:
+    path = override or next((p for p in FONTS[kind] if os.path.exists(p)), "")
+    if not path or not os.path.exists(path):
+        raise CannotRun(
+            f"no {kind} font found on this host (looked in {FONTS[kind]}); "
+            "pass --font-serif/--font-sans")
+    return path
+
+
+def render(variant: str, out_path: Path, font_serif: str = "", font_sans: str = "",
+           size: tuple[int, int] = SPLASH_SIZE) -> Path:
+    """Render the plan to `out_path` at `size` (default 4K). Needs Pillow."""
     try:
         from PIL import Image, ImageDraw, ImageFilter, ImageFont
     except ImportError as error:  # pragma: no cover - host without Pillow
@@ -301,148 +567,107 @@ def render(variant: str, out_path: Path, font_serif: str = "", font_sans: str = 
             "rasterizer.") from None
 
     design = DESIGN[variant]
-    gold = GOLD[variant]
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 255))
-    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    k = size[0] / WIDTH
+    if abs(size[1] / HEIGHT - k) > 1e-9:
+        raise CannotRun("the splash is 16:9; pass a size that keeps that ratio")
 
-    # Background: the SVG's 0,0 -> 1,1 object bounding box gradient. Built small
-    # and scaled up, because per-pixel work over 2M pixels in Python is not free
-    # and a smooth ramp survives bilinear scaling exactly.
+    def s(value: float) -> float:
+        return value * k
+
+    def w(value: float) -> int:
+        return max(1, int(round(value * k)))
+
+    image = Image.new("RGB", size, _rgb(design["bg"][0][1]))
+
+    # Background: sampled small, scaled up — a smooth ramp survives bilinear
+    # scaling, and per-pixel work over 8M pixels in Python does not.
     small = Image.new("RGB", (192, 108))
     for y in range(108):
         for x in range(192):
             t = (x / 191 + y / 107) / 2
             small.putpixel((x, y), tuple(int(c) for c in _lerp_stops(design["bg"], t)))
-    image.paste(small.resize((WIDTH, HEIGHT), Image.BILINEAR), (0, 0))
+    image.paste(small.resize(size, Image.BILINEAR), (0, 0))
 
-    glow = design["glow"]
-    if glow["alpha"] > 0:
-        layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-        halo = ImageDraw.Draw(layer)
-        r, g, b = _rgb(glow["colour"])
-        fade_r, fade_g, fade_b = _rgb(glow["fade"])
-        steps = 60
-        for index in range(steps, 0, -1):
-            k = index / steps
-            alpha = int(255 * (glow["alpha"] * (1 - k) + glow["fade_alpha"] * k))
-            if alpha <= 0:
-                continue
-            colour = (int(r + (fade_r - r) * k), int(g + (fade_g - g) * k),
-                      int(b + (fade_b - b) * k), alpha)
-            halo.ellipse(
-                (glow["cx"] - glow["rx"] * k, glow["cy"] - glow["ry"] * k,
-                 glow["cx"] + glow["rx"] * k, glow["cy"] + glow["ry"] * k),
-                fill=colour)
-        overlay = Image.alpha_composite(overlay, layer)
-        draw = ImageDraw.Draw(overlay)
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
 
-    rings = design["rings"]
-    if rings["alpha"] > 0:
-        ring_colour = (*_rgb(rings["colour"]), int(255 * rings["alpha"]))
-        for radius in rings["radii"]:
-            draw.ellipse((design["monogram"]["cx"] - radius, rings["cy"] - radius,
-                          design["monogram"]["cx"] + radius, rings["cy"] + radius),
-                         outline=ring_colour, width=1)
+    def paint(colour: str, alpha: float) -> tuple[int, int, int, int]:
+        r, g, b = _rgb(colour)
+        return (r, g, b, int(round(255 * min(max(alpha, 0.0), 1.0))))
 
-    rules = design["rules"]
-    if rules["alpha"] > 0 and rules["rows"]:
-        rule_colour = (*_rgb(rules["colour"]), int(255 * rules["alpha"]))
-        for row in rules["rows"]:
-            for start, end in rules["spans"]:
-                draw.line([(start, row), (end, row)], fill=rule_colour, width=1)
+    for op in build_plan(variant):
+        t = op["t"]
+        a = op.get("alpha", 1.0)
+        if t == "bloom":
+            layer = Image.new("RGBA", size, (0, 0, 0, 0))
+            halo = ImageDraw.Draw(layer)
+            colour = _rgb(op["colour"])
+            steps = 48
+            for index in range(steps, 0, -1):
+                f = index / steps
+                halo.ellipse((s(op["cx"] - op["rx"] * f), s(op["cy"] - op["ry"] * f),
+                              s(op["cx"] + op["rx"] * f), s(op["cy"] + op["ry"] * f)),
+                             fill=(*colour, int(255 * a * (1 - f) ** 1.6)))
+            overlay = Image.alpha_composite(overlay, layer)
+            draw = ImageDraw.Draw(overlay)
+        elif t == "glow":
+            layer = Image.new("RGBA", size, (0, 0, 0, 0))
+            ImageDraw.Draw(layer).ellipse(
+                (s(op["cx"] - op["r"]), s(op["cy"] - op["r"]),
+                 s(op["cx"] + op["r"]), s(op["cy"] + op["r"])),
+                fill=paint(op["colour"], a))
+            overlay = Image.alpha_composite(
+                overlay, layer.filter(ImageFilter.GaussianBlur(s(26))))
+            draw = ImageDraw.Draw(overlay)
+        elif t == "dot":
+            draw.ellipse((s(op["cx"] - op["r"]), s(op["cy"] - op["r"]),
+                          s(op["cx"] + op["r"]), s(op["cy"] + op["r"])),
+                         fill=paint(op["colour"], a))
+        elif t == "circle":
+            draw.ellipse((s(op["cx"] - op["r"]), s(op["cy"] - op["r"]),
+                          s(op["cx"] + op["r"]), s(op["cy"] + op["r"])),
+                         outline=paint(op["stroke"], a), width=w(op["width"]))
+        elif t == "line":
+            draw.line([(s(op["x0"]), s(op["y0"])), (s(op["x1"]), s(op["y1"]))],
+                      fill=paint(op["colour"], a), width=w(op["width"]))
+        elif t == "polygon":
+            draw.polygon([(s(x), s(y)) for x, y in op["points"]],
+                         fill=paint(op["fill"], a))
+        elif t == "polyline":
+            draw.line([(s(x), s(y)) for x, y in op["points"]],
+                      fill=paint(op["stroke"], a), width=w(op["width"]), joint="curve")
+        elif t == "round_rect":
+            draw.rounded_rectangle((s(op["x0"]), s(op["y0"]), s(op["x1"]), s(op["y1"])),
+                                   radius=s(op["radius"]), outline=paint(op["stroke"], a),
+                                   width=w(op["width"]))
+        elif t == "diamond":
+            x, y, d = op["cx"], op["cy"], op["r"]
+            draw.polygon([(s(x), s(y - d)), (s(x + d), s(y)),
+                          (s(x), s(y + d)), (s(x - d), s(y))], fill=paint(op["colour"], a))
 
-    dots = design["dots"]
-    for cx, cy in dots["points"] if dots["r"] else ():
-        draw.ellipse((cx - dots["r"], cy - dots["r"], cx + dots["r"], cy + dots["r"]),
-                     fill=(*_rgb(dots["colour"]), 255))
+    image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
-    monogram = design["monogram"]
-    cx, cy = monogram["cx"], monogram["cy"]
-
-    halo = monogram["halo"]
-    if halo["alpha"] > 0:
-        layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).ellipse(
-            (cx - halo["r"], cy - halo["r"], cx + halo["r"], cy + halo["r"]),
-            fill=(*_rgb(halo["colour"]), int(255 * halo["alpha"])))
-        overlay = Image.alpha_composite(overlay, layer.filter(ImageFilter.GaussianBlur(halo["blur"])))
-        draw = ImageDraw.Draw(overlay)
-
-    for key in ("ring_outer", "ring_inner"):
-        ring = monogram[key]
-        if ring["alpha"] <= 0 or ring["r"] <= 0:
-            continue
-        ring_colour = (*_rgb("#caa35d" if ring.get("gradient") else ring["colour"]),
-                       int(255 * ring["alpha"]))
-        draw.ellipse((cx - ring["r"], cy - ring["r"], cx + ring["r"], cy + ring["r"]),
-                     outline=ring_colour, width=ring["width"] or 1)
-
-    bars = monogram["bars"]
-    for offset in bars["xs"]:
-        draw.line([(cx + offset, cy + bars["from_y"]), (cx + offset, cy + bars["to_y"])],
-                  fill=(*_rgb(bars["colour"]), 255), width=bars["width"])
-
-    for wing in monogram["wings"]:
-        points = _cubic(wing["path"])
-        for mirrored in ((1,) if not wing["mirror"] else (1, -1)):
-            placed = [(cx + mirrored * x, cy + y) for x, y in points]
-            if wing.get("gradient"):
-                # The stroke follows the gold gradient along the path's own
-                # progress, which is what the SVG's gradient stroke does across
-                # the shape's bounding box (close enough at these widths).
-                for index in range(len(placed) - 1):
-                    t = index / (len(placed) - 1)
-                    colour = tuple(int(c) for c in _lerp_stops(gold, t))
-                    _draw_polyline(draw, placed[index:index + 2],
-                                   (*colour, int(255 * wing["alpha"])), wing["width"])
-            else:
-                _draw_polyline(draw, placed,
-                               (*_rgb(wing["colour"]), int(255 * wing["alpha"])), wing["width"])
-
-    antennae = monogram["antennae"]
-    for mirrored in (1, -1):
-        _draw_polyline(draw, [(cx + mirrored * x, cy + y) for x, y in _cubic(antennae["path"])],
-                       (*_rgb(antennae["colour"]), 255), antennae["width"])
-
-    adots = monogram["antenna_dots"]
-    for x, y in adots["points"]:
-        draw.ellipse((cx + x - adots["r"], cy + y - adots["r"],
-                      cx + x + adots["r"], cy + y + adots["r"]),
-                     fill=(*_rgb(adots["colour"]), 255))
-
-    image = Image.alpha_composite(image, overlay)
-
-    # Text last, over everything, each glyph placed with the SVG's letter-spacing.
-    text_layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    # Text: each glyph placed with the SVG's tracking, so the PNG and the SVG
+    # centre the same way.
+    text_layer = Image.new("RGBA", size, (0, 0, 0, 0))
     text_draw = ImageDraw.Draw(text_layer)
-    for spec in design["text"]:
-        if spec["font"] == "serif":
-            path = font_serif or next((p for p in FONTS["serif"] if os.path.exists(p)), "")
-        else:
-            path = font_sans or next((p for p in FONTS[spec["font"]] if os.path.exists(p)), "")
-        if not path or not os.path.exists(path):
-            raise CannotRun(
-                f"no {spec['font']} font found on this host (looked in "
-                f"{FONTS[spec['font']]}); pass --font-serif/--font-sans")
-        font = ImageFont.truetype(path, spec["size"])
-        advances = [text_draw.textlength(ch, font=font) for ch in spec["string"]]
-        total = sum(advances) + spec["tracking"] * (len(spec["string"]) - 1)
-        x = (WIDTH - total) / 2
-        for ch, advance in zip(spec["string"], advances):
-            text_draw.text((x, spec["y"]), ch, font=font, fill=(*_rgb(spec["colour"]), 255),
+    for op in build_plan(variant):
+        if op["t"] != "text":
+            continue
+        path = _font_path(op["font"], font_serif if op["font"] == "serif" else font_sans)
+        font = ImageFont.truetype(path, int(round(op["size"] * k)))
+        tracking = op["tracking"] * k
+        advances = [text_draw.textlength(ch, font=font) for ch in op["string"]]
+        total = sum(advances) + tracking * (len(op["string"]) - 1)
+        x = s(op["x"]) - total / 2
+        for ch, advance in zip(op["string"], advances):
+            text_draw.text((x, s(op["y"])), ch, font=font, fill=paint(op["colour"], 1.0),
                            anchor="ls")
-            x += advance + spec["tracking"]
-    image = Image.alpha_composite(image, text_layer)
-
-    rule = design["text_rule"]
-    if rule["width"] > 0:
-        ImageDraw.Draw(image).line(
-            [(rule["x"][0], rule["y"]), (rule["x"][1], rule["y"])],
-            fill=(*_rgb(rule["colour"]), 255), width=rule["width"])
+            x += advance + tracking
+    image = Image.alpha_composite(image.convert("RGBA"), text_layer).convert("RGB")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    image.convert("RGB").save(out_path, "PNG", optimize=True)
+    image.save(out_path, "PNG", optimize=True)
     return out_path
 
 
@@ -609,7 +834,6 @@ def apply(args) -> int:
 
 
 def restart_jellyfin(args) -> bool:
-    import json
     import urllib.request
 
     key = args.api_key
@@ -638,11 +862,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="report only (the default)")
     parser.add_argument("--apply", action="store_true", help="install the splash and point branding at it")
-    parser.add_argument("--render", action="store_true", help="re-render the asset from the design (needs Pillow)")
+    parser.add_argument("--render", action="store_true", help="re-render the 4K PNG (needs Pillow)")
+    parser.add_argument("--svg", action="store_true", help="rewrite the design-of-record SVG")
     parser.add_argument("--variant", choices=sorted(DESIGN), default="dark")
     parser.add_argument("--asset", default="",
-                        help="the PNG to install (default assets/gizmo/"
-                             "gizmo-splash-dark-3840.png; --render writes assets/<variant>.png)")
+                        help="the PNG to install (default assets/monarch-splash.png)")
     parser.add_argument("--appdata", default=os.environ.get("APPDATA", "/docker/appdata"))
     parser.add_argument("--data-path", default="", help="Jellyfin's data dir (default <appdata>/jellyfin/data/data)")
     parser.add_argument("--config-dir", default="", help="Jellyfin's config dir (default <appdata>/jellyfin)")
@@ -661,18 +885,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     appdata = Path(args.appdata)
-    # `--render` writes the design it is named for; everything else reads the
-    # deployed splash, which is Gizmo's.
-    render_target = Path(args.asset) if args.asset else ASSET_DIR / DESIGN[args.variant]["asset"]
+    asset_target = Path(args.asset) if args.asset else ASSET_DIR / DESIGN[args.variant]["asset"]
     args.asset = args.asset or str(SPLASH_ASSET)
     args.data_path = args.data_path or str(appdata / "jellyfin" / "data" / "data")
     args.config_dir = args.config_dir or str(appdata / "jellyfin")
     args.api_key_file = args.api_key_file or str(appdata / "init" / "jellyfin-api-key.txt")
 
     try:
+        if args.svg and not args.apply:
+            target = ASSET_DIR / DESIGN[args.variant]["svg"]
+            target.write_text(svg(args.variant), encoding="utf-8")
+            print(f"svg          {target}")
+            return 0
         if args.render and not args.apply:
-            render(args.variant, render_target, args.font_serif, args.font_sans)
-            print(f"rendered     {render_target}")
+            render(args.variant, asset_target, args.font_serif, args.font_sans)
+            print(f"rendered     {asset_target}")
             return 0
         if args.apply:
             code = apply(args)

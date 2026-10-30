@@ -166,6 +166,23 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Changed
 
+- **The login and TV splash is a new 4K design, and it is the same artwork Jellyfin
+  generates over.** `scripts/jellyfin-splash.py` now lays the splash out as a
+  primitive list and draws it twice: Pillow writes `assets/monarch-splash.png` at
+  3840×2160 (and the cream `-light` variant), an SVG backend writes
+  `assets/monarch-splash.svg` from the same list, so the design of record and
+  the installed pixels cannot disagree. The art is *Celestial Cinema* — seeded
+  star field, film-strip perforations, a twelve-blade aperture iris around a
+  golden play mark, a 72-tick bezel and 48-ray crown, two orbit paths, mirrored
+  equaliser wings — replacing the flat 1080p monogram. It is still a flat
+  drawing (hundreds of KB, not the collage's four megabytes), and it is installed
+  to both `SplashscreenLocation` and the `splashscreen.png` file
+  `SplashscreenPostScanTask` regenerates, so the web login screen and the TV
+  clients (which ask the same endpoint) get it. The collage file does get rebuilt
+  by the next scan (measured, not assumed), so `monarch-splash-guard.path` watches
+  it and `scripts/restore-splash-collage.sh` puts the design back when — and only
+  when — the bytes differ.
+
 - **The deployment is the *arr stack again; `core` is what is parked.** The merge
   was taken back on 2026-10-30: the twenty services that were behind
   `profiles: ["retired"]` are in the default set again (Sonarr, Radarr, Lidarr,

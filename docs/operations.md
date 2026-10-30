@@ -920,9 +920,11 @@ loopback-only now.
 
 #### The login screen's splash (Jellyfin branding)
 
-The obsidian/champagne splash in `assets/` is **Jellyfin's login screen**, and it
-is the one page every Cerulean identity sees before they have a session. It is not
-configuration, and nothing in the app's own UI can set it:
+The celestial-cinema splash in `assets/` is **Jellyfin's login screen**, and it
+is the one page every Cerulean identity sees before they have a session — and the
+same endpoint is what the TV clients (Android TV, Roku, Fire TV) draw on launch,
+because Jellyfin has exactly one splash setting. It is not configuration, and
+nothing in the app's own UI can set it:
 
 - Jellyfin *generates* the splash. `SplashscreenPostScanTask` builds a collage
   from up to 30 posters and 30 thumbnails and writes it to
@@ -944,21 +946,46 @@ configuration, and nothing in the app's own UI can set it:
   collage goes and watching which one came back from `/Branding/Splashscreen`.
 
 `python3 scripts/jellyfin-splash.py --check` judges all of it (asset committed
-and 1920×1080, file installed and identical, `SplashscreenEnabled=true`, the
+and 3840×2160, file installed and identical, `SplashscreenEnabled=true`, the
 recorded location equal to the one it installs to, and a file that exists where
 that location maps back through the appdata mount). `--apply` installs the
 committed PNG, replaces the generated collage, and points `branding.xml` at the
 custom path while **preserving the keys it does not own** (`LoginDisclaimer`,
 `CustomCss` — a wholesale rewrite drops them); `--apply --variant light` does the
-same with the cream variant, and `--render` regenerates the asset from
-`DESIGN` (needs Pillow, which is why the PNG is committed). Exit codes: 0 fine,
-1 a finding, 2 cannot run (no appdata, no asset and no Pillow).
+same with the cream variant. `--render` regenerates the 4K PNG and `--svg`
+rewrites the design of record, both from the same `build_plan()` (rendering
+needs Pillow, which is why the PNG is committed). Exit codes: 0 fine, 1 a
+finding, 2 cannot run (no appdata, no asset and no Pillow).
+
+The 2026-10 design (*Celestial Cinema*) is deliberately not a poster collage: a
+seeded star field and sparkles, film-strip perforations along the top and bottom
+edges, a twelve-blade aperture iris closed around a golden play mark, a 72-tick
+bezel with a 48-ray crown, two orbit paths with satellites, mirrored equaliser
+wings either side of the wordmark, and corner brackets. It is 4K because a TV
+upscales 1080p visibly on a 4K panel, and every coordinate is drawn from one
+primitive list, so the PNG and the SVG cannot disagree.
+
+The generated collage is the one part of this that undoes itself: a library scan
+rewrote `{DataPath}/splashscreen.png` back to a poster wall even with a custom
+location set (measured 2026-10-30 — the served image did not change, the file
+did). `monarch-splash-guard.path` watches that file and runs
+`scripts/restore-splash-collage.sh`, which copies the committed 4K draw back over
+it **only when the bytes differ**, so the fallback stays the design and the unit
+does not loop on its own write. Install it with the rest of the host units:
+
+```bash
+sudo install -m644 systemd/monarch-splash-guard.path systemd/monarch-splash-guard.service /etc/systemd/system/
+sudo install -m755 scripts/restore-splash-collage.sh /opt/monarch/scripts/
+sudo systemctl daemon-reload && sudo systemctl enable --now monarch-splash-guard.path
+```
 
 `scripts/drift-check.sh` runs `--check` read-only on the timer, and reports exit 2
 as a skip so a host running part of the group is not a drifted host. The design
-test (`scripts/tests/test_jellyfin_splash.py`) reads
-`assets/monarch-splash.svg`/`-light.svg` back and fails when `DESIGN` has drifted
-from the art, so changing the splash means changing both.
+test (`scripts/tests/test_jellyfin_splash.py`) renders the committed
+`assets/monarch-splash.svg`/`-light.svg` from the same plan and fails when they
+differ by a byte, and re-renders each PNG and compares it to the committed one,
+so changing the splash means re-running `--svg` and `--render` and committing
+the three files.
 
 ```bash
 python3 scripts/jellyfin-splash.py --check          # the drift check's half
