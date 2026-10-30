@@ -486,8 +486,15 @@ class NpmClient:
         """
         if host_id and not certificate_id and existing:
             certificate_id = existing.get("certificate_id") or 0
-        host_fields = host_fields or {"websockets": "websockets_support",
-                                      "caching": "caching"}
+        # The fallback is the CURRENT names, and `main()` always overrides it
+        # with the ones this server's schema advertises. It used to fall back to
+        # the pre-2.12 spellings (`websockets_support`, `caching`), which is not
+        # a harmless default: NPM >= 2.12 rejects unknown properties, so a caller
+        # that did not pass the schema-derived names got
+        # `data must NOT have additional properties` and wrote nothing — measured
+        # 2026-10-30 while repointing one row by hand.
+        host_fields = host_fields or {"websockets": "allow_websocket_upgrade",
+                                      "caching": "caching_enabled"}
         body = {
             "domain_names": [domain],
             "forward_scheme": "http",
