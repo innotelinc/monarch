@@ -168,6 +168,14 @@ DEAD = (
     "TVHeadend",
 )
 
+# Tiles whose status dot asks a different question from "does the page load".
+# The splash tile shows the image; the guard behind that image is what decides
+# whether it survives a library scan, and only the health service can answer
+# that - so this dot reads the guard, not the PNG.
+PING_OVERRIDES = {
+    "Splash (live)": "http://monarch-health:8003/splash/health",
+}
+
 # Any app still pointing at one of these names is stale by construction.
 STALE_SUFFIXES = (".monarch.local",)
 STALE_HOSTS = {
@@ -483,17 +491,20 @@ def ensure_apps(db) -> dict[str, str]:
     app_ids: dict[str, str] = {}
     for name, (href, icon_name, tooltip) in APPS.items():
         icon = ICON.format(name=icon_name)
+        # Usually the tile's own href doubles as its status probe; the splash tile
+        # is the exception, and PING_OVERRIDES says so.
+        ping = PING_OVERRIDES.get(name, href)
         row = existing.get(name)
         if row is None:
             app_id = nanoid()
             db.execute("INSERT INTO app (id, name, description, icon_url, href, ping_url) "
-                       "VALUES (?,?,?,?,?,?)", (app_id, name, tooltip, icon, href, href))
+                       "VALUES (?,?,?,?,?,?)", (app_id, name, tooltip, icon, href, ping))
             print(f"  added app: {name} -> {href}")
         else:
             app_id = row["id"]
-            if (row["href"], row["ping_url"], row["icon_url"]) != (href, href, icon):
+            if (row["href"], row["ping_url"], row["icon_url"]) != (href, ping, icon):
                 db.execute("UPDATE app SET href=?, ping_url=?, icon_url=?, description=? WHERE id=?",
-                           (href, href, icon, tooltip, app_id))
+                           (href, ping, icon, tooltip, app_id))
                 print(f"  updated app: {name} -> {href}")
         app_ids[name] = app_id
 

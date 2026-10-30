@@ -318,6 +318,29 @@ class DriftCheckAlerts(unittest.TestCase):
         self.assertIn("MONARCH_SPLASH_VARIANT=cream is not dark or light", res.stdout)
         self.assertNotIn("--variant cream", res.stderr)
 
+    # ── the board's tiles ───────────────────────────────────────────────
+    def test_a_tile_that_does_not_answer_is_a_finding(self):
+        """Nothing ever clicks the dashboard's links; this is the click.
+
+        A board database with one href on a closed port is the whole state, and the
+        check names the tile instead of editing a board.
+        """
+        import sqlite3
+
+        db = self.tmp / "board.sqlite"
+        connection = sqlite3.connect(db)
+        connection.execute("CREATE TABLE app (id TEXT PRIMARY KEY, name TEXT, "
+                           "description TEXT, icon_url TEXT, href TEXT, ping_url TEXT)")
+        connection.execute("INSERT INTO app (id, name, href) VALUES ('a', 'Onyx', ?)",
+                           (f"http://127.0.0.1:{dead_port()}/",))
+        connection.commit()
+        connection.close()
+
+        res = self.run_check(own_manifest=True, env={"HOMARR_DB": str(db)})
+        self.assertIn("homarr: a tile on the board does not answer", res.stderr)
+        self.assertIn("Onyx", res.stderr)
+        self.assertIn("cannot connect", res.stderr)
+
     # ── the rules ───────────────────────────────────────────────────────
     def test_a_staged_run_reports_and_stays_silent(self):
         res = self.run_check(own_manifest=False)

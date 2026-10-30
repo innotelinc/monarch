@@ -20,15 +20,18 @@ Jellyfin access uses the admin token exported by monarch-init on first boot
 (/docker/appdata/init/jellyfin-api-key.txt), falling back to JELLYFIN_API_KEY.
 """
 
+import hashlib
 import json
 import os
 import shutil
 import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -40,6 +43,22 @@ KEY_FILE = os.environ.get("JELLYFIN_API_KEY_FILE", "").strip()
 MEDIA_ROOT = os.environ.get("MEDIA_ROOT", "/data/media").rstrip("/")
 REPORT_FILE = os.environ.get("REPORT_FILE", "/app/data/analytics.json")
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "3600"))
+
+# The splash the media host serves, and what the drift check last judged of it.
+# All three paths are mounted read-only by docker-compose.yml: Jellyfin's config
+# (the branding store), its data dir (the collage a scan rewrites), and the state
+# directory `drift-check.sh` writes its splash/guard verdict into.
+#
+# This is a container, so it cannot ask systemd anything. The *unit's* state comes
+# from that verdict, and the *effect* the unit is supposed to have comes from the
+# files - which is the half that matters, because a unit can be active while the
+# data directory it watches has moved.
+SPLASH_STATUS_FILE = os.environ.get("SPLASH_STATUS_FILE", "/state/splash-status")
+JELLYFIN_CONFIG_DIR = os.environ.get("JELLYFIN_CONFIG_DIR", "/jellyfin")
+JELLYFIN_DATA_DIR = os.environ.get("JELLYFIN_DATA_DIR", "/jellyfin/data/data")
+# `SplashscreenLocation` is recorded as the path *Jellyfin* sees; this is the
+# appdata mount it resolves through, so the same string can be read here.
+JELLYFIN_CONTAINER_CONFIG = os.environ.get("JELLYFIN_CONTAINER_CONFIG", "/config")
 
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv",
                     ".ts", ".mpg", ".mpeg", ".flv", ".iso", ".m2ts"}
@@ -341,6 +360,117 @@ def services() -> dict:
         except Exception as exc:  # noqa: BLE001
             status[name] = {"up": False, "error": str(exc)}
     return {"services": status}
+
+
+# ---------------------------------------------------------------------------
+# The splash guard
+# ---------------------------------------------------------------------------
+
+
+def _kv_file(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}
+    return dict(line.split("=", 1) for line in lines if "=" in line)
+
+
+def _same_bytes(left: str, right: str) -> bool:
+    def digest(path: str) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    try:
+        return digest(left) == digest(right)
+    except OSError:
+        return False
+
+
+def splash_health() -> dict:
+    """Whether a client falling back to the generated collage gets the design.
+
+    Two halves, because they fail independently:
+
+      * the **file**: `{data}/splashscreen.png` - the one
+        `SplashscreenPostScanTask` rewrites after every scan - still carries the
+        installed splash. That is the guard's effect, and it is checkable here.
+      * the **guard**: whether the path unit that restores it is installed,
+        enabled and active. Only systemd knows; the answer is whatever
+        `drift-check.sh` last wrote, and a missing verdict is reported as
+        unknown rather than healthy - a guard nobody has checked is not proven.
+    """
+    reasons: list[str] = []
+    result: dict = {"ok": False, "guard": "unknown", "splash": "unknown",
+                    "checked": None, "installed": None, "fallback": None}
+
+    verdict = _kv_file(SPLASH_STATUS_FILE)
+    if verdict:
+        result["guard"] = verdict.get("guard", "unknown")
+        result["splash"] = verdict.get("splash", "unknown")
+        result["checked"] = verdict.get("checked")
+        for key in ("splash", "guard"):
+            if result[key] == "fail":
+                note = verdict.get(f"{key}_note") or f"drift-check reports the {key} failing"
+                reasons.append(note)
+    else:
+        reasons.append(f"no drift-check verdict at {SPLASH_STATUS_FILE} - the splash "
+                       "guard has not been judged on this host")
+
+    branding_path = os.path.join(JELLYFIN_CONFIG_DIR, "branding.xml")
+    location, enabled = "", False
+    try:
+        root = ET.parse(branding_path).getroot()
+        enabled = (root.findtext("SplashscreenEnabled") or "").strip().lower() == "true"
+        location = (root.findtext("SplashscreenLocation") or "").strip()
+    except (OSError, ET.ParseError):
+        reasons.append(f"cannot read {branding_path}")
+
+    installed = ""
+    mount = JELLYFIN_CONTAINER_CONFIG.rstrip("/") + "/"
+    if location.startswith(mount):
+        installed = os.path.join(JELLYFIN_CONFIG_DIR, location[len(mount):])
+    elif location:
+        installed = location
+    result["installed"] = os.path.basename(installed) or None
+
+    if not enabled:
+        reasons.append(f"{branding_path} has SplashscreenEnabled=false - the splash is "
+                       "switched off")
+    if not installed:
+        reasons.append(f"{branding_path} names no SplashscreenLocation - Jellyfin serves "
+                       "the image its own post-scan task generates")
+    elif not os.path.isfile(installed):
+        reasons.append(f"the recorded splash {location} is not at {installed} - Jellyfin does "
+                       "not report that, it serves the collage instead")
+
+    fallback = os.path.join(JELLYFIN_DATA_DIR, "splashscreen.png")
+    result["fallback"] = fallback
+    if not os.path.isfile(fallback):
+        reasons.append(f"{fallback} is missing - there is no fallback image at all")
+    elif installed and os.path.isfile(installed) and not _same_bytes(fallback, installed):
+        reasons.append(f"{fallback} is not the installed splash - a library scan rewrote it "
+                       "and nothing has put the design back")
+
+    result["reasons"] = reasons
+    result["ok"] = not reasons
+    return result
+
+
+@app.get("/splash/health")
+def splash_health_route():
+    """200 while the fallback image is the design and the guard is judged healthy.
+
+    Homarr's board reads exactly this for the status dot on the Splash (live)
+    tile, so both halves of the failure are visible on the dashboard rather than
+    only in `drift-check.sh`: red means a client falling back to the collage is
+    being shown a poster wall, or the unit that restores it was found broken.
+    """
+    result = splash_health()
+    return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
 
 
 threading.Thread(target=_run_scan_loop, daemon=True).start()

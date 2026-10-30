@@ -43,10 +43,15 @@ set -uo pipefail
 #       nothing is listening at all, up to DRIFT_JELLYFIN_BOOT_SEC if Docker says
 #       the container has just been started, which is what a recreate by
 #       watchtower looks like from here)
-#     - the login screen shows the deployment's splash: the 4K Gizmo draw is
-#       installed under the data dir and branding.xml names it, rather than the
-#       poster collage Jellyfin's own post-scan task regenerates
-#       (scripts/jellyfin-splash.py --check, read-only)
+#     - the login screen shows the deployment's splash: the draw branding.xml
+#       names is installed under the data dir, at the size and variant its name
+#       implies, rather than the poster collage Jellyfin's own post-scan task
+#       regenerates (scripts/jellyfin-splash.py --check, read-only)
+#     - the path unit that puts that file back after a scan is installed, enabled
+#       and active, and is watching a data dir that still holds the collage
+#       (scripts/check-splash-guard.sh, read-only)
+#   Homarr:
+#     - every tile on the board answers (scripts/check-board-tiles.py, read-only)
 #     - the app's own HTTPS listener is up on the Cerulean certificate for
 #       media.innotel.us: EnableHttps is on, the file behind CertificatePath is
 #       PKCS#12 and readable by the container's user, the served chain verifies
@@ -910,6 +915,42 @@ elif [ "$guard_code" -eq 2 ]; then
 else
   fail "jellyfin: nothing is restoring the splash collage after a library scan, so the fallback image reverts to a poster wall - install and enable monarch-splash-guard.path (systemd/ in this repo); see docs/operations.md"
   printf '%s\n' "$guard_out" | indent >&2
+fi
+
+# The two verdicts above are the only place the *unit's* state is known - it is
+# systemd's, and no container can read it. They are written where the health
+# service can read them (it mounts this state directory read-only), so the board's
+# Splash (live) tile can show a red dot when the guard is broken instead of only
+# looking like a poster wall to whoever clicks it. A staged run records nothing,
+# for the same reason it records no verdict: this is not its host.
+if [ "$STAGED" -eq 0 ] && [ -d "$STATE_DIR" ]; then
+  case "$splash_code" in 0) splash_state=ok ;; 2) splash_state=skip ;; *) splash_state=fail ;; esac
+  case "$guard_code" in 0) guard_state=ok ;; 2) guard_state=skip ;; *) guard_state=fail ;; esac
+  {
+    printf 'splash=%s\n' "$splash_state"
+    printf 'guard=%s\n' "$guard_state"
+    printf 'checked=%s\n' "$(date +%s)"
+    printf 'splash_note=%s\n' "$(printf '%s' "$splash_out" | tail -1)"
+    printf 'guard_note=%s\n' "$(printf '%s' "$guard_out" | tail -1)"
+  } > "$STATE_DIR/splash-status" 2>/dev/null || true
+fi
+
+# The dashboard is the front door, and its tiles are the only links anyone follows
+# without thinking - none of which is clicked by anything. Every dead one failed
+# silently: the board carried `*.monarch.local` hrefs for months, and a service
+# renamed at the edge leaves a tile that looks exactly like a healthy one. This
+# reads the board's own database (read-only) and asks each href for an answer; it
+# names the dead ones rather than editing a board. Exit 2 is "cannot look" (no
+# Homarr database here) and stays a note, like the checks above.
+board_out=$(python3 scripts/check-board-tiles.py 2>&1)
+board_code=$?
+if [ "$board_code" -eq 0 ]; then
+  say "ok: every tile on the Homarr board answers"
+elif [ "$board_code" -eq 2 ]; then
+  say "note: the board's tiles could not be checked (skipped) - $(printf '%s' "$board_out" | tail -1)"
+else
+  fail "homarr: a tile on the board does not answer - fix the href or remove the tile (scripts/seed-homarr-board.py owns the designed ones); see docs/operations.md"
+  printf '%s\n' "$board_out" | indent >&2
 fi
 
 # Jellyfin's own HTTPS listener is the other half of "this app is served over

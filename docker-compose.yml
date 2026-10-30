@@ -764,12 +764,21 @@ services:
       SCAN_INTERVAL: 3600
       MEDIA_ROOT: /data/media
       REPORT_FILE: /app/data/analytics.json
+      # The splash the board's Splash (live) tile reports on: Jellyfin's branding
+      # store and data dir (the collage a scan rewrites), plus the state directory
+      # drift-check writes its splash/guard verdict into. Read-only throughout -
+      # this service reports on them, it never repairs them.
+      JELLYFIN_CONFIG_DIR: /jellyfin
+      JELLYFIN_DATA_DIR: /jellyfin/data/data
+      SPLASH_STATUS_FILE: /state/splash-status
     ports:
       - 8003:8003
     volumes:
       - ./health-analytics:/app
       - /data/media:/data/media:ro
       - /docker/appdata/monarch-health:/app/data
+      - /docker/appdata/jellyfin:/jellyfin:ro
+      - /docker/appdata/init:/state:ro
 
   ###############################################
   # MONARCH-SEED - Pre-seed Transmission session settings

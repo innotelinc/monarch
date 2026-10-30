@@ -973,6 +973,13 @@ the 1080p grid), for the web client's login page on a laptop or desktop display 
 panel. It installs as `monarch-splash-1440.png` under the same rule, and the
 check reads the suffix, so it is judged as the size it is.
 
+The two are 344,514 and 205,078 bytes as served (`GET /Branding/Splashscreen`,
+measured 2026-10-30, each byte-identical to the installed asset). The media host
+stays on 4K: the same endpoint is what a TV client draws, 1440 on a 4K panel is a
+1.5× upscale nobody here can measure against a TV, and 139 KB is noise beside a
+video stream. Switching is `python3 scripts/jellyfin-splash.py --apply --scale
+4/3 --restart`, and `--apply --restart` puts 4K back.
+
 The draw is read from the same name. `--check` with no `--variant` judges
 the variant the recorded file is and says which, so a host deliberately running
 the cream draw is not reported as a replaced 4K file (it was, before this).
@@ -1010,6 +1017,27 @@ moved (the collage is a poster wall while systemd calls the unit healthy).
 `drift-check.sh` runs it beside the splash check — exit 2 is "cannot look" (no
 generated collage here, so this is not the media host, or no systemctl) and stays
 a note, like the splash check.
+
+The state is also on the dashboard, because that is where an operator looks first.
+`monarch-health` mounts Jellyfin's branding store, its data directory and this
+check's state directory read-only and serves `GET /splash/health`: 200 only while
+the fallback file carries the installed draw **and** the last verdict says the unit
+is installed, enabled and active; 503 with the reasons otherwise. The Homarr
+board's **Splash (live)** tile points its status dot at that endpoint (it lives on
+the compose network as `monarch-health:8003`, which is why the dot works from the
+dashboard and the tile itself still opens the public image). After the two checks
+above, `drift-check.sh` writes `splash-status` into its state directory — a staged
+run writes nothing, like its verdict — and a *missing* verdict reads as unknown
+rather than healthy, because a guard nobody has checked is not proven.
+
+The board itself is checked too. `scripts/check-board-tiles.py` reads Homarr's
+sqlite (read-only) and asks every tile's href for an answer — 2xx/3xx after
+redirects, and 401/403 because a gated sign-in page is a working link, which is
+the normal answer behind the oauth2-proxy. DNS that does not resolve, a refused
+connection, a timeout or a 4xx/5xx the app produced are findings, named per tile;
+exit 2 is "cannot look" (no board database here) and stays a note. Nothing in the
+estate clicked those links before, which is how the board carried
+`*.monarch.local` hrefs for months.
 
 `scripts/drift-check.sh` runs `--check` read-only on the timer, and reports exit 2
 as a skip so a host running part of the group is not a drifted host. The design

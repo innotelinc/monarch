@@ -12,11 +12,26 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **The guard's state is on the board, and dead board tiles are a finding.**
+  `monarch-health` now mounts Jellyfin's branding store, its data directory and
+  the drift check's state directory read-only and serves `GET /splash/health`:
+  200 only while the fallback image carries the installed draw *and* the last
+  drift-check verdict says the guard is installed, enabled and active, 503 with the
+  reasons otherwise. The Homarr **Splash (live)** tile's status dot reads it over
+  the compose network, so a broken guard is a red tile instead of a poster wall
+  for whoever clicks the image; `drift-check.sh` writes that verdict
+  (`splash-status`) after its two splash checks, and a missing verdict counts as
+  unknown rather than healthy. Separately, `scripts/check-board-tiles.py` asks
+  every tile on the board for an answer — 2xx/3xx, and 401/403 because a gated page
+  is a working link — and names the ones that do not, which is what nothing in the
+  estate did while the board was carrying `*.monarch.local` links.
 - **The splash has a 2560×1440 desktop render, the check judges the draw it finds,
   and the board shows the live image.** `--scale 4/3` renders and installs the
   same design at 2560×1440 (`monarch-splash-1440.png`, an exact 4/3 of the 1080p
   grid) for the web login on a desktop display, where 4K is four times the bytes
-  the viewport can use and 1080p is soft on a HiDPI panel. `--check` now reads the
+  the viewport can use and 1080p is soft on a HiDPI panel: measured on the media
+  host, `/Branding/Splashscreen` serves 344,514 bytes at 4K and 205,078 at 1440,
+  byte-identical to the installed asset either way. `--check` now reads the
   variant as well as the size out of the name `branding.xml` carries: a host
   deliberately running the cream draw was reported as "the branded splash is not
   installed" and now passes with the draw named, while
