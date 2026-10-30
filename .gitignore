@@ -37,3 +37,7 @@ __pycache__/
 .idea/
 .vscode/
 # Repo-local generated/tracked artifacts
+# The health service's own runtime output (analytics.json + counters), bind-mounted
+# from the container. Regenerated on every tick, never repository content — and
+# untracked state in a deployment's tree is what made a 35-commit gap hard to see.
+health-analytics/data/
