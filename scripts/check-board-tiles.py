@@ -148,7 +148,16 @@ def probe(href: str, timeout: float) -> tuple[bool, str]:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             code = response.status
     except urllib.error.HTTPError as error:
+        # An HTTPError *is* the response, not just an exception: it holds the socket
+        # open until close(), and urllib does not close it for you. Left to the
+        # garbage collector this leaked one socket per gated or 4xx probe - 81
+        # ResourceWarnings in a single suite run, which is how it was found, and
+        # noise like that is what hides the next real warning.
         code = error.code
+        try:
+            error.close()
+        except Exception:  # noqa: BLE001 - a leaked socket must not fail the probe
+            pass
     except (urllib.error.URLError, OSError) as error:
         reason = getattr(error, "reason", error)
         return False, f"cannot connect ({reason})"

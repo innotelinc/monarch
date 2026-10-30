@@ -16,10 +16,12 @@ Run: python3 -m unittest discover -s scripts/tests -t scripts/tests -v
 from __future__ import annotations
 
 import importlib.util
+import io
 import sqlite3
 import sys
 import threading
 import unittest
+import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
@@ -108,7 +110,11 @@ class BoardTiles(unittest.TestCase):
 
     def tearDown(self):
         for server in self.servers:
+            # shutdown() stops the loop but leaves the listening socket bound, so
+            # every fixture leaked one until close(): the suite's ResourceWarnings
+            # were half this and half the check's unclosed error responses.
             server.shutdown()
+            server.server_close()
 
     def server(self, status: int = 200, headers: dict[str, str] | None = None) -> str:
         server, url = serve(status, headers)
@@ -134,6 +140,34 @@ class BoardTiles(unittest.TestCase):
             code, out, _ = run(str(db))
             self.assertEqual(code, 0, out)
             self.assertNotIn("FAIL", out)
+
+    def test_an_http_error_is_closed_after_it_is_read(self):
+        # An HTTPError is the response object, not only an exception: it keeps the
+        # socket open until close(). Left to the garbage collector this leaked one
+        # socket per gated or 4xx tile, and one suite run reported 81
+        # ResourceWarnings - noise that hides the next real warning.
+        closed: list[bool] = []
+        error = urllib.error.HTTPError("http://127.0.0.1/", 404, "Not Found", {},
+                                       io.BytesIO(b""))
+        original = error.close
+
+        def close():
+            closed.append(True)
+            original()
+
+        error.close = close
+        saved = board.urllib.request.urlopen
+
+        def refuse(*_args, **_kwargs):
+            raise error
+
+        board.urllib.request.urlopen = refuse
+        self.addCleanup(setattr, board.urllib.request, "urlopen", saved)
+
+        alive, detail = board.probe("http://127.0.0.1/", 5)
+        self.assertFalse(alive)
+        self.assertIn("HTTP 404", detail)
+        self.assertEqual(closed, [True], "the error response was never closed")
 
     def test_a_tile_the_app_itself_fails_is_a_finding(self):
         db = make_board(self.tmp / "broken.sqlite", [("Radarr", self.server(502))])

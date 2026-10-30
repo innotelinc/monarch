@@ -414,6 +414,16 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **A tile probe that got a 4xx leaked its socket.** `check-board-tiles.py` caught
+  `urllib.error.HTTPError` and read `.code` without closing it — but an
+  `HTTPError` *is* the response, not only an exception, so one socket stayed open
+  per gated or 4xx tile until the garbage collector ran. One suite run reported
+  81 `ResourceWarning`s from it, and noise at that volume is what buries the next
+  real one. The error is closed now, with a test that fails a probe whose error
+  was never closed. The fixture had the same defect from the other side:
+  `tearDown` called `shutdown()` (which stops the serve loop but leaves the
+  listening socket bound) and never `server_close()`. Both are gone — the module
+  runs clean under `python3 -W error::ResourceWarning -m unittest`.
 - **`admin.monarch.innotel.us` names the gateway instead of addressing it.** The
   row forwarded to `127.0.0.1:4180`, on the belief that the oauth2-proxy gateway
   shares the NPM container's network namespace. Measured on the NPM host
