@@ -293,6 +293,17 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **drift-check watches the *arr apps, Jellyseerr and Bazarr again.** The merge
+  removed those probes with the services, and the rollback brought the containers
+  back without them — the check only proved they were running. `init` writes the
+  `arr_apps`, `prowlarr.apps`, `jellyseerr` and `bazarr` invariants again, and
+  every run now asserts what the apps are configured to be: each *arr answers its
+  API with auth `external` (the SSO gate is the only login), carries the media
+  root folder init created and the Transmission download client; Prowlarr has all
+  four registered; Jellyseerr is initialized with Jellyfin sign-in on; Bazarr has
+  no local login. A stopped or misconfigured app is reported as drift instead of
+  reading as healthy because its container exists.
+
 - **Live TV is a page, not a 502.** Opening it killed `core` and the browser got an
   upstream error instead of a guide. The dial's XMLTV is 77 MB on disk, and the
   viewer read it into a string and then into a full ElementTree, which took the

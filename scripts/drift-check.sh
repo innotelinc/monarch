@@ -19,15 +19,17 @@ set -uo pipefail
 # (systemd/monarch-drift-check.{service,timer}) or cron to alert on drift.
 #
 # Checks (all driven by the invariants manifest):
-#   The *arr apps (Sonarr, Radarr, Lidarr, Whisparr, Bazarr, Jellyseerr,
-#   Requestrr, Sabnzbd, Homarr, ClipBucket) run again after the 2026-10-30
-#   rollback (docs/unified.md), and `core` is the service that is parked. Their
-#   deep checks and manifest keys are still gone from this script - the merge
-#   removed them - so they are covered here by the infra block (present, not
-#   restarting, not on a stale image) and by `verify-sso.py`, which drives a real
-#   sign-in through every gate.
+#   *arr (sonarr/radarr/lidarr/whisparr):
+#     - API reachable
+#     - authMethod = external: the Cerulean Authentik auth_request gate is the
+#       ONLY login, so the app must not also show its own Forms prompt
+#     - expected media root folder present
+#     - Transmission download client present
+#     The apps run again after the 2026-10-30 rollback (docs/unified.md), so
+#     these checks and the arr_apps manifest they read came back with them.
 #   Prowlarr:
 #     - Transmission download client present
+#     - Sonarr/Radarr/Lidarr/Whisparr apps registered
 #   Transmission:
 #     - RPC reachable and download dir is /data/torrents
 #     - no local WebUI login (Cerulean is the only door)
@@ -248,12 +250,18 @@ errors = []
 if m.get("version") != 1:
     errors.append("version != 1")
 
-# arr_apps / arr_allowed_hosts / jellyseerr / bazarr are gone from the manifest:
-# they were dropped when the merge retired those services (docs/unified.md) and
-# the rollback has not put them back yet, so this schema must keep tolerating
-# their absence rather than demanding a block init does not write.
+arr = m.get("arr_apps")
+if not isinstance(arr, list) or not arr:
+    errors.append("arr_apps missing/empty")
+else:
+    for a in arr:
+        for key in ("svc", "port", "api", "category", "media", "root_folder"):
+            if key not in a:
+                errors.append(f"arr_apps entry missing '{key}': {a}")
 
 pw = m.get("prowlarr", {})
+if not isinstance(pw.get("apps"), list) or not pw["apps"]:
+    errors.append("prowlarr.apps missing/empty")
 if not isinstance(pw.get("port"), int):
     errors.append("prowlarr.port missing")
 if not pw.get("download_client"):
@@ -270,6 +278,12 @@ if not isinstance(jf.get("libraries"), list) or not jf["libraries"]:
     errors.append("jellyfin.libraries missing/empty")
 if not isinstance(jf.get("port"), int):
     errors.append("jellyfin.port missing")
+
+for key in ("jellyseerr", "bazarr"):
+    if not isinstance(m.get(key), dict) or not isinstance(m[key].get("port"), int):
+        errors.append(f"{key}.port missing")
+if not isinstance(m.get("bazarr", {}).get("auth_type"), str):
+    errors.append("bazarr.auth_type missing")
 
 if not m.get("authentik", {}).get("ldap_outpost"):
     errors.append("authentik.ldap_outpost missing")
@@ -430,7 +444,70 @@ m = json.load(open('$MANIFEST'))
 for x in m$1:
     print(x)
 "; }
+arr_rows()    { python3 -c "
+import json, sys
+m = json.load(open('$MANIFEST'))
+for a in m['arr_apps']:
+    print(f\"{a['svc']}|{a['port']}|{a['api']}|{a['root_folder']}|{a['media']}\")
+"; }
 
+# ───────────────────────────────────────────────────────────────────────────
+# *arr apps
+# ───────────────────────────────────────────────────────────────────────────
+while IFS='|' read -r svc port api root media; do
+  [ -n "$svc" ] || continue
+  key=$(api_key_for "$svc")
+  if [ -z "$key" ]; then
+    fail "$svc: API key not found in /docker/appdata/$svc/config.xml"
+    continue
+  fi
+  hdr=(-H "X-Api-Key: $key")
+
+  body=$(json_get "http://localhost:$port/api/$api/config/host" "${hdr[@]}")
+  if [ -z "$body" ]; then
+    fail "$svc: /api/$api/config/host unreachable (HTTP != 200)"
+    continue
+  fi
+  method=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('authenticationMethod',''))" 2>/dev/null)
+  # `external` is the correct value, not `forms`: init/init.py
+  # set_monarch_app_auth() switches these apps to *arr's "a reverse proxy
+  # already authenticated this user" mode so the Cerulean Authentik gate on
+  # <svc>.MONARCH_DOMAIN is the only login. Forms auth here would be a
+  # SECOND prompt after SSO.
+  if [ "$method" != "external" ]; then
+    fail "$svc: the Cerulean SSO gate is not the only login (authenticationMethod='$method', expected 'external')"
+  fi
+
+  body=$(json_get "http://localhost:$port/api/$api/rootfolder" "${hdr[@]}")
+  found=0
+  if [ -n "$body" ]; then
+    found=$(echo "$body" | python3 -c "
+import sys, json
+try:
+    rfs = json.load(sys.stdin)
+    print(1 if any(str(r.get('path','')).rstrip('/') == '$root'.rstrip('/') for r in rfs) else 0)
+except Exception:
+    print(0)
+" 2>/dev/null)
+  fi
+  [ "$found" = "1" ] || fail "$svc: root folder $root missing"
+
+  body=$(json_get "http://localhost:$port/api/$api/downloadclient" "${hdr[@]}")
+  has_tr=0
+  if [ -n "$body" ]; then
+    has_tr=$(echo "$body" | python3 -c "
+import sys, json
+try:
+    cs = json.load(sys.stdin)
+    print(1 if any(c.get('implementation') == 'Transmission' for c in cs) else 0)
+except Exception:
+    print(0)
+" 2>/dev/null)
+  fi
+  [ "$has_tr" = "1" ] || fail "$svc: Transmission download client missing"
+
+  say "ok: $svc (auth=$method, root=$([ "$found" = 1 ] && echo yes || echo no), transmission=$([ "$has_tr" = 1 ] && echo yes || echo no))"
+done < <(arr_rows)
 
 # ───────────────────────────────────────────────────────────────────────────
 # Prowlarr
@@ -454,11 +531,25 @@ except Exception:
   fi
   [ "$has_tr" = "1" ] || fail "prowlarr: Transmission download client missing"
 
-  # No registered applications any more: Prowlarr is a search proxy for core,
-  # not the download path, so an app row here would be a leftover that grabs a
-  # second copy. Its own download-client row is still what init writes, so that
-  # half stays asserted.
-  say "ok: prowlarr (transmission=$([ "$has_tr" = 1 ] && echo yes || echo no))"
+  body=$(json_get "http://localhost:$PROW_PORT/api/v1/applications" "${phdr[@]}")
+  apps=""
+  if [ -n "$body" ]; then
+    apps=$(echo "$body" | python3 -c "
+import sys, json
+try:
+    print(','.join(sorted(a.get('implementation','') for a in json.load(sys.stdin))))
+except Exception:
+    print('')
+" 2>/dev/null)
+  fi
+  while IFS= read -r want; do
+    [ -n "$want" ] || continue
+    case ",$apps," in
+      *",$want,"*) : ;;
+      *) fail "prowlarr: app $want not registered (have: '$apps')" ;;
+    esac
+  done < <(manifest_list "['prowlarr']['apps']")
+  say "ok: prowlarr (transmission=$([ "$has_tr" = 1 ] && echo yes || echo no), apps='$apps')"
 else
   fail "prowlarr: API key not found"
 fi
@@ -953,11 +1044,55 @@ else
   say "ok: Magnate entitlements (skipped - MAGNATE_URL not set)"
 fi
 
-# Jellyseerr and Bazarr run again since the rollback, but their endpoint checks
-# went with the merge and are not back yet: the infra block above proves both
-# containers are up and verify-sso.py proves both gates open. Adding the 
-# /api/v3/health and /api/system/status probes back is the next step if these 
-# two need to be covered here again.
+# ───────────────────────────────────────────────────────────────────────────
+# Jellyseerr (initialized + Jellyfin sign-in)
+# ───────────────────────────────────────────────────────────────────────────
+JSERR_PORT=$(manifest_val "['jellyseerr']['port']")
+js_body=$(json_get "http://localhost:$JSERR_PORT/api/v1/settings/public")
+if [ -z "$js_body" ]; then
+  fail "jellyseerr: /api/v1/settings/public unreachable"
+else
+  js_init=$(echo "$js_body" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('initialized') else 'no')" 2>/dev/null)
+  js_login=$(echo "$js_body" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('mediaServerLogin') else 'no')" 2>/dev/null)
+  [ "$js_init" = "yes" ] || fail "jellyseerr: not initialized (run monarch-init)"
+  [ "$js_login" = "yes" ] || fail "jellyseerr: Jellyfin sign-in not enabled"
+  say "ok: jellyseerr (initialized=$js_init, jellyfinLogin=$js_login)"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# Bazarr (auth configured)
+# ───────────────────────────────────────────────────────────────────────────
+BZ_PORT=$(manifest_val "['bazarr']['port']")
+BZ_AUTH_TYPE=$(manifest_val "['bazarr']['auth_type']")
+bz_key=""
+if [ -f /docker/appdata/bazarr/config/config.yaml ]; then
+  bz_key=$(grep -oP '^\s*apikey:\s*\K[^\s]+' /docker/appdata/bazarr/config/config.yaml 2>/dev/null | head -1)
+fi
+if [ -z "$bz_key" ]; then
+  fail "bazarr: API key not found in config.yaml"
+else
+  bz_body=$(json_get "http://localhost:$BZ_PORT/api/system/settings" -H "X-API-KEY: $bz_key")
+  if [ -z "$bz_body" ]; then
+    fail "bazarr: /api/system/settings unreachable with API key"
+  else
+    # Bazarr must keep NO local login - bazarr.$MONARCH_DOMAIN carries the
+    # Cerulean Authentik gate, and init deliberately leaves settings-auth-type
+    # alone (Bazarr's API cannot express "no auth": it accepts only
+    # None/basic/form and rejects an empty value with HTTP 406). The live API
+    # reports type null for "no login", so normalise both sides: the manifest
+    # may carry either the machine value ("none") or the older description.
+    bz_type=$(echo "$bz_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auth',{}).get('type') or 'none')" 2>/dev/null)
+    bz_want=$(printf '%s' "$BZ_AUTH_TYPE" | tr '[:upper:]' '[:lower:]')
+    case "$bz_want" in
+      *sso*|*none*) bz_want="none" ;;
+    esac
+    case "$bz_type" in
+      ""|none|None|null) bz_type="none" ;;
+    esac
+    [ "$bz_type" = "$bz_want" ] || fail "bazarr: expected no local login (got type='$bz_type')"
+    say "ok: bazarr (auth type='$bz_type')"
+  fi
+fi
 
 # ───────────────────────────────────────────────────────────────────────────
 # Authentik LDAP outpost (only when the API is reachable/configured)
