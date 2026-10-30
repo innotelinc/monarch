@@ -1,5 +1,13 @@
 # Gizmo — the unified platform (`core`)
 
+> **Status, 2026-10-30: rolled back.** The merge described below was deployed and
+> then taken back at the operator's request: the *arr stack and its gateways run
+> again, `core` is parked behind `profiles: ["retired"]`, and the hostnames answer
+> as they did before the merge. The steps that were run, and the one NPM gotcha
+> that cost a round trip, are in [Rollback](#rollback). What follows still
+> describes the merge — keep it as the record of what `core` does, not as the
+> state of the deployment.
+
 **Gizmo** is the product name; `core` is the service that implements it, and the
 repository keeps `monarch` as the infrastructure name (container `monarch-core`,
 project `monarch`) so a rename never depends on a data migration.
@@ -136,18 +144,48 @@ complete a browser OIDC flow), which is why that hostname is not a 301.
 
 ### Rollback
 
-Step 8 is a profile, not a deletion: the twenty retired services sit behind
+Step 8 is a profile, not a deletion: the twenty retired services sat behind
 `profiles: ["retired"]` in `docker-compose.yml`, so a plain `docker compose up
-d` never starts them again, and bringing one back is
-`docker compose --profile retired up -d sonarr`. Their appdata and NPM hosts are
-untouched; `monarch-init`'s `depends_on` no longer names them, because a
-required service that depends on a profiled one makes the whole file refuse to
-load.
+d` never started them again. Their appdata and NPM hosts were untouched, which is
+what made the rollback below a `compose up` and an edge change rather than a
+restore from backup.
 
-Until step 8 nothing is destroyed, so rollback is: stop `core`, re-enable the
-old proxy hosts. After step 8, restoring the appdata backup and re-enabling the
-hosts returns the old stack exactly as it was — the *arr applications still hold
-their own configuration; only their identity is replaced.
+#### What that took, end to end
+
+This is the path that was actually taken:
+
+1. **Start the apps and their gateways**, without touching `core`:
+   `docker compose --profile retired up -d sonarr sonarr-sso radarr radarr-sso
+   lidarr lidarr-sso whisparr whisparr-sso bazarr bazarr-sso jellyseerr
+   jellyseerr-sso requestrr requestrr-sso sabnzbd sabnzbd-sso homarr clipbucket
+   clipbucket-sso landing`. Every app answered on its loopback port afterwards
+   (Sonarr 8989, Radarr 7878, Lidarr 8686, Whisparr 6969, Bazarr 6767, Jellyseerr
+   5055, Requestrr 4545, Sabnzbd 8082, Homarr 7575, ClipBucket 8098); the *arr
+   DBs were intact and the apps came up without a migration step.
+2. **Take the profile off the twenty services and put it on `core`/`core-sso`**,
+   so `docker compose up -d` is the old stack again and Gizmo is what needs an
+   explicit `--profile retired` to start.
+3. **Restore the edge.** `media.innotel.us` goes back to `jellyfin-sso` (14010),
+   `tv.innotel.us` back to `sonarr-sso` (14002) — Jellyfin had taken that name in
+   the merge — `xxx`/`tube` back to Whisparr/ClipBucket (14004/14011), the apex
+   back to the landing page (14014), and `app`, `req`, `bazarr`, `sabnzbd`,
+   `requestrr` back to proxies. `radarr/sonarr/lidarr/whisparr.monarch` are 301s
+   to `movies`/`tv`/`mp3`/`xxx` again. `scripts/npm-hosts.conf` carries the rows.
+4. **Stop Gizmo**: `docker compose stop core core-sso` (and the profile keeps it
+   that way).
+
+**The gotcha that cost a round trip:** five of the names served a 301 to `media`
+while the NPM database said they were already proxy hosts to the gateways — a
+host that was re-pointed during the merge kept its *generated* nginx config until
+it was saved again. Re-saving each host (an idempotent `PUT` of the same values)
+rewrote the config and the name proxied correctly. `tv.monarch` had the same
+stale config and the same fix. If a name answers with the old rule after a change,
+re-save the host before believing the API.
+
+Verification after the revert: `npm-proxy-hosts.py --check` — 12 proxy hosts
+match the conf; `check-proxy-ports.py` — every row forwards to a published port;
+`verify-sso.py` — every gated name is Authentik-only, both published names serve
+their app's own sign-in page, and the app ports are closed on the LAN.
 
 ## Identity
 

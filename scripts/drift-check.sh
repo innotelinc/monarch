@@ -19,11 +19,13 @@ set -uo pipefail
 # (systemd/monarch-drift-check.{service,timer}) or cron to alert on drift.
 #
 # Checks (all driven by the invariants manifest):
-#   Sonarr, Radarr, Lidarr, Whisparr, Jellyseerr, Bazarr and Homarr are RETIRED
-#   (docs/unified.md): core holds the wanted queue, the search and the dedupe,
-#   and the containers are behind profiles: ["retired"]. Their checks and their
-#   manifest keys are gone with them — a check for a service this deployment does
-#   not run can only fail, and a failing check is what hides the real one.
+#   The *arr apps (Sonarr, Radarr, Lidarr, Whisparr, Bazarr, Jellyseerr,
+#   Requestrr, Sabnzbd, Homarr, ClipBucket) run again after the 2026-10-30
+#   rollback (docs/unified.md), and `core` is the service that is parked. Their
+#   deep checks and manifest keys are still gone from this script - the merge
+#   removed them - so they are covered here by the infra block (present, not
+#   restarting, not on a stale image) and by `verify-sso.py`, which drives a real
+#   sign-in through every gate.
 #   Prowlarr:
 #     - Transmission download client present
 #   Transmission:
@@ -247,8 +249,9 @@ if m.get("version") != 1:
     errors.append("version != 1")
 
 # arr_apps / arr_allowed_hosts / jellyseerr / bazarr are gone from the manifest:
-# those services are retired (docs/unified.md), and asserting a schema for a
-# service this deployment does not run made the check fail on its own history.
+# they were dropped when the merge retired those services (docs/unified.md) and
+# the rollback has not put them back yet, so this schema must keep tolerating
+# their absence rather than demanding a block init does not write.
 
 pw = m.get("prowlarr", {})
 if not isinstance(pw.get("port"), int):
@@ -950,8 +953,11 @@ else
   say "ok: Magnate entitlements (skipped - MAGNATE_URL not set)"
 fi
 
-# Jellyseerr and Bazarr are retired (docs/unified.md). Requests go through core
-# now, and subtitles are core's own task, so neither has an endpoint to probe.
+# Jellyseerr and Bazarr run again since the rollback, but their endpoint checks
+# went with the merge and are not back yet: the infra block above proves both
+# containers are up and verify-sso.py proves both gates open. Adding the 
+# /api/v3/health and /api/system/status probes back is the next step if these 
+# two need to be covered here again.
 
 # ───────────────────────────────────────────────────────────────────────────
 # Authentik LDAP outpost (only when the API is reachable/configured)
@@ -1253,11 +1259,16 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       fi
     fi
     say "ok: infra container $cname (restarts=$rc)"
-  # The containers this deployment runs. The *arr apps, Jellyseerr, Bazarr and
-  # Homarr are retired (docs/unified.md); listing them here is how the check kept
-  # reporting containers that no longer exist as "restarts=0".
-  done < <(printf '%s\n' prowlarr transmission jellyfin monarch-core \
-             monarch-core-sso jellyfin-sso flaresolverr iptv authentik-ldap | sort -u)
+  # The containers this deployment runs: the stack that was here before the
+  # merge, back after the 2026-10-30 rollback, minus `core` (parked behind
+  # profiles: ["retired"]). A container listed here that does not exist is
+  # reported, which is how a stopped service is noticed at all.
+  done < <(printf '%s\n' prowlarr transmission jellyfin jellyfin-sso \
+             flaresolverr iptv iptv-sso authentik-ldap \
+             sonarr sonarr-sso radarr radarr-sso lidarr lidarr-sso \
+             whisparr whisparr-sso bazarr bazarr-sso jellyseerr jellyseerr-sso \
+             requestrr requestrr-sso sabnzbd sabnzbd-sso homarr \
+             clipbucket clipbucket-sso landing | sort -u)
 
   # 3. Memory overcommit. Redis (the one the metrics stack runs) asks the kernel
   #    for it and logs "Memory overcommit must be enabled!" on every start

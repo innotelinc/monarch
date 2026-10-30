@@ -195,7 +195,6 @@ services:
   jellyseerr:
     <<: *common-keys
     container_name: jellyseerr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/seerr-team/seerr:latest
     init: true
     ports:
@@ -217,7 +216,6 @@ services:
   sonarr:
     <<: *common-keys
     container_name: sonarr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/sonarr:latest
     ports:
       - 127.0.0.1:8989:8989
@@ -232,7 +230,6 @@ services:
   radarr:
     <<: *common-keys
     container_name: radarr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/radarr:latest
     ports:
       - 127.0.0.1:7878:7878
@@ -247,7 +244,6 @@ services:
   lidarr:
     <<: *common-keys
     container_name: lidarr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/lidarr:latest
     ports:
       - 127.0.0.1:8686:8686
@@ -262,7 +258,6 @@ services:
   whisparr:
     <<: *common-keys
     container_name: whisparr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # v2-develop (not latest): hotio's `latest` is frozen at v2.2.0-release.231,
     # which predates current Whisparr. (The original reason was qBittorrent
     # 5.2.x support; qBittorrent was replaced by Transmission on 2026-10-01,
@@ -297,7 +292,6 @@ services:
   bazarr:
     <<: *common-keys
     container_name: bazarr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/bazarr:latest
     ports:
       - 127.0.0.1:6767:6767
@@ -312,7 +306,6 @@ services:
   homarr:
     <<: *common-keys
     container_name: homarr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # Homarr v1 (homarr-labs rewrite; the old ajnart/homarr v0.16 line is
     # archived). v1 keeps everything under a single /appdata mount.
     # Pinned by digest, not `:latest`. watchtower runs every 6 h with --cleanup
@@ -359,7 +352,6 @@ services:
   landing:
     <<: *common-keys
     container_name: monarch-landing
-    profiles: ["retired"]   # see docs/unified.md — replaced by the core UI
     image: nginx:alpine
     ports:
       - 14014:80
@@ -434,7 +426,6 @@ services:
   sabnzbd:
     <<: *common-keys
     container_name: sabnzbd
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     image: ghcr.io/hotio/sabnzbd:latest
     ports:
       # 8082 is the default because scripts/npm-hosts.conf forwards
@@ -478,7 +469,6 @@ services:
   requestrr:
     <<: *common-keys
     container_name: requestrr
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # Served from this repo's own GHCR mirror (published by
     # .github/workflows/publish-image-mirrors.yml) rather than Docker Hub: an
     # anonymous Docker Hub pull shares its small per-address budget with every
@@ -640,7 +630,6 @@ services:
   clipbucket:
     <<: *common-keys
     container_name: clipbucket
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     # Built from ./clipbucket (nginx + PHP-FPM + MariaDB runtime, app source
     # git-cloned on first boot) - the upstream oxygenz image is amd64-only.
     # The release workflow publishes amd64 + arm64 to GHCR.
@@ -955,7 +944,6 @@ services:
   radarr-sso:
     <<: *sso-gateway
     container_name: radarr-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://radarr:7878
@@ -965,7 +953,6 @@ services:
   sonarr-sso:
     <<: *sso-gateway
     container_name: sonarr-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://sonarr:8989
@@ -975,7 +962,6 @@ services:
   lidarr-sso:
     <<: *sso-gateway
     container_name: lidarr-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://lidarr:8686
@@ -985,7 +971,6 @@ services:
   whisparr-sso:
     <<: *sso-gateway
     container_name: whisparr-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://whisparr:6969
@@ -995,7 +980,6 @@ services:
   bazarr-sso:
     <<: *sso-gateway
     container_name: bazarr-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://bazarr:6767
@@ -1023,7 +1007,6 @@ services:
   sabnzbd-sso:
     <<: *sso-gateway
     container_name: sabnzbd-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://sabnzbd:8080
@@ -1044,7 +1027,6 @@ services:
   jellyseerr-sso:
     <<: *sso-gateway
     container_name: jellyseerr-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       # The request portal publishes its own sign-in page (the Jellyfin/Cerulean
@@ -1106,7 +1088,6 @@ services:
   clipbucket-sso:
     <<: *sso-gateway
     container_name: clipbucket-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://clipbucket:80
@@ -1131,7 +1112,6 @@ services:
   requestrr-sso:
     <<: *sso-gateway
     container_name: requestrr-sso
-    profiles: ["retired"]   # see docs/unified.md — replaced by monarch-core
     environment:
       <<: *sso-env
       # Upstream is the app by name over the compose network, which is why the
@@ -1154,6 +1134,7 @@ services:
     logging:
       driver: json-file
     container_name: monarch-core
+    profiles: ["retired"]   # parked by the 2026-10-30 rollback (docs/unified.md)
     image: monarch-core:1.0.0
     labels:
       com.centurylinklabs.watchtower.enable: "false"
@@ -1200,6 +1181,7 @@ services:
   core-sso:
     <<: *sso-gateway
     container_name: monarch-core-sso
+    profiles: ["retired"]   # parked by the 2026-10-30 rollback (docs/unified.md)
     environment:
       <<: *sso-env
       OAUTH2_PROXY_UPSTREAMS: http://core:8090

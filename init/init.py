@@ -2861,11 +2861,11 @@ def build_invariants() -> dict:
     truth means the two can never drift apart. Ports are the host-published
     ones (drift-check probes localhost).
     """
-    # No arr_apps / arr_allowed_hosts / jellyseerr / bazarr any more: those
-    # services are retired (docs/unified.md), and an invariant for a service
-    # this deployment does not run is a check that fails forever. Core replaced
-    # them, and it keeps its own state; what is left here is what init still
-    # configures on the merged stack.
+    # No arr_apps / arr_allowed_hosts / jellyseerr / bazarr keys: they were
+    # dropped when the merge retired those services (docs/unified.md) and this
+    # init no longer configures them. The 2026-10-30 rollback brought the apps
+    # back as containers with their own appdata, so they start configured; what
+    # init writes here is the part of the stack it still sets up.
     return {
         "version": 1,
         "prowlarr": {

@@ -166,6 +166,36 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Changed
 
+- **The deployment is the *arr stack again; `core` is what is parked.** The merge
+  was taken back on 2026-10-30: the twenty services that were behind
+  `profiles: ["retired"]` are in the default set again (Sonarr, Radarr, Lidarr,
+  Whisparr, Bazarr, Jellyseerr, Requestrr, Sabnzbd, Homarr, ClipBucket, the
+  landing page and their ten SSO gateways), and `core` and `core-sso` carry the
+  profile instead, so `docker compose up -d` starts the old stack and Gizmo only
+  comes up when asked. Nothing was destroyed and nothing needed restoring: every
+  app had its appdata, its database and its gateway the whole time, and each one
+  answered on its loopback port after `up -d` without a migration.
+
+  The edge went back with them. `media.innotel.us` is Jellyfin's door again and
+  `tv.innotel.us` is Sonarr's (Jellyfin had taken that name in the merge);
+  `xxx`/`tube` are Whisparr/ClipBucket; the apex is the landing page; `app`,
+  `req`, `bazarr`, `sabnzbd` and `requestrr` are proxies to their gateways again;
+  and `radarr`/`sonarr`/`lidarr`/`whisparr`.monarch are 301s to the apex names,
+  as they were. `scripts/npm-hosts.conf` and `scripts/check-proxy-ports.py` agree
+  with the live NPM (`--check`: 12 proxy hosts match), and `verify-sso.py` passes
+  end to end — every gated name is Authentik-only, both published names serve
+  their app's own sign-in page, and no app port answers on the LAN.
+
+  One edge lesson is recorded in docs/unified.md's rollback section because it
+  looked like a broken config: five names answered with their old 301 to `media`
+  while the NPM database already said they were proxy hosts — a host re-pointed
+  during the merge keeps its *generated* nginx config until it is saved again,
+  and an idempotent PUT of the same values is what makes the new config live.
+  `drift-check`'s infra block lists the containers this deployment now runs
+  (and no longer expects `monarch-core`); its per-app *arr checks are still the
+  ones the merge removed, so the apps are covered there by presence/restart/image
+  and by `verify-sso.py`.
+
 - **A standing-down alert repeats only when it has something new to say.** The
   first one already said the heal had reconciled the stack N times in a row and
   this survived every one, so the same page a day later is a page nobody can act
