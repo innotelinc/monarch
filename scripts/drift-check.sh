@@ -124,6 +124,11 @@ set -uo pipefail
 # MONARCH_INVARIANTS also marks a run as staged: it reads a manifest other than
 # the one under this check's state directory, so it reports and exits non-zero but
 # does NOT send the Telegram alert - a rehearsal is not an alarm.
+#
+# MONARCH_SPLASH_VARIANT=light asserts the cream splash is what this host should be
+# carrying. Left unset, the splash check judges whichever draw is installed and
+# names it in the ok line, because choosing the cream one is a deployment decision
+# and not drift; naming it here makes the other draw a finding.
 #   --test-telegram      send a test Telegram message (needs .env vars)
 # State is one directory, $MONARCH_STATE_DIR (default /docker/appdata/init): the
 # invariants manifest this run judges, the heal clock and streak, the findings the
@@ -865,7 +870,18 @@ fi
 # image where the collage goes and watching which one came back from
 # /Branding/Splashscreen. Exit 2 is "cannot look" (no appdata here, so this is
 # not the media host) and stays a note, like the ClipBucket checks.
-splash_out=$(python3 scripts/jellyfin-splash.py --check 2>&1)
+# A host may deliberately run the cream draw (`--apply --variant light`). Naming
+# it asserts *that* draw; leaving it unset accepts whichever one is installed, so
+# a light install is not reported as a replaced file. Anything else is a typo, and
+# saying so beats silently judging the wrong variant.
+SPLASH_VARIANT_ARGS=""
+case "${MONARCH_SPLASH_VARIANT:-}" in
+  "") ;;
+  dark|light) SPLASH_VARIANT_ARGS="--variant $MONARCH_SPLASH_VARIANT" ;;
+  *) say "note: MONARCH_SPLASH_VARIANT=${MONARCH_SPLASH_VARIANT} is not dark or light - judging whichever draw is installed" ;;
+esac
+# shellcheck disable=SC2086 # split on purpose: empty, or exactly one "--variant x"
+splash_out=$(python3 scripts/jellyfin-splash.py --check ${SPLASH_VARIANT_ARGS} 2>&1)
 splash_code=$?
 if [ "$splash_code" -eq 0 ]; then
   say "ok: Jellyfin's login screen shows Monarch's splash, not the generated collage"

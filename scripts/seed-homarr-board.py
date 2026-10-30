@@ -129,6 +129,14 @@ APPS = {
     "ZapIt": ("https://zapit.innotel.us", "linkwarden", "ZapIt - short links"),
     "Monarch": ("https://monarch.innotel.us", "jellyfin",
                 "Monarch - this dashboard (apex origin)"),
+    # Straight at the endpoint a client is handed before it has a session, so the
+    # state of the splash is readable without a shell on the media host: the crest
+    # means the guard is holding, a poster wall means a scan rewrote the collage
+    # and nothing has put the design back. This is the visible half of both the
+    # splash and the guard, and the status dot on the tile is whether Jellyfin
+    # answers at all.
+    "Splash (live)": ("https://media.innotel.us/Branding/Splashscreen", "jellyfin",
+                      "Monarch splash - the image every client gets before sign-in"),
     # -- Infrastructure -----------------------------------------------------
     "Cerulean SSO": ("https://auth.cerulean.innotel.us", "authentik",
                      "Cerulean - identity provider (Authentik SSO)"),
@@ -242,6 +250,7 @@ DESIGN = (
         app_tile("Atlas"),
         app_tile("ZapIt"),
         app_tile("Monarch"),
+        app_tile("Splash (live)"),
     )),
     ("Infrastructure", (
         app_tile("Cerulean SSO"),

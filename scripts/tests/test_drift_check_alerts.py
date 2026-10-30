@@ -276,6 +276,48 @@ class DriftCheckAlerts(unittest.TestCase):
         self.assertIn("the container has been up", self.alert_text())
         self.assertLess(elapsed, 60, "a container that has been up an hour is not waited for")
 
+    # ── the splash: which draw this host is meant to be carrying ────────
+    def splash_appdata(self, asset_name: str) -> Path:
+        """A scratch appdata with one Monarch draw installed and recorded.
+
+        The splash check reads the draw out of the name `branding.xml` carries, so
+        this is the whole state that decides whether a run passes or fails.
+        """
+        root = self.tmp / "appdata"
+        data = root / "jellyfin" / "data" / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        payload = (REPO / "assets" / asset_name).read_bytes()
+        (data / asset_name).write_bytes(payload)
+        (data / "splashscreen.png").write_bytes(payload)
+        (root / "jellyfin" / "branding.xml").write_text(
+            '<?xml version="1.0" encoding="utf-8"?>\n<BrandingOptions>\n'
+            "  <SplashscreenEnabled>true</SplashscreenEnabled>\n"
+            f"  <SplashscreenLocation>/config/data/data/{asset_name}</SplashscreenLocation>\n"
+            "</BrandingOptions>\n", encoding="utf-8")
+        return root
+
+    def test_either_draw_passes_until_one_is_named(self):
+        # Left to itself the check judges whatever draw is installed - installing
+        # the cream one is a deployment decision, and it used to come back as "the
+        # branded splash is not installed". MONARCH_SPLASH_VARIANT is what makes it
+        # an assertion, and then the other draw is drift.
+        root = self.splash_appdata("monarch-splash-light.png")
+        quiet = self.run_check(own_manifest=True, env={"APPDATA": str(root)})
+        self.assertIn("ok: Jellyfin's login screen shows Monarch's splash", quiet.stdout)
+        self.assertNotIn("is the light draw, but", quiet.stderr)
+
+        told = self.run_check(own_manifest=True,
+                              env={"APPDATA": str(root), "MONARCH_SPLASH_VARIANT": "dark"})
+        self.assertIn("jellyfin: the login screen is Jellyfin's poster collage", told.stderr)
+        self.assertIn("is the light draw, but --variant dark", told.stderr)
+
+    def test_a_variant_that_is_not_a_variant_only_gets_a_note(self):
+        # A typo must not silently check the wrong draw: it says so and judges the
+        # installed one, which is the same behaviour as leaving it unset.
+        res = self.run_check(own_manifest=True, env={"MONARCH_SPLASH_VARIANT": "cream"})
+        self.assertIn("MONARCH_SPLASH_VARIANT=cream is not dark or light", res.stdout)
+        self.assertNotIn("--variant cream", res.stderr)
+
     # ── the rules ───────────────────────────────────────────────────────
     def test_a_staged_run_reports_and_stays_silent(self):
         res = self.run_check(own_manifest=False)

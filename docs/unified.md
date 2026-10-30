@@ -272,10 +272,14 @@ satellites, and mirrored equaliser wings either side of the wordmark. It is
 primitive list with two backends, so the committed SVG and the installed PNG
 cannot drift apart.
 
-Each design ships twice, at 4K and at 1920×1080 (`monarch-splash-1080.png`), for
-a client that caps the size of a splash image; `--apply` installs the 4K one
-unless `--scale 1` says otherwise, and the check reads the name `branding.xml`
-carries, so either install is judged as the choice it was.
+Each design ships three times — 4K, 2560×1440 (`monarch-splash-1440.png`) and
+1920×1080 (`monarch-splash-1080.png`) — from the same plan. The 1080p one is for
+a client that caps the size of a splash image; the 1440p one is for the web login
+on a desktop display, where 4K is four times the bytes the viewport can use and
+1080p is soft on a HiDPI panel. `--apply` installs the 4K one unless `--scale`
+says otherwise, and the check reads both the size and the variant out of the name
+`branding.xml` carries, so any install is judged as the choice it was — a host
+running the cream draw is not a host whose 4K file was replaced.
 
 The cream variant is committed and installable, but it is not what the media host
 runs, and that is a measured choice rather than a preference: a client paints its

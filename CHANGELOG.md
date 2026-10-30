@@ -12,6 +12,19 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **The splash has a 2560×1440 desktop render, the check judges the draw it finds,
+  and the board shows the live image.** `--scale 4/3` renders and installs the
+  same design at 2560×1440 (`monarch-splash-1440.png`, an exact 4/3 of the 1080p
+  grid) for the web login on a desktop display, where 4K is four times the bytes
+  the viewport can use and 1080p is soft on a HiDPI panel. `--check` now reads the
+  variant as well as the size out of the name `branding.xml` carries: a host
+  deliberately running the cream draw was reported as "the branded splash is not
+  installed" and now passes with the draw named, while
+  `MONARCH_SPLASH_VARIANT=light` on `drift-check.sh` turns that into an assertion.
+  The Homarr board gains a **Splash (live)** tile straight at
+  `/Branding/Splashscreen`, so whether clients are being handed the crest or the
+  post-scan collage — the visible half of both the splash and the guard — is
+  readable without a shell on the media host.
 - **The splash-collage guard is now checked, and the splash ships at two sizes.**
   Installing the 4K draw was never enough on its own: `SplashscreenPostScanTask`
   rewrites `{DataPath}/splashscreen.png` after every library scan, so the

@@ -69,6 +69,8 @@ USAGE
     python3 scripts/jellyfin-splash.py --render       # re-render assets/monarch-splash.png (needs Pillow)
     python3 scripts/jellyfin-splash.py --svg          # rewrite assets/monarch-splash.svg
     python3 scripts/jellyfin-splash.py --apply --variant light
+    python3 scripts/jellyfin-splash.py --render --scale 4/3   # assets/monarch-splash-1440.png
+    python3 scripts/jellyfin-splash.py --apply --scale 4/3    # the 2560×1440 desktop render
     python3 scripts/jellyfin-splash.py --render --scale 1     # assets/monarch-splash-1080.png
     python3 scripts/jellyfin-splash.py --apply --scale 1      # install the 1080p render instead
 
@@ -83,10 +85,17 @@ Runs on a host that mounts the media host's appdata (`APPDATA`, default
 
 The installed draw is 4K by default because a TV client upscales 1080p visibly on
 a 4K panel, and because the same file is what a 4K web session paints behind the
-login card. `--scale 1` renders and installs the same design at 1920×1080 under
-its own name (`monarch-splash-1080.png`), for a client that caps the size of a
-splash image; `--check` reads which of the two names `branding.xml` carries, so a
-host that deliberately installed the smaller one is not reported as drifted.
+login card. Two more renders of the same design are committed under their own
+names: `--scale 1` (1920×1080, `monarch-splash-1080.png`) for a client that caps
+the size of a splash image, and `--scale 4/3` (2560×1440,
+`monarch-splash-1440.png` — an exact 4/3 of the 1080p grid) for the web login on
+a desktop display, where 4K is four times the bytes the viewport can use and
+1080p is soft on a HiDPI panel.
+
+`--check` reads the size *and the variant* out of the name `branding.xml`
+carries, so a host that deliberately installed a smaller render or the cream draw
+is judged as the choice it was. Naming `--variant` makes it an assertion instead:
+the host must be carrying that draw, and the other one is a finding.
 
 Exit codes: 0 = the branded splash is installed and wired; 1 = it is not (a
 finding is printed); 2 = cannot run (no asset and no Pillow, or no appdata).
@@ -101,6 +110,7 @@ import shutil
 import struct
 import sys
 import xml.etree.ElementTree as ET
+from fractions import Fraction
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -112,13 +122,15 @@ WIDTH, HEIGHT = 1920, 1080
 SCALE = 2
 SPLASH_SIZE = (WIDTH * SCALE, HEIGHT * SCALE)
 
-# Both renders of every variant, and the suffix that tells them apart. 4K is what
-# --apply installs unless told otherwise; `-1080` is the same drawing for a client
-# that caps splash size (a 4K PNG is four times the bytes a 1080p surface can use,
-# on a launch where the client is already waiting). The two never share a name, so
-# a host carrying either one can be judged without guessing.
-RESOLUTION_SIZE = {2: (WIDTH * 2, HEIGHT * 2), 1: (WIDTH, HEIGHT)}
-RESOLUTION_SUFFIX = {2: "", 1: "-1080"}
+# Every render of every variant, and the suffix that tells them apart. 4K is what
+# --apply installs unless told otherwise; `-1440` is the same drawing for a desktop
+# web login (an exact 4/3 of the 1080p grid, which is why the scale is a fraction);
+# `-1080` is for a client that caps splash size, where a 4K PNG is four times the
+# bytes the surface can use. No two share a name, so a host carrying any one of
+# them can be judged without guessing.
+RESOLUTION_SIZE = {2: (WIDTH * 2, HEIGHT * 2), Fraction(4, 3): (2560, 1440),
+                   1: (WIDTH, HEIGHT)}
+RESOLUTION_SUFFIX = {2: "", Fraction(4, 3): "-1440", 1: "-1080"}
 
 # Geometry, shared by both variants and by both backends. Counts are here rather
 # than inline because the tests pin them: the motif is a measurement instrument
@@ -203,19 +215,36 @@ SPLASH_ASSET = ASSET_DIR / "monarch-splash.png"
 INSTALLED_NAME = "monarch-splash.png"
 
 
-def asset_name(variant: str, scale: int = SCALE) -> str:
-    """`monarch-splash.png` at 4K, `monarch-splash-1080.png` at 1080p."""
+def asset_name(variant: str, scale: Fraction | int = SCALE) -> str:
+    """`monarch-splash.png` at 4K, `-1440` at 2560×1440, `-1080` at 1920×1080."""
     stem = DESIGN[variant]["asset"][: -len(".png")]
     return f"{stem}{RESOLUTION_SUFFIX[scale]}.png"
 
 
-def scale_of_asset(name: str) -> int | None:
-    """The scale a `-1080` (or absent) suffix implies, or None for a name this
-    script does not install (Jellyfin's own `splashscreen.png`, an operator's
+def scale_of_asset(name: str) -> Fraction | int | None:
+    """The scale a `-1440`/`-1080` (or absent) suffix implies, or None for a name
+    this script does not install (Jellyfin's own `splashscreen.png`, an operator's
     hand-placed file) — in which case the caller falls back to `--scale`."""
     for scale in RESOLUTION_SUFFIX:
         if any(name == asset_name(variant, scale) for variant in DESIGN):
             return scale
+    return None
+
+
+def installed_design(name: str) -> tuple[str, Fraction | int] | None:
+    """Which variant and scale an installed name is, or None for a name this
+    script does not install.
+
+    This is what lets `--check` judge the draw a host actually carries. The drift
+    check runs it with no `--variant`, and a cream install (or a 2560×1440 one, or
+    a 1080p one) used to be reported as "the branded splash is not installed" —
+    a deliberate choice read as drift. The recorded name decides instead, and
+    naming `--variant` turns that into an assertion.
+    """
+    for variant in sorted(DESIGN):
+        for scale in RESOLUTION_SUFFIX:
+            if name == asset_name(variant, scale):
+                return variant, scale
     return None
 # The path recorded in branding.xml is resolved by the *server*, i.e. inside the
 # Jellyfin container, where the appdata mount is /config and the data dir is
@@ -760,13 +789,24 @@ def check(args) -> int:
     findings = []
     branding = read_branding(config_dir)
     location = branding["location"]
-    # Which of the two renders this host is meant to be carrying: the name in
-    # branding.xml decides, so `--check` with no arguments judges a 1080p install
-    # as a 1080p install rather than as a 4K one that drifted.
-    scale = scale_of_asset(Path(location).name)
-    if scale is None:
-        scale = args.scale
-    installed_name = asset_name(args.variant, scale)
+    # Which render — size *and* variant — this host is meant to be carrying: the
+    # name in branding.xml decides, so `--check` with no arguments judges a 1080p
+    # install as a 1080p install, and a cream install as the cream draw, rather
+    # than as the 4K dark default that drifted. Naming a `--variant` is an
+    # assertion instead: that is what drift-check passes when an operator has
+    # declared MONARCH_SPLASH_VARIANT, and then the other draw is a finding.
+    found = installed_design(Path(location).name)
+    if found is None:
+        variant, scale = args.variant, args.scale
+    elif args.variant_given and found[0] != args.variant:
+        variant, scale = args.variant, found[1]
+        findings.append(
+            f"{Path(location).name} is the {found[0]} draw, but --variant "
+            f"{args.variant} was asked for — install it with --apply --variant "
+            f"{args.variant}")
+    else:
+        variant, scale = found
+    installed_name = asset_name(variant, scale)
     expected_size = RESOLUTION_SIZE[scale]
     if not args.asset_given:
         args.asset = str(ASSET_DIR / installed_name)
@@ -830,7 +870,7 @@ def check(args) -> int:
               "deployment's splash. Apply it with: python3 scripts/jellyfin-splash.py --apply")
         return 1
     print(f"  ok    {installed.name} is installed "
-          f"({expected_size[0]}×{expected_size[1]}) and "
+          f"({expected_size[0]}×{expected_size[1]}, the {variant} draw) and "
           f"{branding['path'].name} points at {expected}")
     return 0
 
@@ -900,17 +940,30 @@ def restart_jellyfin(args) -> bool:
         return False
 
 
+def _scale(text: str) -> Fraction:
+    """A `--scale` value (`2`, `4/3` or `1`), as a fraction of the 1080p grid."""
+    try:
+        value = Fraction(str(text).strip())
+    except (ValueError, ZeroDivisionError):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a scale") from None
+    if value not in RESOLUTION_SIZE:
+        sizes = ", ".join(str(scale) for scale in sorted(RESOLUTION_SIZE, reverse=True))
+        raise argparse.ArgumentTypeError(f"no {text} render — choose one of {sizes}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="report only (the default)")
     parser.add_argument("--apply", action="store_true", help="install the splash and point branding at it")
     parser.add_argument("--render", action="store_true", help="re-render the 4K PNG (needs Pillow)")
     parser.add_argument("--svg", action="store_true", help="rewrite the design-of-record SVG")
-    parser.add_argument("--variant", choices=sorted(DESIGN), default="dark")
-    parser.add_argument("--scale", type=int, choices=sorted(RESOLUTION_SIZE, reverse=True),
-                        default=SCALE,
-                        help="2 = 4K (default), 1 = 1080p for a client that caps "
-                             "the size of a splash image")
+    parser.add_argument("--variant", choices=sorted(DESIGN), default=None,
+                        help="dark (the default) or light; on --check, naming one "
+                             "asserts the host should be carrying that draw")
+    parser.add_argument("--scale", type=_scale, default=SCALE,
+                        help="2 = 4K (default), 4/3 = the 2560×1440 desktop render, "
+                             "1 = 1080p for a client that caps the size of a splash image")
     parser.add_argument("--asset", default="",
                         help="the PNG to install (default assets/monarch-splash.png)")
     parser.add_argument("--appdata", default=os.environ.get("APPDATA", "/docker/appdata"))
@@ -931,6 +984,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     appdata = Path(args.appdata)
+    # `--check` reads the variant out of the installed name; `--apply`/`--render`
+    # still need a concrete one, so the default is resolved here and whether it
+    # was named is kept, because only a named variant is an assertion.
+    args.variant_given = args.variant is not None
+    args.variant = args.variant or "dark"
     # `--variant light` used to install the *dark* 4K asset when no --asset was
     # given (the default was the module-level SPLASH_ASSET), because the variant
     # only ever moved the render target. The default now follows the variant and

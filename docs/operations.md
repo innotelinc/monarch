@@ -967,6 +967,18 @@ already waiting — and the check reads the name in `branding.xml`, so a host th
 deliberately installed the small render is judged as a 1080p host rather than
 reported as a 4K one that drifted. The default is still 4K (`--scale 2`).
 
+`--scale 4/3` is the desktop render: the same plan at 2560×1440 (an exact 4/3 of
+the 1080p grid), for the web client's login page on a laptop or desktop display —
+4K is four times the bytes a 1440p viewport can use, and 1080p is soft on a HiDPI
+panel. It installs as `monarch-splash-1440.png` under the same rule, and the
+check reads the suffix, so it is judged as the size it is.
+
+The draw is read from the same name. `--check` with no `--variant` judges
+the variant the recorded file is and says which, so a host deliberately running
+the cream draw is not reported as a replaced 4K file (it was, before this).
+`MONARCH_SPLASH_VARIANT=light` on the drift check makes it an assertion instead —
+that host must be carrying that draw, and the other one is a finding.
+
 The 2026-10 design (*Celestial Cinema*) is deliberately not a poster collage: a
 seeded star field and sparkles, film-strip perforations along the top and bottom
 edges, a twelve-blade aperture iris closed around a golden play mark, a 72-tick
@@ -1003,9 +1015,9 @@ a note, like the splash check.
 as a skip so a host running part of the group is not a drifted host. The design
 test (`scripts/tests/test_jellyfin_splash.py`) renders the committed
 `assets/monarch-splash.svg`/`-light.svg` from the same plan and fails when they
-differ by a byte, and re-renders each PNG — 4K and 1080p, both variants — and
-compares it to the committed one, so changing the splash means re-running `--svg`
-and `--render` (with and without `--scale 1`) and committing the results.
+differ by a byte, and re-renders each PNG — 4K, 2560×1440 and 1080p, both
+variants — and compares it to the committed one, so changing the splash means
+re-running `--svg` and `--render` (at each `--scale`) and committing the results.
 
 ```bash
 python3 scripts/jellyfin-splash.py --check          # the drift check's half

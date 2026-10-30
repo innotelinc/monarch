@@ -41,6 +41,7 @@ import struct
 import subprocess
 import sys
 import unittest
+from fractions import Fraction
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -193,6 +194,21 @@ class CommittedAsset(unittest.TestCase):
         self.assertEqual(splash.scale_of_asset("monarch-splash-light.png"), 2)
         self.assertIsNone(splash.scale_of_asset("splashscreen.png"))
 
+    def test_each_variant_also_ships_the_desktop_render(self):
+        # 2560×1440 is an exact 4/3 of the 1920×1080 grid, so the desktop render is
+        # the same drawing at a third size: for the web login on a desktop display,
+        # where 4K is four times the bytes a 1440p viewport can use and 1080p is
+        # soft on a HiDPI panel.
+        for variant in PNG:
+            asset = REPO_ROOT / "assets" / splash.asset_name(variant, Fraction(4, 3))
+            self.assertTrue(asset.is_file(), f"{asset.name} is not committed")
+            self.assertEqual(splash.png_dimensions(asset), (2560, 1440), asset.name)
+        self.assertEqual(splash.asset_name("dark", Fraction(4, 3)), "monarch-splash-1440.png")
+        self.assertEqual(splash.asset_name("light", Fraction(4, 3)),
+                         "monarch-splash-light-1440.png")
+        self.assertEqual(splash.scale_of_asset("monarch-splash-1440.png"), Fraction(4, 3))
+        self.assertIsNone(splash.installed_design("splashscreen.png"))
+
     def test_asset_is_a_flat_design_not_a_photo_collage(self):
         # The splash this replaces is Jellyfin's generated collage: 1920×1080 and
         # ~4.1 MB, because it is photographs. A flat design with gradients is
@@ -290,6 +306,46 @@ class CheckAndApply(unittest.TestCase):
                              f"/config/data/data/{splash.asset_name('light')}")
             code, out, _ = run("--check", "--variant", "light", "--appdata", str(root))
             self.assertEqual(code, 0, out)
+
+    def test_apply_scale_four_thirds_installs_the_desktop_render(self):
+        with TemporaryDirectory() as tmp:
+            root = appdata(Path(tmp))
+            code, out, _ = run("--apply", "--scale", "4/3", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
+            data = root / "jellyfin" / "data" / "data"
+            asset = REPO_ROOT / "assets" / "monarch-splash-1440.png"
+            self.assertTrue(splash.same_bytes(data / "monarch-splash-1440.png", asset))
+            self.assertEqual(splash.png_dimensions(data / "splashscreen.png"), (2560, 1440))
+            self.assertEqual(splash.read_branding(root / "jellyfin")["location"],
+                             "/config/data/data/monarch-splash-1440.png")
+            # And a plain --check reads the suffix, so the desktop install is
+            # judged as 2560×1440 rather than as a 4K one that drifted.
+            code, out, _ = run("--check", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
+            self.assertIn("2560×1440", out)
+
+    def test_a_light_install_is_judged_as_light_without_naming_the_variant(self):
+        # The drift check runs `--check` with no `--variant`. A host that applied
+        # the cream draw used to fail that run with "the branded splash is not
+        # installed" — a deliberate deployment reported as drift. What is
+        # installed decides which draw is judged, and the ok line names it.
+        with TemporaryDirectory() as tmp:
+            root = appdata(Path(tmp))
+            code, out, _ = run("--apply", "--variant", "light", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
+            code, out, _ = run("--check", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
+            self.assertIn("the light draw", out)
+
+    def test_check_asserts_the_variant_it_is_told_to_expect(self):
+        # MONARCH_SPLASH_VARIANT is what turns that into an assertion: a host that
+        # should be cream and is dark is drift, and the sentence says so.
+        with TemporaryDirectory() as tmp:
+            root = appdata(Path(tmp))
+            run("--apply", "--variant", "light", "--appdata", str(root))
+            code, out, _ = run("--check", "--variant", "dark", "--appdata", str(root))
+            self.assertEqual(code, 1, out)
+            self.assertIn("is the light draw, but --variant dark", out)
 
     def test_branding_keeps_the_keys_it_does_not_own(self):
         with TemporaryDirectory() as tmp:
