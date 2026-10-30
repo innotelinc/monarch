@@ -66,7 +66,11 @@ class VaultEnvTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        # shutdown() only stops the serve loop: the listening socket stays bound
+        # until server_close(), so leaving it out leaks one socket per run and the
+        # suite reports it as a ResourceWarning against this fixture's port.
         cls.httpd.shutdown()
+        cls.httpd.server_close()
         cls.tmp.cleanup()
 
     def setUp(self):
