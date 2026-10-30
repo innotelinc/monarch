@@ -398,7 +398,11 @@ are written by hand and describe the behaviour change, not the commits.
   (**302**, measured) and which survives recreation. `--check` compares against
   that name, so the row cannot quietly drift back. Pinned by
   `scripts/tests/test_npm_forward_resolve.py`, including an assertion on the
-  shipped row rather than a fixture.
+  shipped row rather than a fixture. Repointing it also exposed a trap in the
+  writer: `upsert_proxy_host`'s fallback field names were the pre-2.12
+  `websockets_support`/`caching`, which this NPM rejects as additional
+  properties, so a caller that did not pass the schema-derived names could not
+  write a host at all.
 - **The check that judges Jellyfin's local accounts now runs on the host.** The
   deployment's checkout was 35 commits behind `origin/main` with the same work
   uncommitted in its tree, so every fix on this branch — the login-methods check,
