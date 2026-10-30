@@ -263,6 +263,32 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **Gizmo's API no longer tells a signed-in browser it is not signed in.** Every
+  `/api/*` call answered `401 no authenticated session` while the page itself
+  loaded, so the UI said *not signed in — reload and sign in again* to a user who
+  was signed in. The session was fine; the two sides of the identity contract
+  named different headers. The gateway is configured with
+  `OAUTH2_PROXY_PASS_USER_HEADERS`, which puts `X-Forwarded-Email` on the request
+  it hands upstream, while `X-Auth-Request-Email` — the name `core` was asking
+  for — is what `--set-xauthrequest` sets on the *response* to the browser, for
+  nginx `auth_request` deployments, and never reaches a reverse-proxied upstream.
+  `core` now reads `X-Forwarded-Email` (`CORE_AUTH_HEADER`, and the code default),
+  and the same header is named in `deploy/monarch-core.compose.yml`, where the
+  gateway had been passing `--set-xauthrequest` and nothing else. Nothing compared
+  the two before, so `scripts/tests/test_core_gateway_header.py` now joins them:
+  for each compose file, the header core reads has to be one the gateway actually
+  puts on the upstream request, and the code default has to be that name. Verified
+  through a real authorization-code flow: `/api/stats` and `/api/library` answer
+  200 to a signed-in session, which the same probe caught at 401 before the fix.
+
+- **The scheduler's import pass between searches ran again.** `_run` handed
+  `import_completed` a connection where it expects a downloader, and the function
+  opens its own session, so every pass between search ticks raised `TypeError`,
+  which the loop logged and swallowed: a finished torrent was only ever linked on
+  the next search tick. The call now passes the client like `tick()` does, and
+  `test_acquisition.py` drives the loop's other branch with a fake importer so the
+  shape cannot go back.
+
 - **A 5xx from Telegram no longer drops the alert.** The send was one `curl`: a
   gateway timeout or a `502` from `api.telegram.org` returned non-zero, the
   caller's `|| true` swallowed it, and the one message that said the stack was

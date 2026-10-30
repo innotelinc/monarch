@@ -34,7 +34,7 @@ services:
       CORE_DATA_DIR: /data
       CORE_LIBRARY_ROOT: /media
       CORE_COMPLETED_ROOT: /downloads/complete
-      CORE_AUTH_HEADER: X-Auth-Request-Email
+      CORE_AUTH_HEADER: X-Forwarded-Email
       # Set to 1 only when running without the SSO gateway (local development).
       CORE_AUTH_DISABLED: "${CORE_AUTH_DISABLED:-0}"
       TRANSMISSION_URL: http://transmission:9091
@@ -79,7 +79,10 @@ services:
       start_period: 20s
 
   # The single sign-in for every door that is left. One instance, not twelve:
-  # it sets X-Auth-Request-Email, and core refuses anything without it.
+  # it sets `X-Forwarded-Email` on the request it hands core (pass-user-headers),
+  # and core refuses anything without it. `--set-xauthrequest` is not that header:
+  # it sets `X-Auth-Request-*` on the *response* for nginx auth_request mode, so
+  # core asking for it behind this proxy meant 401 on every signed-in call.
   sso:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.2
     container_name: monarch-sso
@@ -95,7 +98,7 @@ services:
       - --cookie-secure=true
       - --email-domain=*
       - --reverse-proxy=true
-      - --set-xauthrequest=true
+      - --pass-user-headers=true
       - --pass-access-token=false
       - --skip-provider-button=true
       - --upstream=http://core:8090/

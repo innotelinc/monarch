@@ -203,6 +203,41 @@ def test_scheduler_tick_survives_missing_services(conn, settings):
     conn.close()
 
 
+def test_the_pass_between_searches_imports(monkeypatch, settings):
+    """The loop's other branch: no search is due, so it imports instead.
+
+    It handed the connection where a downloader was expected, so every pass
+    between searches raised TypeError, which the loop logged and swallowed -
+    a finished torrent waited for the next search tick (or forever, with
+    searching off) instead of being linked when it landed.
+    """
+    calls = []
+
+    def fake_import(client, cfg):
+        calls.append((type(client).__name__, cfg))
+        return []
+
+    monkeypatch.setattr(acquisition, "import_completed", fake_import)
+    scheduler = acquisition.Scheduler(
+        dataclasses.replace(settings, search_interval=0.15, import_interval=0.01),
+        client_factory=FakeTransmission,
+    )
+    monkeypatch.setattr(scheduler, "tick", lambda: {"stats": {}})
+    scheduler.start()
+    try:
+        for _ in range(200):
+            if calls:
+                break
+            import time as _time
+            _time.sleep(0.005)
+    finally:
+        scheduler.stop()
+
+    assert calls, "the pass between searches never imported anything"
+    assert calls[0][0] == "FakeTransmission"
+    assert calls[0][1] is not None
+
+
 def test_after_import_notifies_jellyfin_and_fetches_a_subtitle(conn, settings, tmp_path):
     from app import subtitles
 

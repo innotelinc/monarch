@@ -94,6 +94,13 @@ x-sso-env: &sso-env
   OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "false"
   OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
   OAUTH2_PROXY_REVERSE_PROXY: "true"
+  # The identity header core trusts (CORE_AUTH_HEADER), and the only one this
+  # mode of deployment can carry. `pass-user-headers` sets X-Forwarded-User and
+  # X-Forwarded-Email on the request it hands upstream; `set-xauthrequest` sets
+  # X-Auth-Request-* on the *response* to the browser, for nginx auth_request
+  # mode, which is not what runs here. Core asked for the auth_request name, so
+  # every signed-in /api/* call arrived with no header and answered 401 while the
+  # page itself loaded - "not signed in", signed in (measured 2026-10-30).
   OAUTH2_PROXY_PASS_USER_HEADERS: "true"
   OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
   OAUTH2_PROXY_WHITELIST_DOMAINS: ${SSO_COOKIE_DOMAIN:-.innotel.us}
@@ -1156,7 +1163,10 @@ services:
       TZ: ${TZ:-America/New_York}
       CORE_DATA_DIR: /data
       CORE_LIBRARY_ROOT: /data/media
-      CORE_AUTH_HEADER: X-Auth-Request-Email
+      # What this gateway actually sends upstream. X-Auth-Request-Email belongs to
+      # nginx auth_request mode and never reaches core through a reverse proxy
+      # (see the note on OAUTH2_PROXY_PASS_USER_HEADERS above).
+      CORE_AUTH_HEADER: X-Forwarded-Email
       TRANSMISSION_URL: http://transmission:9091
       JELLYFIN_URL: ${JELLYFIN_URL:-http://jellyfin:8096}
       JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}

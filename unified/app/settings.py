@@ -51,7 +51,11 @@ class Settings:
     # One sign-in for the whole platform: the single oauth2-proxy gateway in
     # front of this service sets this header. Trusting it is only safe because
     # the app is not published directly; see docs/unified.md.
-    auth_header: str = os.environ.get("CORE_AUTH_HEADER", "X-Auth-Request-Email")
+    # What the gateway in front of core actually sets. oauth2-proxy's
+    # `pass-user-headers` sends X-Forwarded-Email; `X-Auth-Request-Email` is the
+    # nginx auth_request name and never arrives through a reverse proxy, which is
+    # how a signed-in browser got 401 on every /api/* call (2026-10-30).
+    auth_header: str = os.environ.get("CORE_AUTH_HEADER", "X-Forwarded-Email")
     auth_disabled: bool = _bool("CORE_AUTH_DISABLED", False)
 
     # Subtitles: the one part of Bazarr worth keeping. OpenSubtitles.com hands

@@ -460,8 +460,13 @@ class Scheduler:
                     self.tick()
                     next_search = now + self.settings.search_interval
                 else:
-                    with db.session(self.settings.db_path) as conn:
-                        import_completed(conn, self.client_factory(), self.settings)
+                    # The import pass asks the downloader first and opens its own
+                    # session afterwards (see its docstring), so it is handed a
+                    # client and no connection. Passing the connection as the
+                    # client made every pass between searches a TypeError, which
+                    # the loop logged and swallowed: imports only ever ran on a
+                    # tick, never in between.
+                    import_completed(self.client_factory(), self.settings)
             except Exception:  # a scheduler thread must never die
                 log.exception("scheduler pass failed")
             self._stop.wait(self.settings.import_interval)

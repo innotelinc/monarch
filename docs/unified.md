@@ -26,7 +26,7 @@ state and the channel lineup, and it serves the only UI anyone signs in to.
 | Deluge, SABnzbd | two more download clients | Transmission only |
 | TVHeadend, NextPVR, Dispatcharr, autobrr, iptv-epg | four ways to make a playlist playable | `core/livetv.py`: M3U tuner + XMLTV guide read natively |
 | ClipBucket | video CMS beside the library | not ported; its media is an ordinary library folder |
-| 12 × oauth2-proxy | one gateway per hostname | **one** gateway, one `_innotel_sso` cookie, one `X-Auth-Request-Email` |
+| 12 × oauth2-proxy | one gateway per hostname | **one** gateway, one `_innotel_sso` cookie, one `X-Forwarded-Email` |
 
 **Jellyfin stays.** It is not part of the duplication: it plays and transcodes,
 and rewriting that is a transcode pipeline, not a merge. `core` decides what
@@ -152,8 +152,11 @@ their own configuration; only their identity is replaced.
 ## Identity
 
 One oauth2-proxy instance terminates the browser session for the whole
-platform and sets `X-Auth-Request-Email`. `core` refuses every `/api/*` request
-without it; there is no second user store and no local password form.
+platform and sets `X-Forwarded-Email` on the request it hands `core` (the
+`pass-user-headers` header — `X-Auth-Request-*` is the nginx `auth_request`
+name and never reaches a reverse-proxied upstream). `core` refuses every
+`/api/*` request without it; there is no second user store and no local
+password form.
 `CORE_AUTH_DISABLED=1` exists for local development only — with it set, the
 service trusts whatever the client sends and must never be published.
 
