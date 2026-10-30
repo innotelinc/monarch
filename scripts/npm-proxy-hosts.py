@@ -72,6 +72,7 @@ ever adds the record for a newly listed subdomain.
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -754,6 +755,38 @@ def tsig_config():
     }
 
 
+def upstream_accepts(row, forward_host, timeout=None):
+    """(True | False | None, detail): does anything answer where this row points?
+
+    A live host can match npm-hosts.conf field for field and still serve nothing:
+    a forward to a container that was renamed, a port an app stopped publishing,
+    a `docker:` name Docker no longer resolves. Measured 2026-10-30,
+    `admin.<domain>` pointed at a gateway that had moved, so every field matched
+    the conf and the name answered 000 — `--check` was comparing the
+    configuration instead of asking the upstream for an answer.
+
+    None means "cannot judge from here", and it is deliberately not False: a
+    `docker:` upstream is a container name on the *NPM* host's network, which this
+    host cannot resolve, and calling that closed would be the check inventing a
+    finding. A TCP answer inside NPM_CHECK_TIMEOUT (default 3s) is the bar because
+    a service that does not accept a connection in three seconds is not one a
+    browser reaches either — the HTTP status is the app's business, not this one's.
+    """
+    if str(row.get("forward", "")).startswith(DOCKER_UPSTREAM_PREFIX):
+        return None, "a container name, resolvable only on the NPM host"
+    if timeout is None:
+        try:
+            timeout = float(env("NPM_CHECK_TIMEOUT", "3") or 3)
+        except ValueError:
+            timeout = 3.0
+    try:
+        with socket.create_connection((forward_host, int(row["port"])),
+                                      timeout=timeout):
+            return True, ""
+    except OSError as exc:
+        return False, type(exc).__name__
+
+
 def is_ip_address(value):
     try:
         import ipaddress
@@ -852,7 +885,12 @@ def main():
                         help="manage proxy hosts only (no certificate work)")
     parser.add_argument("--check", action="store_true",
                         help="verify live NPM proxy hosts match npm-hosts.conf "
+                             "and that each row's upstream answers "
                              "(read-only; exit 1 on any drift)")
+    parser.add_argument("--no-reach", action="store_true",
+                        help="--check without the TCP probe of each row's "
+                             "upstream (offline; the configuration is still "
+                             "compared)")
     parser.add_argument("--prune", action="store_true",
                         help="delete the proxy hosts in this domain that "
                              "npm-hosts.conf no longer lists")
@@ -1051,6 +1089,16 @@ def main():
             # suppresses this line.
             if not args.skip_ssl and not existing.get("certificate_id"):
                 problems.append("serves no TLS certificate (certificate_id=0)")
+            # ...and the upstream has to answer. Every field above can match while
+            # the name serves 000, which is what a forward to a moved container or
+            # a port nobody publishes looks like: `admin.<domain>` did exactly that
+            # on 2026-10-30. A row this host cannot reach (a `docker:` name) is
+            # skipped rather than failed. `--no-reach` compares offline.
+            if not args.no_reach:
+                accepts, why = upstream_accepts(host, forward_host)
+                if accepts is False:
+                    problems.append(
+                        f"nothing accepts on {forward_host}:{host['port']} ({why})")
             if problems:
                 print(f"  DRIFT: {domain_name} -> " + "; ".join(problems))
                 drifted += 1

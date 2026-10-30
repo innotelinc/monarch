@@ -80,6 +80,11 @@ set -uo pipefail
 #     - when the local NPM container runs (or NPM_MODE=remote with
 #       credentials): live proxy hosts match scripts/npm-hosts.conf
 #       (npm-proxy-hosts.py --check: subdomain, forward host, port, websockets)
+#   The deployment itself:
+#     - this checkout is the tip of origin/main with no local edits
+#       (scripts/check-deployment-current.sh, read-only). A host 35 commits behind
+#       ran all of the checks above except the fixes in those commits and
+#       reported OK, which is a check reporting on code nobody deployed.
 #   Infra (host, only when the docker CLI works):
 #     - /data and /docker/appdata disk usage below DRIFT_DISK_MAX_PCT (90)
 #     - each probed container not crash-looping (RestartCount below
@@ -1346,6 +1351,37 @@ if [ "$clipbucket_code" -eq 0 ]; then
     fail "clipbucket: a catalogue item's watch page serves no playable file - re-run scripts/clipbucket-library.py --apply, then check the file volume's ownership; see docs/operations.md 'ClipBucket'"
     printf '%s\n' "$clip_serve_out" | indent >&2
   fi
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# The deployment's own checkout
+# ───────────────────────────────────────────────────────────────────────────
+# Every check here judges the stack with the code in THIS checkout, so a checkout
+# that is not the branch is a report about code nobody deployed. Measured on the
+# media host 2026-10-30: 35 commits behind origin/main, with those same changes
+# sitting in the tree as local edits, and nothing in the estate could tell — the
+# old checks passed because the old checks were the ones running.
+#
+# Nothing here repairs it, on purpose even under --heal: pulling a deployment is a
+# decision about which version runs, and a check that pulls is a check that can
+# turn its own finding into a pass. Exit 2 is "cannot look" (no git, no remote, no
+# network) and stays a note, like the splash checks.
+# MONARCH_DEPLOY_CHECK=0 skips it, which is what the tests use: they run this
+# script from a developer's tree, where "not the branch" is true and uninteresting,
+# and the check talks to the remote (ls-remote), which a unit test must not.
+if [ "${MONARCH_DEPLOY_CHECK:-1}" = "0" ]; then
+  say "note: the deployment's checkout was not judged (MONARCH_DEPLOY_CHECK=0)"
+else
+deploy_out=$(sh scripts/check-deployment-current.sh 2>&1)
+deploy_code=$?
+if [ "$deploy_code" -eq 0 ]; then
+  say "ok: the deployment's checkout is $(printf '%s' "$deploy_out" | head -1)"
+elif [ "$deploy_code" -eq 2 ]; then
+  say "note: the deployment's checkout could not be judged (skipped) - $(printf '%s' "$deploy_out" | tail -1)"
+else
+  fail "deployment: this checkout is not what origin/main carries, so the checks above judged code nobody deployed - $(printf '%s' "$deploy_out" | head -1); see docs/operations.md 'Updating a deployment'"
+  printf '%s\n' "$deploy_out" | indent >&2
+fi
 fi
 
 # ───────────────────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ without being mistaken for one of this stack's compose services.
 """
 import importlib.util
 import os
+import socket
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -72,6 +73,52 @@ class OtherUpstreamTest(unittest.TestCase):
         # here, i.e. be sent to the media host, which runs no such container.
         self.assertEqual(nph.resolve_forward(row("cerulean-npm-sso"), "192.168.1.56"),
                          "192.168.1.56")
+
+
+class ReachabilityTest(unittest.TestCase):
+    """`--check` asks the upstream for an answer, not only the config for a match."""
+
+    def setUp(self):
+        self._saved = os.environ.get("NPM_CHECK_TIMEOUT")
+        os.environ["NPM_CHECK_TIMEOUT"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("NPM_CHECK_TIMEOUT", None)
+        if self._saved is not None:
+            os.environ["NPM_CHECK_TIMEOUT"] = self._saved
+
+    def test_listening_port_is_accepted(self):
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            port = server.getsockname()[1]
+            state, _ = nph.upstream_accepts(
+                {"forward": "homarr", "port": port}, "127.0.0.1")
+            self.assertIs(state, True)
+
+    def test_closed_port_is_a_finding(self):
+        # The case that was invisible: every field matched the conf.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        state, why = nph.upstream_accepts(
+            {"forward": "homarr", "port": port}, "127.0.0.1")
+        self.assertIs(state, False)
+        self.assertTrue(why, "a closed upstream must say why")
+
+    def test_unresolvable_name_is_closed_not_skipped(self):
+        # A hostname that does not resolve is a forward nobody can reach, so it is
+        # reported rather than excused (only a `docker:` name is excused).
+        state, _ = nph.upstream_accepts(
+            {"forward": "192.0.2.1", "port": 9}, "192.0.2.1")
+        self.assertIs(state, False)
+
+    def test_docker_upstream_cannot_be_judged_from_here(self):
+        state, why = nph.upstream_accepts(
+            {"forward": "docker:cerulean-npm-sso", "port": 4180},
+            "cerulean-npm-sso")
+        self.assertIsNone(state)
+        self.assertIn("NPM host", why)
 
 
 class ShippedConfTest(unittest.TestCase):

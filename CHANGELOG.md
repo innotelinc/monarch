@@ -12,6 +12,23 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **Two silences that made a broken deployment look healthy are checks now.**
+  `npm-proxy-hosts.py --check` compared configuration and never asked whether
+  anything answered: `admin.monarch.innotel.us` matched its row field for field
+  while forwarding to a gateway that had moved, and the name served 000. It now
+  probes each row's upstream (TCP, `NPM_CHECK_TIMEOUT` default 3s) and reports a
+  dead one as drift; a `docker:` row is skipped rather than failed, because that
+  name only resolves on the NPM host, and `--no-reach` keeps an offline run
+  offline. Separately, nothing could see that the *deployment itself* was stale:
+  the media host's checkout sat 35 commits behind `origin/main` with those same
+  changes in its tree as local edits, so every fix in this changelog was in the
+  repository and not in the thing running at 06:00 — and the checks passed
+  because the old checks were the ones running. `scripts/check-deployment-current.sh`
+  asks the remote for its branch tip with `git ls-remote` (read-only: it writes no
+  ref, so it cannot repair the condition it reports) and distinguishes behind,
+  ahead, diverged and locally-edited, with the commit count when the object is
+  present. `drift-check.sh` runs it, never heals it — pulling is a decision about
+  which version runs — and `MONARCH_DEPLOY_CHECK=0` skips it for tests.
 - **The guard's state is on the board, and dead board tiles are a finding.**
   `monarch-health` now mounts Jellyfin's branding store, its data directory and
   the drift check's state directory read-only and serves `GET /splash/health`:

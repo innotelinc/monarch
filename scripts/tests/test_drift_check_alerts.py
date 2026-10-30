@@ -130,6 +130,10 @@ class DriftCheckAlerts(unittest.TestCase):
             {
                 "MONARCH_ENV": str(self.env_file),
                 "MONARCH_STATE_DIR": str(self.state),
+                # These tests run the check out of a developer's tree, so "not
+                # origin/main" is true and uninteresting here — and the deployment
+                # check asks the remote, which a unit test must not do.
+                "MONARCH_DEPLOY_CHECK": "0",
                 "DRIFT_JELLYFIN_GRACE_SEC": "0",
                 "DRIFT_TELEGRAM_CMD": SEAM,
                 "DRIFT_ALERT_FILE": str(self.alerted),
