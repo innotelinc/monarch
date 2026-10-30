@@ -147,7 +147,11 @@ APPS = {
     # commits: is the code running here the code in the branch? It answers 200 only
     # while the checkout is origin/main with a clean tree and 503 when it is not, so
     # a stale deployment is a red dot instead of a green board over old code.
-    "Deployment": ("https://health.innotel.us/deployment/health", "docker",
+    # `health.monarch.innotel.us`, not `health.innotel.us`: the conf row is `health`
+    # under MONARCH_DOMAIN, so that is the name with a record - the short one was
+    # the first guess here and it resolves for nobody, which the board check said
+    # out loud (`[Errno -3] Temporary failure in name resolution`) within a minute.
+    "Deployment": ("https://health.monarch.innotel.us/deployment/health", "docker",
                    "Deployment - is the running checkout origin/main, tree clean?"),
 }
 
