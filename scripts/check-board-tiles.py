@@ -61,18 +61,23 @@ USER_AGENT = "monarch-board-check/1"
 # Answering, but not for the public: a gated page is a live tile.
 ALIVE_STATUSES = (401, 403)
 
-# Tiles known not to answer, and why. A tile here is still reported - named, with
+# Names known not to answer, and why. A name here is still reported - named, with
 # its reason, on every run - but it does not fail the check: these are another
-# estate's missing vhosts, not this host's drift. `--strict` turns them back into
-# findings, which is what to run after the edge is fixed and what to delete the
-# entry after.
+# estate's missing vhosts, not this host's drift, and a check that is red forever
+# is one nobody reads. `--strict` turns them into findings.
+#
+# The three below are a safety net, not the live state: their tiles were removed
+# from the board design on 2026-10-30 (`DEAD` in scripts/seed-homarr-board.py), so
+# the dashboard no longer carries a link that can only fail. The entries stay for
+# the cheap failure - somebody re-adds one of these hrefs by hand before its edge
+# catches up - which should read "known down, here is why" rather than page.
 KNOWN_DOWN = {
     # The three names below resolve to 73.68.203.71, and the edge answering there
     # has no vhost or certificate for them: TLS reports UNRECOGNIZED_NAME and the
     # connection is refused (measured 2026-10-30, from the media host and from a
     # workstation on another network). The products themselves are provisioned on
     # the voice estate at 192.168.1.30 behind the i4 proxy (scripts/npm-pbx-repoint.sh
-    # repoints those rows), so the tile is the right product at a name that edge
+    # repoints those rows), so the product is real and the name is what the edge
     # does not serve yet.
     "dashboard.capstone.innotel.us":
         "the Capstone UI is proxied by the i4 edge (192.168.1.30:3010); the edge this "
