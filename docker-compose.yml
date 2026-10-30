@@ -771,6 +771,7 @@ services:
       JELLYFIN_CONFIG_DIR: /jellyfin
       JELLYFIN_DATA_DIR: /jellyfin/data/data
       SPLASH_STATUS_FILE: /state/splash-status
+      LIVETV_STATUS_FILE: /var/lib/monarch/livetv-monitor.json
     ports:
       - 8003:8003
     volumes:
@@ -779,6 +780,8 @@ services:
       - /docker/appdata/monarch-health:/app/data
       - /docker/appdata/jellyfin:/jellyfin:ro
       - /docker/appdata/init:/state:ro
+      # The live TV monitor's own report, so a dead feed turns the IPTV tile red.
+      - /var/lib/monarch:/var/lib/monarch:ro
 
   ###############################################
   # MONARCH-SEED - Pre-seed Transmission session settings

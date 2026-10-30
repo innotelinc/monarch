@@ -60,6 +60,15 @@ JELLYFIN_DATA_DIR = os.environ.get("JELLYFIN_DATA_DIR", "/jellyfin/data/data")
 # appdata mount it resolves through, so the same string can be read here.
 JELLYFIN_CONTAINER_CONFIG = os.environ.get("JELLYFIN_CONTAINER_CONFIG", "/config")
 
+# `scripts/livetv-monitor.py` writes this next to its database after every run
+# (monarch-livetv-monitor.timer, every 30 minutes). The board reads it through
+# /livetv/health so a dead feed is a red tile rather than a stale guide.
+LIVETV_STATUS_FILE = os.environ.get("LIVETV_STATUS_FILE", "/var/lib/monarch/livetv-monitor.json")
+# Eight monitor ticks. The monitor marks a feed down only after two consecutive
+# failures, so its own thresholds are the interesting ones; this only catches a
+# timer that has stopped, which is otherwise indistinguishable from "all fine".
+LIVETV_MAX_AGE = int(os.environ.get("LIVETV_MAX_AGE", "14400"))
+
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv",
                     ".ts", ".mpg", ".mpeg", ".flv", ".iso", ".m2ts"}
 SERVICE_ENDPOINTS = {
@@ -376,6 +385,19 @@ def _kv_file(path: str) -> dict:
     return dict(line.split("=", 1) for line in lines if "=" in line)
 
 
+def _age_seconds(stamp) -> float | None:
+    """Seconds since an ISO-8601 `finished_at`, or None if it cannot be read."""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - when).total_seconds())
+
+
 def _same_bytes(left: str, right: str) -> bool:
     def digest(path: str) -> str:
         h = hashlib.sha256()
@@ -470,6 +492,57 @@ def splash_health_route():
     being shown a poster wall, or the unit that restores it was found broken.
     """
     result = splash_health()
+    return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
+
+
+@app.get("/livetv/health")
+def livetv_health_route():
+    """200 while no guide feed is marked down and the monitor is recent.
+
+    The monitor's own rule is the one that matters: a feed has to fail twice in a
+    row before it is called dead, so one timeout does not paint the board red. What
+    this adds is the failure the monitor cannot report about itself - a timer that
+    stopped - which otherwise looks exactly like a healthy guide forever.
+    """
+    reasons: list[str] = []
+    result: dict = {"ok": False, "down": [], "down_count": None, "checked": None,
+                    "rows": None, "ok_probes": None, "failed_probes": None}
+    try:
+        with open(LIVETV_STATUS_FILE, "r", encoding="utf-8") as fh:
+            summary = json.load(fh)
+    except OSError:
+        reasons.append(f"no monitor report at {LIVETV_STATUS_FILE} - the live TV monitor "
+                       "has not run on this host")
+        summary = None
+    except ValueError as error:
+        reasons.append(f"{LIVETV_STATUS_FILE} is not JSON ({error})")
+        summary = None
+
+    if summary is not None:
+        down = summary.get("down") or []
+        result.update({
+            "down": [{"number": item.get("number"), "name": item.get("name")}
+                     for item in down[:20]],
+            "down_count": summary.get("down_count"),
+            "checked": summary.get("finished_at"),
+            "rows": summary.get("rows"),
+            "ok_probes": summary.get("ok"),
+            "failed_probes": summary.get("failed"),
+        })
+        if down or summary.get("down_count"):
+            names = ", ".join(f"{item.get('number')} {item.get('name')}" for item in down[:5])
+            reasons.append(f"{summary.get('down_count') or len(down)} feed(s) marked down"
+                           + (f" ({names})" if names else ""))
+        age = _age_seconds(summary.get("finished_at"))
+        if age is None:
+            reasons.append("the monitor report has no usable finished_at - cannot tell how "
+                           "old it is")
+        elif age > LIVETV_MAX_AGE:
+            reasons.append(f"the last monitor run finished {int(age)}s ago "
+                           f"(> {LIVETV_MAX_AGE}s) - the timer is not running")
+
+    result["reasons"] = reasons
+    result["ok"] = not reasons
     return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
 
 

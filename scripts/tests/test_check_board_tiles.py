@@ -78,13 +78,15 @@ def dead_port() -> int:
         return s.getsockname()[1]
 
 
-def make_board(path: Path, rows: list[tuple[str, str]], ping: str = "") -> Path:
+def make_board(path: Path, rows: list[tuple[str, str]], ping: str = "",
+               icon: str | None = None) -> Path:
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE app (id TEXT PRIMARY KEY, name TEXT, description TEXT, "
                        "icon_url TEXT, href TEXT, ping_url TEXT)")
     for index, (name, href) in enumerate(rows):
-        connection.execute("INSERT INTO app (id, name, href, ping_url) VALUES (?,?,?,?)",
-                           (f"app{index}", name, href, ping or href))
+        connection.execute("INSERT INTO app (id, name, href, icon_url, ping_url) "
+                           "VALUES (?,?,?,?,?)",
+                           (f"app{index}", name, href, icon, ping or href))
     connection.commit()
     connection.close()
     return path
@@ -170,11 +172,81 @@ class BoardTiles(unittest.TestCase):
         self.assertIn("all 2 tile(s) answer", out)
         self.assertIn("1 distinct URL(s)", out)
 
+    def test_an_icon_that_does_not_load_is_a_finding(self):
+        # A 404 icon draws a blank square, which reads as a loading state nobody
+        # waits out - so the icon is checked, not just the link.
+        db = make_board(self.tmp / "icon.sqlite", [("Jellyfin", self.server())],
+                        icon=self.server(404) + "icon.png")
+        code, out, _ = run(str(db))
+        self.assertEqual(code, 1, out)
+        self.assertIn("(icon)", out)
+        self.assertIn("HTTP 404", out)
+
+    def test_one_icon_shared_by_many_tiles_is_probed_once(self):
+        icon = self.server() + "jellyfin.png"
+        db = make_board(self.tmp / "shared.sqlite",
+                        [("Jellyfin", self.server()), ("Jellyfin (again)", self.server())],
+                        icon=icon)
+        code, out, _ = run(str(db))
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 link(s), 1 icon(s)", out)
+
+    def test_icons_can_be_skipped(self):
+        db = make_board(self.tmp / "skipicons.sqlite", [("Radarr", self.server())],
+                        icon=self.server(500) + "radarr.png")
+        code, out, _ = run(str(db), "--no-icons")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("icon", out)
+
     def test_a_tile_with_no_href_says_so(self):
         db = make_board(self.tmp / "empty.sqlite", [("Placeholder", "")])
         code, out, _ = run(str(db))
         self.assertEqual(code, 1, out)
         self.assertIn("no href", out)
+
+    def test_a_known_down_tile_is_a_note_not_a_finding(self):
+        # Three product tiles name names the voice estate's edge does not serve
+        # yet. They are named on every run, but a check that is red forever is one
+        # nobody reads - so they are notes, and --strict is how they come back.
+        href = f"http://127.0.0.1:{dead_port()}/"
+        db = make_board(self.tmp / "known.sqlite", [("Zeus PBX", href)])
+        saved = dict(board.KNOWN_DOWN)
+
+        def restore():
+            board.KNOWN_DOWN.clear()
+            board.KNOWN_DOWN.update(saved)
+
+        self.addCleanup(restore)
+        board.KNOWN_DOWN["127.0.0.1"] = "served by the voice estate's edge"
+
+        code, out, _ = run(str(db))
+        self.assertEqual(code, 0, out)
+        self.assertIn("known down - served by the voice estate's edge", out)
+        self.assertIn("1 known down", out)
+        self.assertNotIn("FAIL", out)
+
+        code, out, _ = run(str(db), "--strict")
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAIL", out)
+
+    def test_a_known_down_name_still_fails_on_a_different_host(self):
+        # The exemption is per hostname, not per tile: if one of those products
+        # moves to a name that also does not answer, that is a new breakage.
+        href = f"http://127.0.0.1:{dead_port()}/"
+        db = make_board(self.tmp / "moved.sqlite", [("Zeus PBX", href)])
+        saved = dict(board.KNOWN_DOWN)
+
+        def restore():
+            board.KNOWN_DOWN.clear()
+            board.KNOWN_DOWN.update(saved)
+
+        self.addCleanup(restore)
+        board.KNOWN_DOWN.clear()
+        board.KNOWN_DOWN["pbx.zeus.innotel.us"] = "known"
+
+        code, out, _ = run(str(db))
+        self.assertEqual(code, 1, out)
+        self.assertIn("Zeus PBX", out)
 
     def test_no_database_is_cannot_look(self):
         code, _, err = run(str(self.tmp / "absent.sqlite"))

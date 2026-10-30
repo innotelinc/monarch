@@ -1030,6 +1030,21 @@ above, `drift-check.sh` writes `splash-status` into its state directory — a st
 run writes nothing, like its verdict — and a *missing* verdict reads as unknown
 rather than healthy, because a guard nobody has checked is not proven.
 
+The same pattern carries live TV. `GET /livetv/health` reads
+`/var/lib/monarch/livetv-monitor.json` — the 30-minute monitor's own report — and
+is 200 only while no feed is marked down and the last run is recent: a feed has to
+fail twice in a row to be counted, so one timeout does not paint the board red,
+and a timer that has stopped is caught by that age instead of looking like a
+healthy guide forever. The **IPTV (EPG)** tile's status dot reads it.
+
+Three tiles are known not to answer, and are *named* rather than hidden: Capstone,
+Subscribe (Zeus) and Zeus PBX resolve to the edge at 73.68.203.71, which has no
+vhost for those names (TLS `UNRECOGNIZED_NAME`, measured 2026-10-30, from the media
+host and from another network) while the products themselves are provisioned on
+the voice estate. `scripts/check-board-tiles.py` prints them as notes on every run
+and `--strict` makes them findings again once that edge is fixed — the alternative,
+a check that is red forever, is the state this was written to end.
+
 The board itself is checked too. `scripts/check-board-tiles.py` reads Homarr's
 sqlite (read-only) and asks every tile's href for an answer — 2xx/3xx after
 redirects, and 401/403 because a gated sign-in page is a working link, which is

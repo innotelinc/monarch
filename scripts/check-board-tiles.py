@@ -11,8 +11,8 @@ one. `scripts/seed-homarr-board.py` fixes the designed tiles, but a tile a perso
 added by hand, or a hostname somebody removed from Nginx Proxy Manager afterwards,
 is invisible to it.
 
-So this reads the board's own database (sqlite, read-only) and asks each href for an
-answer. It never edits a board.
+So this reads the board's own database (sqlite, read-only) and asks each href — and
+each icon — for an answer. It never edits a board.
 
 WHAT COUNTS AS ALIVE
 --------------------
@@ -21,14 +21,28 @@ working link that happens to want a session, which is most of them (`media`,
 `req`, `tv`, … are behind one oauth2-proxy). Dead is: DNS that does not resolve,
 a refused connection, a timeout, or a 4xx/5xx the app itself produced.
 
+Icons are checked too, because a 404 icon draws a blank square that reads as a
+loading state nobody waits out. They are third-party URLs (jsdelivr), so they are
+reported per tile as `(icon)` and `--no-icons` skips them on a host with no egress.
+
+WHAT IS NOT A FINDING YET (`KNOWN_DOWN`)
+---------------------------------------
+Three tiles name products that another estate's edge does not serve yet. They are
+named and explained on every run, but they do not fail the check: a check that is
+red forever is one nobody reads, which is how this class of failure started. Run
+`--strict` after that edge is fixed, and delete the entry with it.
+
 USAGE
 -----
     python3 scripts/check-board-tiles.py                    # default board db
     python3 scripts/check-board-tiles.py /path/to/db.sqlite
     HOMARR_DB=/path/to/db.sqlite python3 scripts/check-board-tiles.py --timeout 15
+    python3 scripts/check-board-tiles.py --strict           # KNOWN_DOWN counts too
+    python3 scripts/check-board-tiles.py --no-icons         # links only
 
-Exit codes, as everywhere in this repo: 0 = every tile answers, 1 = at least one
-does not (each named), 2 = cannot run (no database, no sqlite3, no board rows).
+Exit codes, as everywhere in this repo: 0 = every tile answers (or is known down),
+1 = at least one does not (each named), 2 = cannot run (no database, no sqlite3, no
+board rows).
 """
 
 from __future__ import annotations
@@ -38,6 +52,7 @@ import os
 import sqlite3
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -46,17 +61,42 @@ USER_AGENT = "monarch-board-check/1"
 # Answering, but not for the public: a gated page is a live tile.
 ALIVE_STATUSES = (401, 403)
 
+# Tiles known not to answer, and why. A tile here is still reported - named, with
+# its reason, on every run - but it does not fail the check: these are another
+# estate's missing vhosts, not this host's drift. `--strict` turns them back into
+# findings, which is what to run after the edge is fixed and what to delete the
+# entry after.
+KNOWN_DOWN = {
+    # The three names below resolve to 73.68.203.71, and the edge answering there
+    # has no vhost or certificate for them: TLS reports UNRECOGNIZED_NAME and the
+    # connection is refused (measured 2026-10-30, from the media host and from a
+    # workstation on another network). The products themselves are provisioned on
+    # the voice estate at 192.168.1.30 behind the i4 proxy (scripts/npm-pbx-repoint.sh
+    # repoints those rows), so the tile is the right product at a name that edge
+    # does not serve yet.
+    "dashboard.capstone.innotel.us":
+        "the Capstone UI is proxied by the i4 edge (192.168.1.30:3010); the edge this "
+        "name resolves to has no vhost for it",
+    "subscribe.zeus.innotel.us":
+        "the Zeus subscribe page is served from the voice estate; the edge this name "
+        "resolves to has no vhost for it",
+    "pbx.zeus.innotel.us":
+        "the Zeus PBX admin is served from the voice estate; the edge this name "
+        "resolves to has no vhost for it",
+}
+
 
 class CannotRun(RuntimeError):
     """Not enough on disk to judge the board (no database, no rows)."""
 
 
-def tiles(db_path: Path) -> list[tuple[str, str]]:
-    """(name, href) for every app on the board, live or stale.
+def tiles(db_path: Path) -> list[tuple[str, str, str]]:
+    """(name, href, icon_url) for every app on the board, live or stale.
 
-    `app` rows are the tiles; the board also has widgets, but a widget has no href
-    to check. A name can carry the same href twice (two tiles to one service), so
-    the caller probes each URL once while still reporting per tile.
+    `app` rows are the tiles; the board also has widgets, but a widget has neither
+    an href nor an icon to check. A name can carry the same href twice (two tiles
+    to one service), so the caller probes each URL once while still reporting per
+    tile.
     """
     if not db_path.is_file():
         raise CannotRun(f"no Homarr database at {db_path} - is the dashboard on this host? "
@@ -64,7 +104,8 @@ def tiles(db_path: Path) -> list[tuple[str, str]]:
     try:
         connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
-        rows = connection.execute("SELECT name, href FROM app ORDER BY name").fetchall()
+        rows = connection.execute(
+            "SELECT name, href, icon_url FROM app ORDER BY name").fetchall()
     except sqlite3.Error as error:
         raise CannotRun(f"cannot read {db_path} ({error})") from None
     finally:
@@ -74,7 +115,8 @@ def tiles(db_path: Path) -> list[tuple[str, str]]:
             pass
     if not rows:
         raise CannotRun(f"{db_path} has no app rows - the board has not been seeded")
-    return [(row["name"], (row["href"] or "").strip()) for row in rows]
+    return [(row["name"], (row["href"] or "").strip(), (row["icon_url"] or "").strip())
+            for row in rows]
 
 
 def probe(href: str, timeout: float) -> tuple[bool, str]:
@@ -99,9 +141,14 @@ def probe(href: str, timeout: float) -> tuple[bool, str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("db", nargs="?", default=DEFAULT_DB, help=f"Homarr db (default {DEFAULT_DB})")
+    parser.add_argument("db", nargs="?", default=DEFAULT_DB,
+                        help=f"Homarr db (default {DEFAULT_DB})")
     parser.add_argument("--timeout", type=float, default=8.0,
                         help="seconds to wait for one tile (default 8)")
+    parser.add_argument("--strict", action="store_true",
+                        help="treat a KNOWN_DOWN tile as a finding (after its edge is fixed)")
+    parser.add_argument("--no-icons", action="store_true",
+                        help="check links only (a host with no egress to the icon CDN)")
     args = parser.parse_args(argv)
 
     try:
@@ -111,23 +158,56 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     answered: dict[str, tuple[bool, str]] = {}
+    icons: dict[str, tuple[bool, str]] = {}
     dead: list[str] = []
-    for name, href in rows:
+    dead_tiles: set[str] = set()
+    known: list[str] = []
+    for name, href, _icon in rows:
         if not href:
             dead.append(f"{name}: no href - the tile cannot be clicked")
+            dead_tiles.add(name)
             continue
         if href not in answered:
             answered[href] = probe(href, args.timeout)
         ok, detail = answered[href]
-        if not ok:
+        if ok:
+            continue
+        host = urllib.parse.urlsplit(href).hostname or ""
+        reason = KNOWN_DOWN.get(host)
+        if reason and not args.strict:
+            known.append(f"{name} → {href}: known down - {reason}")
+        else:
             dead.append(f"{name} → {href}: {detail}")
+            dead_tiles.add(name)
 
+    if not args.no_icons:
+        for name, _href, icon in rows:
+            if not icon:
+                continue
+            if icon not in icons:
+                icons[icon] = probe(icon, args.timeout)
+            ok, detail = icons[icon]
+            if not ok:
+                dead.append(f"{name} (icon) → {icon}: {detail}")
+                dead_tiles.add(name)
+
+    for line in known:
+        print(f"  note  {line}")
     for line in dead:
         print(f"  FAIL  {line}")
     if dead:
-        print(f"\nFAIL — {len(dead)} of {len(rows)} tile(s) do not answer: the board links "
-              "somewhere that does not")
+        print(f"\nFAIL — {len(dead_tiles)} of {len(rows)} tile(s) have a problem: the board "
+              "links somewhere that does not")
         return 1
+    if known:
+        tail = f"; {len(icons)} icon(s) answer" if icons else ""
+        print(f"\n  ok    {len(rows) - len(known)} of {len(rows)} tile(s) answer; "
+              f"{len(known)} known down (named above, not hidden — --strict makes "
+              f"them findings){tail}")
+        return 0
+    if icons:
+        print(f"  ok    {len(answered)} link(s), {len(icons)} icon(s) answer")
+        return 0
     print(f"  ok    all {len(rows)} tile(s) answer "
           f"({len(answered)} distinct URL(s) probed)")
     return 0

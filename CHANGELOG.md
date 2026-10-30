@@ -25,6 +25,16 @@ are written by hand and describe the behaviour change, not the commits.
   every tile on the board for an answer — 2xx/3xx, and 401/403 because a gated page
   is a working link — and names the ones that do not, which is what nothing in the
   estate did while the board was carrying `*.monarch.local` links.
+- **A dead live-TV feed is a red tile, and three known-dead tiles are named rather
+  than hidden.** `monarch-health` also serves `GET /livetv/health`, read from the
+  30-minute monitor's own `livetv-monitor.json`: 200 only while no feed is marked
+  down (a feed must fail twice in a row to count) and the last run is recent, so a
+  timer that stopped is caught instead of looking like a healthy guide. The
+  **IPTV (EPG)** tile's dot reads it. `check-board-tiles.py` gained a `KNOWN_DOWN`
+  map: the three tiles naming names the voice estate's edge does not serve yet
+  (Capstone, Subscribe (Zeus), Zeus PBX) are still listed with their reason on
+  every run but no longer fail the check, and `--strict` turns them back into
+  findings once that edge is fixed.
 - **The splash has a 2560×1440 desktop render, the check judges the draw it finds,
   and the board shows the live image.** `--scale 4/3` renders and installs the
   same design at 2560×1440 (`monarch-splash-1440.png`, an exact 4/3 of the 1080p

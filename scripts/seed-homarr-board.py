@@ -106,12 +106,13 @@ APPS = {
                 "Magnate - billing platform & admin portal"),
     "Subscribe": ("https://subscribe.innotel.us", "stripe",
                   "Subscribe - the portal landing page: pick a plan, pay via Stripe, manage your account (Magnate)"),
-    "Subscribe (Zeus)": ("https://subscribe.zeus.innotel.us", "asterisk",
-                         "Zeus subscription page - phone plan + Capstone voice agents add-on"),
-    "Capstone": ("https://dashboard.capstone.innotel.us", "openai",
-                 "Capstone - voice AI agent platform dashboard"),
-    "Zeus PBX": ("https://pbx.zeus.innotel.us", "asterisk",
-                 "Zeus - PBX / VoIP (Asterisk + coturn)"),
+    # Capstone, Subscribe (Zeus) and Zeus PBX are in DEAD below, not missing by
+    # accident: on 2026-10-30 none of their names answered at the public edge
+    # (`TLSV1_UNRECOGNIZED_NAME` on dashboard.capstone.innotel.us,
+    # subscribe.zeus.innotel.us and pbx.zeus.innotel.us, checked from the media host
+    # and from a workstation, and `capstone.innotel.us` now 301s to `pbx.it.com`).
+    # A tile that can only fail is worse than no tile, so bring them back by adding
+    # the row here again only once the edge serves the name.
     "AvantFAX": ("https://fax.zeus.innotel.us", "files",
                  "AvantFAX - fax service"),
     "Signara": ("https://app.signara.innotel.us", "vault",
@@ -157,6 +158,11 @@ DEAD = (
     "AthenIQ Learn",
     "AthenIQ Studio",
     "Autobrr",
+    # Measured 2026-10-30 by scripts/check-board-tiles.py, which is what clicks
+    # these: all three names fail at the edge with SNI unrecognised, and the
+    # Capstone domain itself redirects to an unrelated host. Removed rather than
+    # left to look healthy; re-add the row in APPS when the name answers again.
+    "Capstone",
     "ClipBucket",
     "Deluge",
     "Dispatcharr",
@@ -165,7 +171,9 @@ DEAD = (
     "Onyx",
     "Oasis",
     "Rizzaura",
+    "Subscribe (Zeus)",
     "TVHeadend",
+    "Zeus PBX",
 )
 
 # Tiles whose status dot asks a different question from "does the page load".
@@ -174,6 +182,10 @@ DEAD = (
 # that - so this dot reads the guard, not the PNG.
 PING_OVERRIDES = {
     "Splash (live)": "http://monarch-health:8003/splash/health",
+    # The guide is only as good as its feeds, and a dead feed leaves the EPG page
+    # looking exactly like a live one. This dot reads the monitor's report (a feed
+    # has to fail twice in a row to count) instead of the page's 200.
+    "IPTV (EPG)": "http://monarch-health:8003/livetv/health",
 }
 
 # Any app still pointing at one of these names is stale by construction.
@@ -247,9 +259,6 @@ DESIGN = (
     ("Business", (
         app_tile("Magnate"),
         app_tile("Subscribe"),
-        app_tile("Subscribe (Zeus)"),
-        app_tile("Capstone"),
-        app_tile("Zeus PBX"),
         app_tile("AvantFAX"),
         app_tile("Signara"),
     )),
