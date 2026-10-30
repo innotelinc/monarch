@@ -1049,6 +1049,26 @@ once the name answers.
 a href re-added by hand before its edge catches up is named on every run, with the
 reason, instead of paging — and `--strict` turns those into findings.
 
+Both statuses are readable in words at `http://<media host>:8003/status`
+(`monarch-health`): the splash section names the installed draw and the last guard
+verdict, and the live-TV section lists the down feeds grouped by cause, then by
+channel. It is the same facts as `/splash/health` and `/livetv/health`, which
+answer 503 when their section needs attention. It is **not published at a name
+yet** — `health.monarch.innotel.us` has no DNS record (every other Monarch name
+resolves individually; there is no wildcard), and the ready line sits commented in
+`scripts/npm-hosts.conf` with that reason. A proxy host for a name that does not
+resolve is the dead tile this repo removes.
+
+The live-TV half is a triage list, not a cleanup. On 2026-10-30 the monitor marked
+**221 of 1556 rows** down: 33 HTTP 404, 24 hostnames that no longer resolve, 24
+that answer 200 with something that is not an HLS playlist, 6 × 403, 4 × 502, 3
+timeouts, 2 × 523, and singles. The dial's own repair is deliberately narrow — it
+drops a dead row only when a live stream covers the same guide channel — and on
+that run it dropped **1**. The remaining ~220 are upstream rot: either the lineup
+prunes them (and renumbers 328 cable numbers and 1226 band channels with it) or
+the upstream playlist refreshes. Nothing here deletes channels on a timer, because
+a channel that comes back is worth more than a number nobody watched.
+
 The board itself is checked too. `scripts/check-board-tiles.py` reads Homarr's
 sqlite (read-only) and asks every tile's href for an answer — 2xx/3xx after
 redirects, and 401/403 because a gated sign-in page is a working link, which is

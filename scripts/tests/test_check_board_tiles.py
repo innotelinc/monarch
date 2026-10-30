@@ -198,6 +198,37 @@ class BoardTiles(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("icon", out)
 
+    def test_a_status_probe_that_answers_and_fails_is_a_finding(self):
+        # The dot is a second question: the link can load while the endpoint behind
+        # it is down, and a red dot with nothing behind it is the worst of both.
+        db = make_board(self.tmp / "ping.sqlite", [("Splash (live)", self.server())],
+                        ping=self.server(503))
+        code, out, _ = run(str(db))
+        self.assertEqual(code, 1, out)
+        self.assertIn("(status)", out)
+        self.assertIn("HTTP 503", out)
+
+    def test_a_status_probe_on_a_docker_name_is_a_note(self):
+        # `http://monarch-health:8003/...` resolves inside the compose network and
+        # here it does not: the board's own probe is the one that matters, so this
+        # is said out loud rather than failed.
+        db = make_board(self.tmp / "dockerping.sqlite", [("Splash (live)", self.server())],
+                        ping="http://monarch-health:8003/splash/health")
+        code, out, _ = run(str(db))
+        self.assertEqual(code, 0, out)
+        self.assertIn("not resolvable from here", out)
+        # And it is not counted as a known-down tile: one is a link that does not
+        # answer, the other is a probe this machine cannot reach.
+        self.assertIn("status probe(s) not resolvable from here", out)
+        self.assertNotIn("known down", out)
+
+    def test_status_probes_can_be_skipped(self):
+        db = make_board(self.tmp / "noping.sqlite", [("Splash (live)", self.server())],
+                        ping=self.server(503))
+        code, out, _ = run(str(db), "--no-ping")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("(status)", out)
+
     def test_a_tile_with_no_href_says_so(self):
         db = make_board(self.tmp / "empty.sqlite", [("Placeholder", "")])
         code, out, _ = run(str(db))

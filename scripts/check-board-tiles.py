@@ -25,6 +25,14 @@ Icons are checked too, because a 404 icon draws a blank square that reads as a
 loading state nobody waits out. They are third-party URLs (jsdelivr), so they are
 reported per tile as `(icon)` and `--no-icons` skips them on a host with no egress.
 
+The **status probe** (`ping_url`) is checked as well, because the board's dot is a
+second question: a tile can load and its endpoint be down, or the endpoint can be
+down while the link is fine - and a red dot with nothing behind it is the worst of
+both. Those endpoints are often docker-internal (`http://monarch-health:8003/...`),
+which cannot resolve from wherever this runs, so a *name-resolution* failure is a
+note ("Homarr probes it from its own network") and only an answered-but-failing
+probe is a finding.
+
 WHAT IS NOT A FINDING YET (`KNOWN_DOWN`)
 ---------------------------------------
 Three tiles name products that another estate's edge does not serve yet. They are
@@ -60,6 +68,13 @@ DEFAULT_DB = os.environ.get("HOMARR_DB", "/docker/appdata/homarr/appdata/db/db.s
 USER_AGENT = "monarch-board-check/1"
 # Answering, but not for the public: a gated page is a live tile.
 ALIVE_STATUSES = (401, 403)
+# A status probe that cannot even resolve is not a finding from a shell: the board's
+# own probes run inside the compose network, where `monarch-health` is a name.
+import re  # noqa: E402 - kept beside its only use, below the constants
+DNS_FAILURES = re.compile(r"name or service not known|temporary failure in name "
+                          r"resolution|no address associated|nodename nor servname|\[Errno -[235]\]",
+                          re.IGNORECASE)
+
 
 # Names known not to answer, and why. A name here is still reported - named, with
 # its reason, on every run - but it does not fail the check: these are another
@@ -95,8 +110,8 @@ class CannotRun(RuntimeError):
     """Not enough on disk to judge the board (no database, no rows)."""
 
 
-def tiles(db_path: Path) -> list[tuple[str, str, str]]:
-    """(name, href, icon_url) for every app on the board, live or stale.
+def tiles(db_path: Path) -> list[tuple[str, str, str, str]]:
+    """(name, href, icon_url, ping_url) for every app on the board, live or stale.
 
     `app` rows are the tiles; the board also has widgets, but a widget has neither
     an href nor an icon to check. A name can carry the same href twice (two tiles
@@ -110,7 +125,7 @@ def tiles(db_path: Path) -> list[tuple[str, str, str]]:
         connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
-            "SELECT name, href, icon_url FROM app ORDER BY name").fetchall()
+            "SELECT name, href, icon_url, ping_url FROM app ORDER BY name").fetchall()
     except sqlite3.Error as error:
         raise CannotRun(f"cannot read {db_path} ({error})") from None
     finally:
@@ -120,8 +135,8 @@ def tiles(db_path: Path) -> list[tuple[str, str, str]]:
             pass
     if not rows:
         raise CannotRun(f"{db_path} has no app rows - the board has not been seeded")
-    return [(row["name"], (row["href"] or "").strip(), (row["icon_url"] or "").strip())
-            for row in rows]
+    return [(row["name"], (row["href"] or "").strip(), (row["icon_url"] or "").strip(),
+             (row["ping_url"] or "").strip()) for row in rows]
 
 
 def probe(href: str, timeout: float) -> tuple[bool, str]:
@@ -154,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="treat a KNOWN_DOWN tile as a finding (after its edge is fixed)")
     parser.add_argument("--no-icons", action="store_true",
                         help="check links only (a host with no egress to the icon CDN)")
+    parser.add_argument("--no-ping", action="store_true",
+                        help="do not check the status probes (ping_url)")
     args = parser.parse_args(argv)
 
     try:
@@ -167,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     dead: list[str] = []
     dead_tiles: set[str] = set()
     known: list[str] = []
-    for name, href, _icon in rows:
+    for name, href, _icon, _ping in rows:
         if not href:
             dead.append(f"{name}: no href - the tile cannot be clicked")
             dead_tiles.add(name)
@@ -186,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
             dead_tiles.add(name)
 
     if not args.no_icons:
-        for name, _href, icon in rows:
+        for name, _href, icon, _ping in rows:
             if not icon:
                 continue
             if icon not in icons:
@@ -196,7 +213,32 @@ def main(argv: list[str] | None = None) -> int:
                 dead.append(f"{name} (icon) → {icon}: {detail}")
                 dead_tiles.add(name)
 
+    # The status probe: a second question from the same tile. Only distinct URLs
+    # that are not already the href are worth asking again. A probe note is kept
+    # apart from KNOWN_DOWN: one is a tile that does not answer, the other is a
+    # probe this machine cannot reach, and reporting them as one number is how a
+    # reader learns to skip the summary.
+    probe_notes: list[str] = []
+    status: dict[str, tuple[bool, str]] = {}
+    if not args.no_ping:
+        for name, href, _icon, ping in rows:
+            if not ping or ping == href:
+                continue
+            if ping not in status:
+                status[ping] = probe(ping, args.timeout)
+            ok, detail = status[ping]
+            if ok:
+                continue
+            if DNS_FAILURES.search(detail):
+                probe_notes.append(f"{name} (status) → {ping}: not resolvable from here "
+                                   f"({detail}) - Homarr probes it from its own network")
+            else:
+                dead.append(f"{name} (status) → {ping}: {detail}")
+                dead_tiles.add(name)
+
     for line in known:
+        print(f"  note  {line}")
+    for line in probe_notes:
         print(f"  note  {line}")
     for line in dead:
         print(f"  FAIL  {line}")
@@ -204,17 +246,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nFAIL — {len(dead_tiles)} of {len(rows)} tile(s) have a problem: the board "
               "links somewhere that does not")
         return 1
+    probe_tail = (f"; {len(probe_notes)} status probe(s) not resolvable from here"
+                  if probe_notes else "")
     if known:
-        tail = f"; {len(icons)} icon(s) answer" if icons else ""
         print(f"\n  ok    {len(rows) - len(known)} of {len(rows)} tile(s) answer; "
               f"{len(known)} known down (named above, not hidden — --strict makes "
-              f"them findings){tail}")
+              f"them findings)"
+              + (f"; {len(icons)} icon(s) answer" if icons else "") + probe_tail)
         return 0
     if icons:
-        print(f"  ok    {len(answered)} link(s), {len(icons)} icon(s) answer")
+        print(f"  ok    {len(answered)} link(s), {len(icons)} icon(s) answer{probe_tail}")
         return 0
     print(f"  ok    all {len(rows)} tile(s) answer "
-          f"({len(answered)} distinct URL(s) probed)")
+          f"({len(answered)} distinct URL(s) probed){probe_tail}")
     return 0
 
 

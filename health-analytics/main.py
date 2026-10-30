@@ -28,10 +28,11 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -495,9 +496,8 @@ def splash_health_route():
     return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
 
 
-@app.get("/livetv/health")
-def livetv_health_route():
-    """200 while no guide feed is marked down and the monitor is recent.
+def livetv_status() -> dict:
+    """Whether the guide's feeds are healthy, and whether the monitor is recent.
 
     The monitor's own rule is the one that matters: a feed has to fail twice in a
     row before it is called dead, so one timeout does not paint the board red. What
@@ -543,7 +543,105 @@ def livetv_health_route():
 
     result["reasons"] = reasons
     result["ok"] = not reasons
+    return result
+
+
+@app.get("/livetv/health")
+def livetv_health_route():
+    """200 while no guide feed is marked down and the monitor is recent."""
+    result = livetv_status()
     return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
+
+
+STATUS_CSS = """
+:root { color-scheme: dark; }
+body { margin: 0; padding: 32px; background: #06070a; color: #f6f1e6;
+       font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 900px; margin: 0 auto; }
+h1 { font: 600 26px/1.2 ui-serif, Georgia, serif; letter-spacing: .12em;
+     text-transform: uppercase; color: #e2c07a; margin: 0 0 4px; }
+p.sub { margin: 0 0 28px; color: #9d988e; }
+section { border: 1px solid #2b2d30; border-radius: 10px; padding: 18px 20px;
+          margin: 0 0 18px; background: #101214; }
+section h2 { margin: 0 0 10px; font: 600 17px/1.3 ui-sans-serif, system-ui, sans-serif; }
+.badge { display: inline-block; padding: 2px 9px; border-radius: 999px;
+         font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.badge.ok { background: #16351f; color: #7fd39b; border: 1px solid #235c33; }
+.badge.bad { background: #3a1519; color: #ff9d9d; border: 1px solid #6b2530; }
+ul { margin: 8px 0 0; padding-left: 18px; }
+li { margin: 2px 0; color: #cfcabc; }
+code { color: #d8b56d; }
+table { border-collapse: collapse; margin-top: 10px; width: 100%; }
+th, td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid #1e2024; }
+th { color: #9d988e; font-weight: 500; }
+footer { color: #6c655a; font-size: 12px; margin-top: 22px; }
+"""
+
+
+def _badge(ok: bool) -> str:
+    return '<span class="badge ok">ok</span>' if ok else '<span class="badge bad">attention</span>'
+
+
+def _reasons(reasons: list[str]) -> str:
+    if not reasons:
+        return ""
+    return "<ul>" + "".join(f"<li>{escape(str(reason))}</li>" for reason in reasons) + "</ul>"
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status_page():
+    """The two things the dashboard's dots ask about, in words.
+
+    Homarr can say red or green; this says which feed, and why. It reads the same
+    functions as the JSON endpoints, so the page and the dots cannot disagree.
+    """
+    splash = splash_health()
+    livetv = livetv_status()
+
+    down_rows = "".join(
+        f"<tr><td>{escape(str(item.get('number')))}</td>"
+        f"<td>{escape(str(item.get('name')))}</td></tr>"
+        for item in (livetv.get("down") or [])
+    )
+    causes: dict[str, int] = {}
+    for item in livetv.get("down") or []:
+        cause = (item.get("detail") or "(no detail)").split(":")[0][:48]
+        causes[cause] = causes.get(cause, 0) + 1
+    cause_rows = "".join(f"<tr><td>{escape(cause)}</td><td>{count}</td></tr>"
+                         for cause, count in sorted(causes.items(), key=lambda kv: -kv[1]))
+
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monarch status</title><style>{STATUS_CSS}</style></head>
+<body><main>
+<h1>Monarch</h1>
+<p class="sub">The splash a client falls back to, and the live-TV feeds the monitor has marked dead.</p>
+
+<section>
+<h2>Splash {_badge(splash['ok'])}</h2>
+<p>Installed: <code>{escape(str(splash.get('installed') or 'none'))}</code> &middot;
+   fallback: <code>{escape(str(splash.get('fallback') or 'none'))}</code></p>
+<p>Gallery guard last judged <code>{escape(str(splash.get('guard')))}</code>,
+   splash <code>{escape(str(splash.get('splash')))}</code>
+   (drift-check run at {escape(str(splash.get('checked') or 'never'))}).</p>
+{_reasons(splash.get('reasons') or [])}
+</section>
+
+<section>
+<h2>Live TV {_badge(livetv['ok'])}</h2>
+<p><code>{livetv.get('down_count') if livetv.get('down_count') is not None else '?'}</code>
+   feed(s) marked down of <code>{livetv.get('rows') or '?'}</code> rows;
+   last monitored at {escape(str(livetv.get('checked') or 'never'))}.</p>
+{_reasons(livetv.get('reasons') or [])}
+{f'<table><tr><th>Cause</th><th>Feeds</th></tr>{cause_rows}</table>' if cause_rows else ''}
+{f'<table><tr><th>Ch</th><th>Feed</th></tr>{down_rows}</table>' if down_rows else ''}
+</section>
+
+<footer>/splash/health and /livetv/health are the same facts as JSON (503 when a
+section needs attention), which is what the dashboard reads.</footer>
+</main></body></html>"""
+    return HTMLResponse(page, status_code=200 if (splash["ok"] and livetv["ok"]) else 503)
 
 
 threading.Thread(target=_run_scan_loop, daemon=True).start()

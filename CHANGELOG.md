@@ -25,6 +25,20 @@ are written by hand and describe the behaviour change, not the commits.
   every tile on the board for an answer — 2xx/3xx, and 401/403 because a gated page
   is a working link — and names the ones that do not, which is what nothing in the
   estate did while the board was carrying `*.monarch.local` links.
+- **The platform's status is a page, not only a dot.** `monarch-health` serves
+  `/status`: the splash a client falls back to (with the last guard verdict) and
+  the live-TV feeds the monitor marked down, grouped by cause and then by channel.
+  It renders the same two facts as `/splash/health` and `/livetv/health`, which
+  answer 503 when their section needs attention — what the dashboard's dots read.
+  It is not published at a name yet: `health.monarch.innotel.us` has no DNS record,
+  and the ready line in `scripts/npm-hosts.conf` says so rather than creating a
+  proxy host for a name that cannot resolve. `check-board-tiles.py` now also probes
+  each app's `ping_url`, so a dot whose endpoint is down is a finding (a
+  docker-internal name that cannot resolve from a shell is a note, because Homarr
+  probes it from its own network). Triage of the live dial on 2026-10-30: 221 of
+  1556 rows down — 33 × 404, 24 unresolvable, 24 non-HLS, 6 × 403, 4 × 502, plus
+  singles — of which the lineup's own rule dropped 1 salvageable duplicate; the
+  rest is upstream rot, not a defect here.
 - **A dead live-TV feed is a red tile, and three dead tiles came off the board.**
   `monarch-health` also serves `GET /livetv/health`, read from the 30-minute
   monitor's own `livetv-monitor.json`: 200 only while no feed is marked down (a
