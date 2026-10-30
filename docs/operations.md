@@ -946,9 +946,10 @@ nothing in the app's own UI can set it:
   collage goes and watching which one came back from `/Branding/Splashscreen`.
 
 `python3 scripts/jellyfin-splash.py --check` judges all of it (asset committed
-and 3840×2160, file installed and identical, `SplashscreenEnabled=true`, the
-recorded location equal to the one it installs to, and a file that exists where
-that location maps back through the appdata mount). `--apply` installs the
+at the size its name implies, file installed and identical,
+`SplashscreenEnabled=true`, the recorded location equal to the one it installs
+to, and a file that exists where that location maps back through the appdata
+mount). `--apply` installs the
 committed PNG, replaces the generated collage, and points `branding.xml` at the
 custom path while **preserving the keys it does not own** (`LoginDisclaimer`,
 `CustomCss` — a wholesale rewrite drops them); `--apply --variant light` does the
@@ -956,6 +957,15 @@ same with the cream variant. `--render` regenerates the 4K PNG and `--svg`
 rewrites the design of record, both from the same `build_plan()` (rendering
 needs Pillow, which is why the PNG is committed). Exit codes: 0 fine, 1 a
 finding, 2 cannot run (no appdata, no asset and no Pillow).
+
+`--scale 1` renders and installs the same design at 1920×1080, under its own
+name: `assets/monarch-splash-1080.png` becomes
+`/config/data/data/monarch-splash-1080.png` and `SplashscreenLocation` follows
+it. It exists for a client that caps the size of a splash image — a 4K PNG is
+four times the bytes a 1080p surface can use, on a launch where the client is
+already waiting — and the check reads the name in `branding.xml`, so a host that
+deliberately installed the small render is judged as a 1080p host rather than
+reported as a 4K one that drifted. The default is still 4K (`--scale 2`).
 
 The 2026-10 design (*Celestial Cinema*) is deliberately not a poster collage: a
 seeded star field and sparkles, film-strip perforations along the top and bottom
@@ -979,13 +989,23 @@ sudo install -m755 scripts/restore-splash-collage.sh /opt/monarch/scripts/
 sudo systemctl daemon-reload && sudo systemctl enable --now monarch-splash-guard.path
 ```
 
+The guard is only worth having if it is running, and none of its failures look
+like failures from the outside: a unit that is not installed, one installed but
+not enabled (it stops watching at the next boot), one enabled but not active (it
+missed the scan that already ran), and one running against a data directory that
+moved (the collage is a poster wall while systemd calls the unit healthy).
+`scripts/check-splash-guard.sh` judges all four, read-only, and
+`drift-check.sh` runs it beside the splash check — exit 2 is "cannot look" (no
+generated collage here, so this is not the media host, or no systemctl) and stays
+a note, like the splash check.
+
 `scripts/drift-check.sh` runs `--check` read-only on the timer, and reports exit 2
 as a skip so a host running part of the group is not a drifted host. The design
 test (`scripts/tests/test_jellyfin_splash.py`) renders the committed
 `assets/monarch-splash.svg`/`-light.svg` from the same plan and fails when they
-differ by a byte, and re-renders each PNG and compares it to the committed one,
-so changing the splash means re-running `--svg` and `--render` and committing
-the three files.
+differ by a byte, and re-renders each PNG — 4K and 1080p, both variants — and
+compares it to the committed one, so changing the splash means re-running `--svg`
+and `--render` (with and without `--scale 1`) and committing the results.
 
 ```bash
 python3 scripts/jellyfin-splash.py --check          # the drift check's half

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import importlib.util
 import struct
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -51,6 +52,7 @@ SVG = {"dark": REPO_ROOT / "assets" / "monarch-splash.svg",
        "light": REPO_ROOT / "assets" / "monarch-splash-light.svg"}
 PNG = {"dark": REPO_ROOT / "assets" / "monarch-splash.png",
        "light": REPO_ROOT / "assets" / "monarch-splash-light.png"}
+GUARD = REPO_ROOT / "scripts" / "check-splash-guard.sh"
 
 try:
     import PIL  # noqa: F401
@@ -170,6 +172,27 @@ class CommittedAsset(unittest.TestCase):
         self.assertEqual(splash.SPLASH_SIZE, (3840, 2160))
         self.assertEqual(splash.INSTALLED_NAME, "monarch-splash.png")
 
+    def test_each_variant_also_ships_a_1080p_render(self):
+        # A client that caps splash size gets the same drawing at 1920×1080, under
+        # its own name, so `--apply --scale 1` has something to install on a host
+        # with no rasterizer.
+        for variant in PNG:
+            asset = REPO_ROOT / "assets" / splash.asset_name(variant, 1)
+            self.assertTrue(asset.is_file(), f"{asset.name} is not committed")
+            self.assertEqual(splash.png_dimensions(asset), (1920, 1080), asset.name)
+            self.assertNotEqual(asset.name, splash.asset_name(variant, 2))
+
+    def test_the_two_renders_are_the_same_drawing_at_two_sizes(self):
+        # The small render is the same plan, not a different composition: the
+        # suffix is the only difference in the name, and the sizes differ by 2×.
+        self.assertEqual(splash.asset_name("dark"), "monarch-splash.png")
+        self.assertEqual(splash.asset_name("dark", 1), "monarch-splash-1080.png")
+        self.assertEqual(splash.RESOLUTION_SIZE[2], (3840, 2160))
+        self.assertEqual(splash.RESOLUTION_SIZE[1], (1920, 1080))
+        self.assertEqual(splash.scale_of_asset("monarch-splash-1080.png"), 1)
+        self.assertEqual(splash.scale_of_asset("monarch-splash-light.png"), 2)
+        self.assertIsNone(splash.scale_of_asset("splashscreen.png"))
+
     def test_asset_is_a_flat_design_not_a_photo_collage(self):
         # The splash this replaces is Jellyfin's generated collage: 1920×1080 and
         # ~4.1 MB, because it is photographs. A flat design with gradients is
@@ -230,6 +253,43 @@ class CheckAndApply(unittest.TestCase):
             code, out, _ = run("--check", "--appdata", str(root))
             self.assertEqual(code, 0, out)
             self.assertIn("ok", out)
+
+    def test_apply_scale_one_installs_the_1080_render_under_its_own_name(self):
+        with TemporaryDirectory() as tmp:
+            root = appdata(Path(tmp))
+            code, out, _ = run("--apply", "--scale", "1", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
+            data = root / "jellyfin" / "data" / "data"
+            asset = REPO_ROOT / "assets" / splash.asset_name("dark", 1)
+            self.assertTrue(splash.same_bytes(data / "monarch-splash-1080.png", asset))
+            self.assertFalse((data / "monarch-splash.png").exists(),
+                             "a 1080p install must not leave a 4K file under the other name")
+            self.assertEqual(splash.read_branding(root / "jellyfin")["location"],
+                             "/config/data/data/monarch-splash-1080.png")
+            # A default --check reads the name branding carries, so it judges the
+            # 1080p install as 1080p instead of reporting a missing 4K file —
+            # otherwise every host that installed the small render fails the
+            # drift check for making the deliberate choice.
+            code, out, _ = run("--check", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
+            self.assertIn("1920×1080", out)
+
+    def test_apply_with_a_variant_installs_that_variant(self):
+        # `--variant light` used to install the *dark* asset, because only the
+        # render target moved with the variant while the default asset stayed the
+        # module-level 4K dark one.
+        with TemporaryDirectory() as tmp:
+            root = appdata(Path(tmp))
+            code, out, _ = run("--apply", "--variant", "light", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
+            data = root / "jellyfin" / "data" / "data"
+            # The light render installs under its own name, which is what
+            # docs/unified.md has always claimed and what the location records.
+            self.assertTrue(splash.same_bytes(data / splash.asset_name("light"), PNG["light"]))
+            self.assertEqual(splash.read_branding(root / "jellyfin")["location"],
+                             f"/config/data/data/{splash.asset_name('light')}")
+            code, out, _ = run("--check", "--variant", "light", "--appdata", str(root))
+            self.assertEqual(code, 0, out)
 
     def test_branding_keeps_the_keys_it_does_not_own(self):
         with TemporaryDirectory() as tmp:
@@ -322,6 +382,97 @@ class Renderer(unittest.TestCase):
             self.assertEqual(header[:8], b"\x89PNG\r\n\x1a\n")
             self.assertEqual(struct.unpack(">II", header[16:24]), (3840, 2160))
             self.assertEqual(header[24:26], b"\x08\x02", "8-bit truecolour RGB, no alpha surprises")
+
+
+class SplashGuard(unittest.TestCase):
+    """`check-splash-guard.sh` — what drift-check now judges about the guard.
+
+    The unit itself belongs to systemd, so the test is a shim `systemctl` whose
+    answers are the test: enabled/disabled, active/inactive, listed/not listed.
+    That is the whole contract the script reads, and no real unit is touched.
+    """
+
+    def guard(self, tmp: Path, *, collage: bytes | None = b"design",
+              installed: bytes | None = b"design", systemctl: str = "shim",
+              enabled: str = "enabled", active: str = "active",
+              listed: bool = True) -> tuple[int, str]:
+        data = tmp / "jellyfin" / "data" / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        if collage is not None:
+            (data / "splashscreen.png").write_bytes(collage)
+        if installed is not None:
+            (data / "monarch-splash.png").write_bytes(installed)
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "SPLASH_COLLAGE": str(data / "splashscreen.png"),
+            "SPLASH_GUARD_DIR": str(tmp / "units"),
+            "SHIM_ENABLED": enabled,
+            "SHIM_ACTIVE": active,
+            "SHIM_LISTED": "1" if listed else "0",
+        }
+        if systemctl == "shim":
+            shim = tmp / "bin" / "systemctl"
+            shim.parent.mkdir(exist_ok=True)
+            shim.write_text(
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                "  list-unit-files) [ \"$SHIM_LISTED\" = 1 ] && printf '%s\\n' \"$3\"; exit 0 ;;\n"
+                "  is-enabled) printf '%s\\n' \"$SHIM_ENABLED\"; exit 0 ;;\n"
+                "  is-active) printf '%s\\n' \"$SHIM_ACTIVE\"; exit 0 ;;\n"
+                "esac\n"
+                "exit 0\n")
+            shim.chmod(0o755)
+            env["SPLASH_SYSTEMCTL"] = str(shim)
+        else:
+            env["SPLASH_SYSTEMCTL"] = systemctl
+        done = subprocess.run(["sh", str(GUARD)], capture_output=True, text=True, env=env)
+        return done.returncode, done.stdout + done.stderr
+
+    def test_a_running_guard_with_a_restored_collage_passes(self):
+        with TemporaryDirectory() as tmp:
+            code, out = self.guard(Path(tmp))
+            self.assertEqual(code, 0, out)
+            self.assertIn("carries the installed splash", out)
+
+    def test_a_collage_the_guard_never_restored_is_a_finding(self):
+        # The exact state measured on the media host: the unit exists, the scan
+        # rewrote the file, and nothing put the design back.
+        with TemporaryDirectory() as tmp:
+            code, out = self.guard(Path(tmp), collage=b"a poster wall")
+            self.assertEqual(code, 1, out)
+            self.assertIn("was not restored", out)
+
+    def test_a_unit_that_is_not_enabled_is_a_finding(self):
+        with TemporaryDirectory() as tmp:
+            code, out = self.guard(Path(tmp), enabled="disabled")
+            self.assertEqual(code, 1, out)
+            self.assertIn("not enabled", out)
+
+    def test_a_unit_that_is_not_active_is_a_finding(self):
+        with TemporaryDirectory() as tmp:
+            code, out = self.guard(Path(tmp), active="inactive")
+            self.assertEqual(code, 1, out)
+            self.assertIn("not active", out)
+
+    def test_a_unit_that_is_not_installed_is_a_finding(self):
+        with TemporaryDirectory() as tmp:
+            code, out = self.guard(Path(tmp), listed=False)
+            self.assertEqual(code, 1, out)
+            self.assertIn("not installed", out)
+
+    def test_no_collage_is_cannot_look(self):
+        # No collage means Jellyfin's data dir is not on this host, which is a
+        # host to skip rather than one to page about.
+        with TemporaryDirectory() as tmp:
+            code, out = self.guard(Path(tmp), collage=None)
+            self.assertEqual(code, 2, out)
+            self.assertIn("not on this host", out)
+
+    def test_without_systemctl_it_cannot_look(self):
+        with TemporaryDirectory() as tmp:
+            code, out = self.guard(Path(tmp), systemctl="/nonexistent/systemctl")
+            self.assertEqual(code, 2, out)
+            self.assertIn("cannot be read", out)
 
 
 if __name__ == "__main__":

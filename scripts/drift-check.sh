@@ -876,6 +876,26 @@ else
   printf '%s\n' "$splash_out" | indent >&2
 fi
 
+# ...and the unit that keeps it that way. Installing the splash does not stop
+# Jellyfin rewriting `{DataPath}/splashscreen.png` after every scan; the path unit
+# is what puts the design back, and it fails in three ways that all look like
+# success from the outside: not installed, installed but not enabled (it stops
+# watching at the next boot), or enabled but not active (it missed the scan that
+# already ran). A fourth: running, but watching a data directory that moved, so
+# the collage is a poster wall while systemd reports a healthy unit.
+# Exit 2 is "cannot look" (no generated collage here, so this is not the media
+# host, or no systemctl) and stays a note, like the splash check above.
+guard_out=$(sh scripts/check-splash-guard.sh 2>&1)
+guard_code=$?
+if [ "$guard_code" -eq 0 ]; then
+  say "ok: the splash-collage guard is enabled and watching for Jellyfin's post-scan rewrite"
+elif [ "$guard_code" -eq 2 ]; then
+  say "note: the splash-collage guard could not be judged (skipped) - $(printf '%s' "$guard_out" | tail -1)"
+else
+  fail "jellyfin: nothing is restoring the splash collage after a library scan, so the fallback image reverts to a poster wall - install and enable monarch-splash-guard.path (systemd/ in this repo); see docs/operations.md"
+  printf '%s\n' "$guard_out" | indent >&2
+fi
+
 # Jellyfin's own HTTPS listener is the other half of "this app is served over
 # TLS": the edge terminates TLS for the published name, and the app is asked to
 # serve the same material for anything that reaches it directly. It fails in

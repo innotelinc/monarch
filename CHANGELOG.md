@@ -12,6 +12,20 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **The splash-collage guard is now checked, and the splash ships at two sizes.**
+  Installing the 4K draw was never enough on its own: `SplashscreenPostScanTask`
+  rewrites `{DataPath}/splashscreen.png` after every library scan, so the
+  fallback image quietly reverted to a poster wall unless `monarch-splash-guard.path`
+  was installed, enabled and active — three states that all look like success from
+  outside. `scripts/check-splash-guard.sh` judges them (plus a guard watching a
+  data directory that moved), `drift-check.sh` runs it beside the splash check,
+  and a host with a generated collage and no working guard is now a finding
+  instead of a silence. `jellyfin-splash.py --scale 1` renders and installs the
+  same design at 1920×1080 under its own name for clients that cap splash size,
+  with `--check` reading which name `branding.xml` carries so the deliberate
+  small install is not reported as drift. `--apply --variant light` no longer
+  installs the dark asset, and the collage guard restores from the *installed*
+  splash rather than always the repo's 4K file, so both sizes stay consistent.
 - **Live TV now repairs itself when a feed dies or a source changes.** A new
   `monarch-livetv-monitor.timer` runs `scripts/livetv-monitor.py` every 30
   minutes: it probes every stream in the Comcast dial in parallel, records the

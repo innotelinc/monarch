@@ -17,10 +17,20 @@
 # this script's own write: one restore, then one no-op run, then quiet.
 set -eu
 
-asset=${SPLASH_ASSET:-/opt/monarch/assets/monarch-splash.png}
 collage=${SPLASH_COLLAGE:-/docker/appdata/jellyfin/data/data/splashscreen.png}
+asset=${SPLASH_ASSET:-}
 
-[ -f "$asset" ] || { echo "missing asset: $asset" >&2; exit 0; }
+# The *installed* draw is the truth, not the repo's 4K asset: a host carrying the
+# 1080p render (`--apply --scale 1`) must have the collage restored from that
+# render, or the fallback and the SplashscreenLocation disagree by 4× the bytes.
+if [ -z "$asset" ]; then
+  for candidate in "${collage%/*}/monarch-splash.png" "${collage%/*}/monarch-splash-1080.png" \
+                   /opt/monarch/assets/monarch-splash.png; do
+    if [ -f "$candidate" ]; then asset=$candidate; break; fi
+  done
+fi
+
+[ -f "$asset" ] || { echo "missing splash asset: ${asset:-none}" >&2; exit 0; }
 [ -f "$collage" ] || exit 0
 cmp -s -- "$asset" "$collage" && exit 0
 cp -- "$asset" "$collage"

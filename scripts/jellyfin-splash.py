@@ -69,6 +69,8 @@ USAGE
     python3 scripts/jellyfin-splash.py --render       # re-render assets/monarch-splash.png (needs Pillow)
     python3 scripts/jellyfin-splash.py --svg          # rewrite assets/monarch-splash.svg
     python3 scripts/jellyfin-splash.py --apply --variant light
+    python3 scripts/jellyfin-splash.py --render --scale 1     # assets/monarch-splash-1080.png
+    python3 scripts/jellyfin-splash.py --apply --scale 1      # install the 1080p render instead
 
 Runs on a host that mounts the media host's appdata (`APPDATA`, default
 `/docker/appdata`), or inside a container that has it. Paths:
@@ -79,9 +81,12 @@ Runs on a host that mounts the media host's appdata (`APPDATA`, default
                     recorded in branding.xml as /config/data/data/monarch-splash.png
                     (the *container* path Jellyfin resolves, not the host one)
 
-The installed draw is 4K because a TV client upscales 1080p visibly on a 4K
-panel, and because the same file is what a 4K web session paints behind the
-login card.
+The installed draw is 4K by default because a TV client upscales 1080p visibly on
+a 4K panel, and because the same file is what a 4K web session paints behind the
+login card. `--scale 1` renders and installs the same design at 1920×1080 under
+its own name (`monarch-splash-1080.png`), for a client that caps the size of a
+splash image; `--check` reads which of the two names `branding.xml` carries, so a
+host that deliberately installed the smaller one is not reported as drifted.
 
 Exit codes: 0 = the branded splash is installed and wired; 1 = it is not (a
 finding is printed); 2 = cannot run (no asset and no Pillow, or no appdata).
@@ -106,6 +111,14 @@ ASSET_DIR = REPO_ROOT / "assets"
 WIDTH, HEIGHT = 1920, 1080
 SCALE = 2
 SPLASH_SIZE = (WIDTH * SCALE, HEIGHT * SCALE)
+
+# Both renders of every variant, and the suffix that tells them apart. 4K is what
+# --apply installs unless told otherwise; `-1080` is the same drawing for a client
+# that caps splash size (a 4K PNG is four times the bytes a 1080p surface can use,
+# on a launch where the client is already waiting). The two never share a name, so
+# a host carrying either one can be judged without guessing.
+RESOLUTION_SIZE = {2: (WIDTH * 2, HEIGHT * 2), 1: (WIDTH, HEIGHT)}
+RESOLUTION_SUFFIX = {2: "", 1: "-1080"}
 
 # Geometry, shared by both variants and by both backends. Counts are here rather
 # than inline because the tests pin them: the motif is a measurement instrument
@@ -188,6 +201,22 @@ FONTS = {
 BRANDING_FILE = "branding.xml"
 SPLASH_ASSET = ASSET_DIR / "monarch-splash.png"
 INSTALLED_NAME = "monarch-splash.png"
+
+
+def asset_name(variant: str, scale: int = SCALE) -> str:
+    """`monarch-splash.png` at 4K, `monarch-splash-1080.png` at 1080p."""
+    stem = DESIGN[variant]["asset"][: -len(".png")]
+    return f"{stem}{RESOLUTION_SUFFIX[scale]}.png"
+
+
+def scale_of_asset(name: str) -> int | None:
+    """The scale a `-1080` (or absent) suffix implies, or None for a name this
+    script does not install (Jellyfin's own `splashscreen.png`, an operator's
+    hand-placed file) — in which case the caller falls back to `--scale`."""
+    for scale in RESOLUTION_SUFFIX:
+        if any(name == asset_name(variant, scale) for variant in DESIGN):
+            return scale
+    return None
 # The path recorded in branding.xml is resolved by the *server*, i.e. inside the
 # Jellyfin container, where the appdata mount is /config and the data dir is
 # {config}/data/data — the directory the generated collage and jellyfin.db live
@@ -729,6 +758,18 @@ def check(args) -> int:
             "(set APPDATA, or pass --appdata/--data-path)")
 
     findings = []
+    branding = read_branding(config_dir)
+    location = branding["location"]
+    # Which of the two renders this host is meant to be carrying: the name in
+    # branding.xml decides, so `--check` with no arguments judges a 1080p install
+    # as a 1080p install rather than as a 4K one that drifted.
+    scale = scale_of_asset(Path(location).name)
+    if scale is None:
+        scale = args.scale
+    installed_name = asset_name(args.variant, scale)
+    expected_size = RESOLUTION_SIZE[scale]
+    if not args.asset_given:
+        args.asset = str(ASSET_DIR / installed_name)
     asset = Path(args.asset)
     if not asset.is_file():
         findings.append(
@@ -740,19 +781,17 @@ def check(args) -> int:
         except CannotRun as error:
             findings.append(str(error))
         else:
-            if (width, height) != SPLASH_SIZE:
+            if (width, height) != expected_size:
                 findings.append(f"{asset} is {width}×{height}, expected "
-                                f"{SPLASH_SIZE[0]}×{SPLASH_SIZE[1]}")
+                                f"{expected_size[0]}×{expected_size[1]}")
 
-    installed = data_dir / INSTALLED_NAME
+    installed = data_dir / installed_name
     if not installed.is_file():
         findings.append(f"{installed} is missing — the branded splash is not installed")
     elif asset.is_file() and not same_bytes(installed, asset):
         findings.append(f"{installed} is not {asset.name} — it has been replaced")
 
-    branding = read_branding(config_dir)
-    location = branding["location"]
-    expected = f"{args.container_data_path.rstrip('/')}/{INSTALLED_NAME}"
+    expected = f"{args.container_data_path.rstrip('/')}/{installed_name}"
     if not branding["exists"]:
         findings.append(f"{branding['path']} does not exist — Jellyfin has no custom splash "
                         "and serves the image its own post-scan task generates")
@@ -791,29 +830,32 @@ def check(args) -> int:
               "deployment's splash. Apply it with: python3 scripts/jellyfin-splash.py --apply")
         return 1
     print(f"  ok    {installed.name} is installed "
-          f"({SPLASH_SIZE[0]}×{SPLASH_SIZE[1]}) and "
+          f"({expected_size[0]}×{expected_size[1]}) and "
           f"{branding['path'].name} points at {expected}")
     return 0
 
 
 def apply(args) -> int:
+    size = RESOLUTION_SIZE[args.scale]
+    installed_name = asset_name(args.variant, args.scale)
     asset = Path(args.asset)
     if not asset.is_file():
         if args.render:
-            print(f"{asset} is missing — rendering it ({args.variant})")
-            render(args.variant, asset, args.font_serif, args.font_sans)
+            print(f"{asset} is missing — rendering it ({args.variant}, "
+                  f"{size[0]}×{size[1]})")
+            render(args.variant, asset, args.font_serif, args.font_sans, size=size)
         else:
             raise CannotRun(f"{asset} is missing; run --render first")
     width, height = png_dimensions(asset)
-    if (width, height) != SPLASH_SIZE:
+    if (width, height) != size:
         raise CannotRun(f"{asset} is {width}×{height}, expected "
-                        f"{SPLASH_SIZE[0]}×{SPLASH_SIZE[1]}")
+                        f"{size[0]}×{size[1]}")
 
     data_dir = Path(args.data_path)
     if not data_dir.is_dir():
         raise CannotRun(f"{data_dir} does not exist — is this the media host's appdata? "
                         "(set APPDATA or --data-path)")
-    installed = data_dir / INSTALLED_NAME
+    installed = data_dir / installed_name
     shutil.copyfile(asset, installed)
     print(f"installed    {installed} (from {asset.name})")
 
@@ -825,7 +867,7 @@ def apply(args) -> int:
         shutil.copyfile(asset, generated)
         print(f"replaced     {generated} (Jellyfin's generated collage)")
 
-    location = f"{args.container_data_path.rstrip('/')}/{INSTALLED_NAME}"
+    location = f"{args.container_data_path.rstrip('/')}/{installed_name}"
     path = write_branding(Path(args.config_dir), location)
     print(f"branding     {path} → SplashscreenEnabled=true, SplashscreenLocation={location}")
     if not args.restart:
@@ -865,6 +907,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--render", action="store_true", help="re-render the 4K PNG (needs Pillow)")
     parser.add_argument("--svg", action="store_true", help="rewrite the design-of-record SVG")
     parser.add_argument("--variant", choices=sorted(DESIGN), default="dark")
+    parser.add_argument("--scale", type=int, choices=sorted(RESOLUTION_SIZE, reverse=True),
+                        default=SCALE,
+                        help="2 = 4K (default), 1 = 1080p for a client that caps "
+                             "the size of a splash image")
     parser.add_argument("--asset", default="",
                         help="the PNG to install (default assets/monarch-splash.png)")
     parser.add_argument("--appdata", default=os.environ.get("APPDATA", "/docker/appdata"))
@@ -885,8 +931,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     appdata = Path(args.appdata)
-    asset_target = Path(args.asset) if args.asset else ASSET_DIR / DESIGN[args.variant]["asset"]
-    args.asset = args.asset or str(SPLASH_ASSET)
+    # `--variant light` used to install the *dark* 4K asset when no --asset was
+    # given (the default was the module-level SPLASH_ASSET), because the variant
+    # only ever moved the render target. The default now follows the variant and
+    # the scale, which is also what --check judges against.
+    args.asset_given = bool(args.asset)
+    asset_target = (Path(args.asset) if args.asset
+                    else ASSET_DIR / asset_name(args.variant, args.scale))
+    args.asset = str(asset_target)
     args.data_path = args.data_path or str(appdata / "jellyfin" / "data" / "data")
     args.config_dir = args.config_dir or str(appdata / "jellyfin")
     args.api_key_file = args.api_key_file or str(appdata / "init" / "jellyfin-api-key.txt")
@@ -898,8 +950,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"svg          {target}")
             return 0
         if args.render and not args.apply:
-            render(args.variant, asset_target, args.font_serif, args.font_sans)
-            print(f"rendered     {asset_target}")
+            render(args.variant, asset_target, args.font_serif, args.font_sans,
+                   size=RESOLUTION_SIZE[args.scale])
+            print(f"rendered     {asset_target} ({RESOLUTION_SIZE[args.scale][0]}×"
+                  f"{RESOLUTION_SIZE[args.scale][1]})")
             return 0
         if args.apply:
             code = apply(args)

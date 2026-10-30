@@ -272,6 +272,19 @@ satellites, and mirrored equaliser wings either side of the wordmark. It is
 primitive list with two backends, so the committed SVG and the installed PNG
 cannot drift apart.
 
+Each design ships twice, at 4K and at 1920×1080 (`monarch-splash-1080.png`), for
+a client that caps the size of a splash image; `--apply` installs the 4K one
+unless `--scale 1` says otherwise, and the check reads the name `branding.xml`
+carries, so either install is judged as the choice it was.
+
+The cream variant is committed and installable, but it is not what the media host
+runs, and that is a measured choice rather than a preference: a client paints its
+own white boot spinner over the centre of the splash, and the light render's
+centre measures L 0.78 — 1.26:1 against white, i.e. invisible — where the dark
+render's is L 0.02 (14.2:1). A dark login card and the splash's own dark ink both
+read on cream (16.7:1), so the variant is fine behind the form; it is the boot
+chrome the clients draw that it disappears.
+
 There is no second splash setting, so the light theme is not a `@media` rule in
 the branding CSS: the whole backdrop is one stylesheet
 (`scripts/jellyfin-background.py`), and switching palettes is
