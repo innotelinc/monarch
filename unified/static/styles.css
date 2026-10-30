@@ -162,7 +162,21 @@ button, input, select { font: inherit; color: inherit; }
   display: grid; place-items: center; color: var(--muted); font-weight: 700;
   border: 1px solid var(--border); margin-bottom: 12px; text-align: center; padding: 8px;
 }
+.poster { position: relative; }
+.poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.poster span { position: relative; }
 .poster.round { aspect-ratio: 1; }
+
+/* Library shelves: one show or artist per block, with its poster beside the
+   heading and the episode or track rows underneath. */
+.shelf { margin-bottom: 30px; }
+.shelf > h2 { margin: 0 0 14px; font-size: 20px; letter-spacing: -0.02em; }
+.shelf-head { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 12px; }
+.shelf-head .poster { width: 96px; flex: none; margin-bottom: 0; }
+.shelf-head h2, .shelf-head h3 { margin: 0 0 6px; font-size: 18px; letter-spacing: -0.02em; }
+.shelf-head p { margin: 0; color: var(--muted); font-size: 13.5px; }
+.album { margin: 0 0 22px 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.album .table-wrap { border: 0; }
 
 .pill {
   display: inline-flex; align-items: center; gap: 6px;

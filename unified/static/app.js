@@ -63,6 +63,101 @@ function ratingPill(quality) {
     : `<span class="pill">quality unknown</span>`;
 }
 
+/* ------------------------------------------------------------- library */
+
+/* Every card that can show a poster shows one; the initials stay underneath, so
+   an item Jellyfin has no art for (or a Jellyfin this deployment does not run)
+   looks the same as it always did instead of leaving a hole. */
+function poster(item, extra = "") {
+  return `<div class="poster ${extra}"><img src="/api/art/${item.id}" alt="" loading="lazy"
+    onerror="this.remove()"><span>${initials(item.title)}</span></div>`;
+}
+
+function groupBy(items, key) {
+  const groups = new Map();
+  for (const item of items) {
+    const k = key(item);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(item);
+  }
+  return groups;
+}
+
+const pad2 = (n) => String(n ?? 0).padStart(2, "0");
+const totalBytes = (rows) => rows.reduce((sum, row) => sum + (row.size || 0), 0);
+
+function filmLibrary(items) {
+  return `<div class="grid">
+    ${items.map((item) => `
+      <article class="card">
+        ${poster(item)}
+        <h3>${escapeHtml(item.title)}</h3>
+        <p>${item.year ? item.year + " · " : ""}${bytes(item.size)}</p>
+        <div class="meta">${ratingPill(item.quality)}</div>
+      </article>`).join("")}
+  </div>`;
+}
+
+/* One poster per show, one row per episode: the file names carry the release
+   junk, and 88 cards repeating the same artwork is not a TV library. */
+function tvLibrary(items) {
+  const shows = groupBy(items, (item) => item.place?.show || item.title);
+  return [...shows.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([show, episodes]) => {
+    const ordered = episodes.slice().sort((a, b) =>
+      (a.season ?? 0) - (b.season ?? 0) || (a.episode ?? 0) - (b.episode ?? 0));
+    const seasons = [...new Set(episodes.map((e) => e.place?.season).filter(Boolean))];
+    return `<section class="shelf">
+      <div class="shelf-head">
+        ${poster({ ...ordered[0], title: show })}
+        <div>
+          <h2>${escapeHtml(show)}</h2>
+          <p>${episodes.length} episode${episodes.length === 1 ? "" : "s"}${seasons.length ? " · " + seasons.map(escapeHtml).join(", ") : ""}
+            · ${bytes(totalBytes(episodes))}</p>
+        </div>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Episode</th><th>Quality</th><th>Size</th></tr></thead>
+        <tbody>${ordered.map((episode) => `
+          <tr>
+            <td>S${pad2(episode.season)}E${pad2(episode.episode)}</td>
+            <td>${ratingPill(episode.quality)}</td>
+            <td>${bytes(episode.size)}</td>
+          </tr>`).join("")}</tbody>
+      </table></div>
+    </section>`;
+  }).join("");
+}
+
+/* Artist, then album, then the tracks in the order the file names number them:
+   a flat list of 140 songs sorted by when they arrived is not a music library. */
+function musicLibrary(items) {
+  const artists = groupBy(items, (item) => item.place?.artist || "Unknown artist");
+  return [...artists.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([artist, tracks]) => {
+    const albums = groupBy(tracks, (track) => track.place?.album || "Singles");
+    return `<section class="shelf">
+      <h2>${escapeHtml(artist)}</h2>
+      ${[...albums.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([album, rows]) => `
+        <div class="album">
+          <div class="shelf-head">
+            ${poster({ ...rows[0], title: album }, "round")}
+            <div>
+              <h3>${escapeHtml(album)}</h3>
+              <p>${rows.length} track${rows.length === 1 ? "" : "s"} · ${bytes(totalBytes(rows))}</p>
+            </div>
+          </div>
+          <div class="table-wrap"><table><tbody>
+            ${rows.map((track) => `
+              <tr>
+                <td>${escapeHtml(track.name || track.title)}</td>
+                <td>${ratingPill(track.quality)}</td>
+                <td>${bytes(track.size)}</td>
+              </tr>`).join("")}</tbody>
+          </table></div>
+        </div>`).join("")}
+    </section>`;
+  }).join("");
+}
+
 /* --------------------------------------------------------------- chrome */
 
 function setActive(view) {
@@ -139,7 +234,7 @@ views.home = async () => {
     ${recent.items.length ? `<div class="grid">
       ${recent.items.map((item) => `
         <article class="card">
-          <div class="poster">${initials(item.title)}</div>
+          ${poster(item)}
           <h3>${escapeHtml(item.title)}</h3>
           <p>${item.year ? item.year + " · " : ""}${item.kind === "episode" && item.season != null
             ? `S${String(item.season).padStart(2, "0")}E${String(item.episode ?? 0).padStart(2, "0")} · ` : ""}${bytes(item.size)}</p>
@@ -150,28 +245,27 @@ views.home = async () => {
 };
 
 views.library = async () => {
-  const data = await api(`/api/library?kind=${state.libraryKind}&limit=120`);
-  const label = { movie: "Films", episode: "Episodes", track: "Music" }[state.libraryKind];
+  const kind = state.libraryKind;
+  const data = await api(`/api/library?kind=${kind}&limit=300`);
+  const label = { movie: "films", episode: "episodes", track: "tracks" }[kind];
+  const empty = { movie: "films", episode: "episodes", track: "tracks" }[kind];
+  let body;
+  if (!data.items.length) body = `<div class="empty">Nothing catalogued under ${empty} yet.</div>`;
+  else if (kind === "track") body = musicLibrary(data.items);
+  else if (kind === "episode") body = tvLibrary(data.items);
+  else body = filmLibrary(data.items);
   return `
     <div class="view-head">
-      <div><h1>Library</h1><p>${data.total} ${label.toLowerCase()} catalogued, each row deduplicated on title, year, episode and quality.</p></div>
+      <div><h1>Library</h1><p>${data.total} ${label} catalogued, each one deduplicated on title, year, episode and quality.</p></div>
       <div class="spacer"></div>
       <div class="segmented" id="kind-filter" role="group" aria-label="Filter by kind">
-        ${["movie", "episode", "track"].map((kind) => `
-          <button type="button" data-kind="${kind}" aria-pressed="${state.libraryKind === kind}">
-            ${{ movie: "Films", episode: "TV", track: "Music" }[kind]}
+        ${["movie", "episode", "track"].map((option) => `
+          <button type="button" data-kind="${option}" aria-pressed="${kind === option}">
+            ${{ movie: "Films", episode: "TV", track: "Music" }[option]}
           </button>`).join("")}
       </div>
     </div>
-    ${data.items.length ? `<div class="grid">
-      ${data.items.map((item) => `
-        <article class="card">
-          <div class="poster">${initials(item.title)}</div>
-          <h3>${escapeHtml(item.title)}</h3>
-          <p>${item.year ? item.year + " · " : ""}${bytes(item.size)}</p>
-          <div class="meta">${ratingPill(item.quality)}</div>
-        </article>`).join("")}
-    </div>` : `<div class="empty">Nothing catalogued under ${label.toLowerCase()} yet.</div>`}
+    ${body}
   `;
 };
 

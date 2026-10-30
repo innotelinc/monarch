@@ -43,6 +43,62 @@ def kind_for(path: Path, root: Path, mapping: dict[str, str]) -> str:
     return mapping.get(top, "movie")
 
 
+ALBUM_YEAR = re.compile(r"\s*\((?:19|20)\d{2}\)\s*$")
+TRACK_NUMBER = re.compile(r"^\s*\d{1,3}[\s._-]+(?=\S)")
+
+
+def place(path: Path, root: Path) -> dict[str, str]:
+    """Where a catalogued file sits in the library, in the words a person uses.
+
+    A flat list of 140 tracks is not a music library, and the titles alone do not
+    say which album a file belongs to. The layout the importer writes already
+    answers it - `music/<Artist>/<Album>/<file>`, `tv/<Show>/Season NN/<file>`,
+    `movies/<Title (Year)>/<file>` - so this reads the path back instead of
+    keeping a second copy of the answer in the database.
+    """
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return {}
+    if len(parts) < 2:
+        return {}
+    top = parts[0].lower()
+    if top == "music":
+        album = ALBUM_YEAR.sub("", parts[2]) if len(parts) >= 4 else ""
+        return {"artist": parts[1], "album": album}
+    if top == "tv":
+        return {"show": parts[1], "season": parts[2] if len(parts) >= 3 else ""}
+    if top in {"movies", "adult"}:
+        return {"collection": parts[1]}
+    return {}
+
+
+def track_title(title: str, artist: str = "", album: str = "") -> str:
+    """A track's own name, without the artist, album and number around it.
+
+    `XXXTENTACION - ! - 14 - I don't even speak spanish lol` sits under the
+    artist and album headings already, and the row repeated all three before the
+    song: the path says which prefixes are the catalogue's own words, so those
+    are removed before the number.
+    """
+    name = (title or "").strip()
+    prefixes = [prefix for prefix in (
+        f"{artist} - {album} - " if artist and album else "",
+        f"{artist} - " if artist else "",
+    ) if prefix]
+    for prefix in prefixes:
+        if name.lower().startswith(prefix.lower()):
+            name = name[len(prefix):]
+            break
+    name = TRACK_NUMBER.sub("", name).strip()
+    # `03 Bruno Mars - I Just Might`: the number came first, the artist did not.
+    for prefix in prefixes:
+        if name.lower().startswith(prefix.lower()):
+            name = name[len(prefix):]
+            break
+    return name.strip() or title
+
+
 def fingerprint(release: Release) -> str:
     """The catalog identity: one row per title/year/episode/quality."""
     return "|".join([

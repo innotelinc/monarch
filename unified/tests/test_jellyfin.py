@@ -65,7 +65,12 @@ def test_configured_info_reads_the_server_identity(server):
     assert info["reachable"] is True
     assert info["server"] == "jellyfin-test"
     assert info["version"] == "10.9.0"
-    assert Recorder.calls[-1][1]["x-emby-token"] == "token-123"
+    # `X-Emby-Token` is answered with 401 by Jellyfin 12 on these routes, which is
+    # how this service spent its life reporting itself unreachable and dropping
+    # every post-import notification (2026-10-30). The MediaBrowser form is what
+    # the server accepts.
+    assert Recorder.calls[-1][1]["authorization"] == "MediaBrowser Token=token-123"
+    assert "x-emby-token" not in Recorder.calls[-1][1]
 
 
 def test_refresh_reports_paths_then_rescans(server, tmp_path):
@@ -80,7 +85,7 @@ def test_refresh_reports_paths_then_rescans(server, tmp_path):
     paths = [call[0] for call in Recorder.calls]
     assert paths == ["/Library/Media/Updated", "/Library/Refresh"]
     assert Recorder.calls[0][2] == {"Updates": [{"Path": str(video.parent), "UpdateType": "Created"}]}
-    assert Recorder.calls[0][1]["x-emby-token"] == "token-123"
+    assert Recorder.calls[0][1]["authorization"] == "MediaBrowser Token=token-123"
 
 
 def test_a_refused_update_never_raises(server, tmp_path):

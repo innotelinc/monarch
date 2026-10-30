@@ -35,7 +35,12 @@ class Jellyfin:
 
     @property
     def headers(self) -> dict[str, str]:
-        return {"X-Emby-Token": self.api_key, "Accept": "application/json"}
+        # `X-Emby-Token` is answered with 401 by Jellyfin 12 on every one of these
+        # routes (measured 2026-10-30): the service was reporting itself
+        # unreachable and, worse, every "tell Jellyfin a file arrived" was a
+        # silent 401. The MediaBrowser form is the header this server accepts.
+        return {"Authorization": f"MediaBrowser Token={self.api_key}",
+                "Accept": "application/json"}
 
     def info(self) -> dict[str, Any]:
         """Name and version, for the Settings card. Never raises."""
@@ -82,3 +87,56 @@ class Jellyfin:
                 except (httpx.HTTPError, OSError) as exc:
                     log.warning("jellyfin library refresh failed: %s", exc)
         return {"configured": True, "updated": updated, "refreshed": refreshed}
+
+    def index(self) -> dict[str, dict[str, Any]]:
+        """What Jellyfin knows, keyed by file path.
+
+        The library UI needs a poster per catalogued file, and Jellyfin is the
+        only thing that has them (it fetches artwork; the library directories
+        hold none). One request answers for every item, and the answer is cached
+        by the caller, so a grid of 120 cards is still one call.
+        """
+        if not self.configured:
+            return {}
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.get(
+                    f"{self.base_url}/Items", headers=self.headers,
+                    params={"Recursive": "true", "IncludeItemTypes": "Movie,Episode,Audio",
+                            "Fields": "Path,ImageTags", "Limit": 20000},
+                )
+            response.raise_for_status()
+            rows = (response.json() or {}).get("Items") or []
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            log.warning("jellyfin index failed: %s", exc)
+            return {}
+        index: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            path = row.get("Path") or ""
+            if not path:
+                continue
+            index[path] = {
+                "id": row.get("Id") or "",
+                "type": row.get("Type") or "",
+                "series": row.get("SeriesId") or "",
+                "album": row.get("AlbumId") or "",
+                "art": bool(row.get("ImageTags")),
+            }
+        return index
+
+    def image(self, item_id: str, max_height: int = 420) -> tuple[bytes, str] | None:
+        """The primary image for one Jellyfin item, or None when it has none."""
+        if not self.configured or not item_id:
+            return None
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.get(
+                    f"{self.base_url}/Items/{item_id}/Images/Primary",
+                    headers=self.headers, params={"maxHeight": max_height, "quality": 82},
+                )
+        except (httpx.HTTPError, OSError) as exc:
+            log.warning("jellyfin image failed: %s", exc)
+            return None
+        if response.status_code != 200 or not response.content:
+            return None
+        return response.content, response.headers.get("content-type", "image/jpeg")

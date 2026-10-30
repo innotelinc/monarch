@@ -11,12 +11,13 @@ rather than replaces.
 from __future__ import annotations
 
 import json
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -140,16 +141,22 @@ def stats(_: str = Depends(current_user)) -> dict[str, Any]:
 
 @app.get("/api/library")
 def library_items(
-    kind: str | None = Query(default=None, pattern="^(movie|episode|series|track)$"),
+    kind: str | None = Query(default=None, pattern="^(movie|episode|track)$"),
     q: str = "",
     limit: int = Query(default=60, ge=1, le=300),
     offset: int = Query(default=0, ge=0),
     _: str = Depends(current_user),
 ) -> dict[str, Any]:
+    """Catalogued items, newest first, each with where it sits in the library.
+
+    The filter is the stored kind and nothing else. It used to map `episode` to
+    `series`, a kind nothing has ever been stored as, so the TV tab asked for
+    its own items and was told there are none.
+    """
     clauses, params = [], []
     if kind:
         clauses.append("kind = ?")
-        params.append("series" if kind == "episode" else kind)
+        params.append(kind)
     if q.strip():
         clauses.append("lower(title) LIKE ?")
         params.append(f"%{q.strip().lower()}%")
@@ -161,8 +168,60 @@ def library_items(
             (*params, limit, offset),
         )
         total = db.one(conn, f"SELECT count(*) FROM items {where}", tuple(params))
-    return {"total": int(total[0]) if total else 0,
-            "items": [dict(row) for row in rows]}
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["place"] = library.place(Path(item["path"]), settings.library_root)
+        if item["kind"] == "track":
+            item["name"] = library.track_title(item["title"],
+                                              item["place"].get("artist", ""),
+                                              item["place"].get("album", ""))
+        items.append(item)
+    return {"total": int(total[0]) if total else 0, "items": items}
+
+
+# Jellyfin is the only thing here that has artwork, so a poster is a lookup in
+# its index rather than a file: one request answers for the whole library, and
+# it is held for ten minutes because a grid asks for the same posters again.
+_ART_TTL = 600
+_art_index: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {}
+
+
+def art_index() -> dict[str, dict[str, Any]]:
+    key = settings.jellyfin_url
+    cached = _art_index.get(key)
+    now = time.monotonic()
+    if cached and now - cached[0] < _ART_TTL:
+        return cached[1]
+    index = jellyfin_client(settings).index()
+    _art_index[key] = (now, index)
+    return index
+
+
+@app.get("/api/art/{item_id}")
+def art(item_id: int, _: str = Depends(current_user)) -> Response:
+    """The poster for a catalogued item, proxied from Jellyfin.
+
+    An episode or a track usually has no image of its own, so the lookup walks
+    up: the album, then the series, then the item. The bytes are served from
+    here so the API key never reaches the browser, and the browser only talks to
+    the one name the SSO session is scoped to.
+    """
+    with conn_scope() as conn:
+        row = db.one(conn, "SELECT path FROM items WHERE id = ?", (item_id,))
+    if row is None:
+        raise HTTPException(status_code=404, detail="no such item")
+    entry = art_index().get(str(row["path"]))
+    if not entry:
+        raise HTTPException(status_code=404, detail="Jellyfin does not know this file")
+    jelly = jellyfin_client(settings)
+    for candidate in (entry.get("album"), entry.get("series"), entry.get("id")):
+        image = jelly.image(candidate) if candidate else None
+        if image:
+            content, media_type = image
+            return Response(content=content, media_type=media_type,
+                            headers={"Cache-Control": "private, max-age=3600"})
+    raise HTTPException(status_code=404, detail="no artwork")
 
 
 @app.get("/api/items/{item_id}")

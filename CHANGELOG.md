@@ -263,6 +263,42 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **Live TV is a page, not a 502.** Opening it killed `core` and the browser got an
+  upstream error instead of a guide. The dial's XMLTV is 77 MB on disk, and the
+  viewer read it into a string and then into a full ElementTree, which took the
+  service past its 512 MB limit; the kernel killed uvicorn mid-request, so
+  oauth2-proxy reported 502. The guide is now streamed to a temporary file and
+  parsed with `iterparse`, keeping only the programmes in the window being shown
+  and clearing each element afterwards: measured on the live dial, a cold
+  `/api/live/channels` peaked at 89 MB of a 512 MB limit (it previously took the
+  process down) and an already-parsed one answers in 4 ms. A truncated download
+  is a shorter guide rather than an outage, because the partial document is what
+  was readable.
+
+- **The Library's TV tab was empty and its rows were one flat list.** Two separate
+  bugs on the same page. `kind=episode` was mapped to `series` in the API, a kind
+  nothing has ever been stored as, so the tab asked for its own items and was
+  told there are none; it filters on the stored kind now, and the tab shows the
+  88 episodes it has. The listing itself was ordered only by when a file arrived,
+  which says nothing about a record collection: `library.place` reads the layout
+  the importer writes back out of the path - `music/<Artist>/<Album>/`,
+  `tv/<Show>/Season NN/` - and the view draws an artist with their albums and
+  songs, and a show with one poster and its episodes in season/episode order
+  instead of repeating the series art on every card. A track row also dropped the
+  artist, album and number the file name repeats, since the headings already say
+  them. Cards without artwork keep their initials.
+
+- **Films have posters.** The library directories hold no artwork; Jellyfin is
+  the only thing here that has any, and nothing asked it. `core` now keeps a
+  ten-minute index of what Jellyfin knows by file path (one request for the whole
+  grid) and `/api/art/<id>` proxies the image for the item, its album or its
+  series, so the key never reaches the browser and a poster is still one origin.
+  23 of the 30 films, 88 of the 88 episodes and 130 of the 140 tracks resolve a
+  picture on the live library; the rest render their initials rather than a hole.
+  The seven films that resolve nothing are the `xxx/` library, which Jellyfin does
+  not index, and Jellyfin's scan also had to be told about the newer imports -
+  `POST /api/jellyfin/refresh` took its film count from 15 to 23.
+
 - **Gizmo's API no longer tells a signed-in browser it is not signed in.** Every
   `/api/*` call answered `401 no authenticated session` while the page itself
   loaded, so the UI said *not signed in — reload and sign in again* to a user who

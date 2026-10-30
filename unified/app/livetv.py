@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 _ATTR = re.compile(r'([a-zA-Z0-9_-]+)="([^"]*)"')
@@ -99,8 +100,42 @@ def _when(value: str) -> datetime | None:
     return None
 
 
-def parse_xmltv(text: str) -> tuple[dict[str, str], list[Programme]]:
-    """Return (channel id -> display name, programmes). Broken guides are empty."""
+def _programme(node: ET.Element) -> Programme | None:
+    """One `<programme>` element, or None when its times do not parse."""
+    start = _when(node.get("start", ""))
+    stop = _when(node.get("stop", ""))
+    if not start or not stop:
+        return None
+    return Programme(
+        channel_id=node.get("channel", ""),
+        title=(node.findtext("title") or "").strip() or "Untitled",
+        start=start,
+        stop=stop,
+        description=(node.findtext("desc") or "").strip(),
+        category=(node.findtext("category") or "").strip(),
+    )
+
+
+def _keep(programme: Programme, window: tuple[datetime, datetime] | None) -> bool:
+    if window is None:
+        return True
+    start, stop = window
+    return programme.stop > start and programme.start < stop
+
+
+def _label(node: ET.Element) -> str:
+    return (node.findtext("display-name") or "").strip()
+
+
+def parse_xmltv(text: str,
+                window: tuple[datetime, datetime] | None = None
+                ) -> tuple[dict[str, str], list[Programme]]:
+    """Return (channel id -> display name, programmes). Broken guides are empty.
+
+    `window` keeps only the programmes that overlap it. The whole document is
+    still built here, so this is the form for text already in memory (tests, a
+    caller holding the bytes); `parse_xmltv_file` is the one that streams.
+    """
     names: dict[str, str] = {}
     programmes: list[Programme] = []
     if not (text or "").strip():
@@ -112,23 +147,47 @@ def parse_xmltv(text: str) -> tuple[dict[str, str], list[Programme]]:
 
     for node in root.findall("channel"):
         channel_id = node.get("id", "")
-        label = (node.findtext("display-name") or "").strip()
+        label = _label(node)
         if channel_id:
             names[channel_id] = label or channel_id
 
     for node in root.findall("programme"):
-        start = _when(node.get("start", ""))
-        stop = _when(node.get("stop", ""))
-        if not start or not stop:
-            continue
-        programmes.append(Programme(
-            channel_id=node.get("channel", ""),
-            title=(node.findtext("title") or "").strip() or "Untitled",
-            start=start,
-            stop=stop,
-            description=(node.findtext("desc") or "").strip(),
-            category=(node.findtext("category") or "").strip(),
-        ))
+        programme = _programme(node)
+        if programme and _keep(programme, window):
+            programmes.append(programme)
+    programmes.sort(key=lambda p: p.start)
+    return names, programmes
+
+
+def parse_xmltv_file(path: str | Path,
+                     window: tuple[datetime, datetime] | None = None
+                     ) -> tuple[dict[str, str], list[Programme]]:
+    """Parse a guide from disk without holding the document in memory.
+
+    A real XMLTV file is tens of megabytes and its parsed tree several times
+    that, which is enough to take the whole service past its memory limit: on
+    2026-10-30 opening Live TV did exactly that, the kernel killed uvicorn, and
+    the browser got a 502 instead of a guide. `iterparse` with an element clear
+    after each programme keeps the footprint to the programmes that are kept,
+    and `window` decides which those are.
+    """
+    names: dict[str, str] = {}
+    programmes: list[Programme] = []
+    try:
+        for _, node in ET.iterparse(str(path), events=("end",)):
+            if node.tag == "channel":
+                channel_id = node.get("id", "")
+                if channel_id:
+                    names[channel_id] = _label(node) or channel_id
+                node.clear()
+            elif node.tag == "programme":
+                programme = _programme(node)
+                if programme and _keep(programme, window):
+                    programmes.append(programme)
+                node.clear()
+    except (ET.ParseError, OSError):
+        # A truncated download is a guide with fewer programmes, not an outage.
+        return names, programmes
     programmes.sort(key=lambda p: p.start)
     return names, programmes
 

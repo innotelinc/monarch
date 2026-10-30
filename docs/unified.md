@@ -186,6 +186,15 @@ deploy/monarch-core.compose.yml
 
 ## What the UI does
 
+Library is three shapes, because a catalogue of 258 files is not a grid: films
+are cards with their poster, a show is one poster with its episodes in
+season/episode order, and music is artist → album → tracks. A poster comes from
+`/api/art/<id>`, which proxies Jellyfin's index (one request for the grid, held
+for ten minutes) and falls back to the initials the card used to show. Live TV
+lists the whole dial with what is on now; the guide is streamed to a temporary
+file and parsed with `iterparse`, because reading a 77 MB XMLTV whole took the
+service past its memory limit and the page answered 502.
+
 Search scores every candidate and the number is the decision's reason; **Grab**
 sends that release to Transmission by hand and goes through the same dedupe as an
 automatic grab. Settings carries the subtitle state (found / missing / failed),

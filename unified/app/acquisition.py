@@ -14,6 +14,7 @@ library fingerprint, so a re-run cannot double-copy.
 from __future__ import annotations
 
 import logging
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -307,6 +308,29 @@ def _fetch_text(url: str) -> str:
         return response.text
 
 
+def _fetch_to_file(url: str) -> Path:
+    """Stream a document to a temporary file and return it.
+
+    The guide is tens of megabytes, so it is never read into a string: the file
+    is parsed with `livetv.parse_xmltv_file`, which keeps only the programmes
+    that are kept. The caller removes the file.
+    """
+    import httpx
+    handle = tempfile.NamedTemporaryFile(prefix="core-guide-", suffix=".xml", delete=False)
+    path = Path(handle.name)
+    try:
+        with handle as sink:
+            with httpx.Client(timeout=60, follow_redirects=True) as client:
+                with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    for chunk in response.iter_bytes(65536):
+                        sink.write(chunk)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
 # A real guide is tens of megabytes. Parsing it once per page load was the one
 # place the merged service could burn CPU and bandwidth for nothing, so the
 # parsed result is cached for a few minutes per (playlist, guide, horizon).
@@ -329,16 +353,26 @@ def guide(settings: Settings, hours: int = 6,
 
     payload: dict[str, Any] = {"channels": [], "programmes": [], "hours": hours}
     if settings.livetv_m3u:
-        fetch = fetch or _fetch_text
-        channels = livetv.parse_m3u(fetch(settings.livetv_m3u))
+        now = datetime.now(timezone.utc)
+        horizon = now + timedelta(hours=hours)
+        channels = livetv.parse_m3u((fetch or _fetch_text)(settings.livetv_m3u))
         names: dict[str, str] = {}
         programmes: list[livetv.Programme] = []
         if settings.livetv_xmltv:
-            names, programmes = livetv.parse_xmltv(fetch(settings.livetv_xmltv))
+            if fetch is not None:
+                # An injected fetcher hands back text; the offline path has no
+                # file to stream from.
+                names, programmes = livetv.parse_xmltv(fetch(settings.livetv_xmltv),
+                                                       window=(now, horizon))
+            else:
+                guide_file = _fetch_to_file(settings.livetv_xmltv)
+                try:
+                    names, programmes = livetv.parse_xmltv_file(guide_file,
+                                                                window=(now, horizon))
+                finally:
+                    guide_file.unlink(missing_ok=True)
         channels = livetv.number_channels(livetv.merge_logos(channels, names),
                                           settings.livetv_channel_base)
-        now = datetime.now(timezone.utc)
-        horizon = now + timedelta(hours=hours)
         window = [p for p in programmes if p.stop > now and p.start < horizon]
         payload = {
             "channels": livetv.lineup(channels, window),
