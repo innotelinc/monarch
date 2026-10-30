@@ -1382,6 +1382,25 @@ else
   fail "deployment: this checkout is not what origin/main carries, so the checks above judged code nobody deployed - $(printf '%s' "$deploy_out" | head -1); see docs/operations.md 'Updating a deployment'"
   printf '%s\n' "$deploy_out" | indent >&2
 fi
+
+# ...and the verdict goes where a container can read it. The health service mounts
+# this state directory read-only (the splash guard's verdict is already there), so
+# /deployment/health and the status page can answer "is this deployment the
+# branch?" without a shell on the host - and the board's Deployment tile is the
+# same fact as a dot. A staged run records nothing, like every verdict above; it
+# is not this host.
+if [ "$STAGED" -eq 0 ] && [ -d "$STATE_DIR" ]; then
+  case "$deploy_code" in
+    0) deploy_state=ok ;;
+    2) deploy_state=skip ;;
+    *) deploy_state=fail ;;
+  esac
+  {
+    printf 'state=%s\n' "$deploy_state"
+    printf 'checked=%s\n' "$(date +%s)"
+    printf 'detail=%s\n' "$(printf '%s' "$deploy_out" | head -1)"
+  } > "$STATE_DIR/deployment-status" 2>/dev/null || true
+fi
 fi
 
 # ───────────────────────────────────────────────────────────────────────────

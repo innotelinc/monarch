@@ -15,11 +15,15 @@ without being mistaken for one of this stack's compose services.
 import importlib.util
 import os
 import socket
+import subprocess
+import sys
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = next(p for p in (os.path.join(os.path.dirname(HERE), "npm-proxy-hosts.py"),
                           os.path.join(HERE, "npm-proxy-hosts.py")) if os.path.exists(p))
+SCRIPT_PATH = __import__("pathlib").Path(SCRIPT)
 SPEC = importlib.util.spec_from_file_location("npm_proxy_hosts", SCRIPT)
 nph = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(nph)
@@ -75,6 +79,45 @@ class OtherUpstreamTest(unittest.TestCase):
                          "192.168.1.56")
 
 
+class OneShot(threading.Thread):
+    """A one-request HTTP responder on 127.0.0.1, so a probe has an answer to read.
+
+    The check asks for a status line rather than a completed handshake (a
+    connection alone is also what a listener that lost its upstream gives), so
+    the fixture has to speak HTTP. It records what it was asked, which is how the
+    Host header is pinned.
+    """
+
+    def __init__(self, reply: bytes):
+        super().__init__(daemon=True)
+        self.reply = reply
+        self.request = b""
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+
+    def run(self):
+        try:
+            conn, _ = self.sock.accept()
+            with conn:
+                self.request = conn.recv(4096)
+                conn.sendall(self.reply)
+        except OSError:
+            pass
+        finally:
+            self.sock.close()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *_exc):
+        self.join(5)
+        return False
+
+
 class ReachabilityTest(unittest.TestCase):
     """`--check` asks the upstream for an answer, not only the config for a match."""
 
@@ -87,14 +130,43 @@ class ReachabilityTest(unittest.TestCase):
         if self._saved is not None:
             os.environ["NPM_CHECK_TIMEOUT"] = self._saved
 
-    def test_listening_port_is_accepted(self):
-        with socket.socket() as server:
-            server.bind(("127.0.0.1", 0))
-            server.listen(1)
-            port = server.getsockname()[1]
-            state, _ = nph.upstream_accepts(
-                {"forward": "homarr", "port": port}, "127.0.0.1")
-            self.assertIs(state, True)
+    def test_a_gateway_redirect_is_accepted(self):
+        # What every gated row on this host answers: 302 to Cerulean Authentik.
+        # That is the oauth2-proxy gateway working, not the app failing.
+        with OneShot(b"HTTP/1.1 302 Found\r\nLocation: https://auth.cerulean.innotel.us/\r\n"
+                     b"Content-Length: 0\r\n\r\n") as server:
+            state, why = nph.upstream_accepts(
+                {"forward": "homarr", "port": server.port,
+                 "domain": "admin." + DOMAIN}, "127.0.0.1")
+        self.assertIs(state, True)
+        self.assertIn("302", why)
+
+    def test_an_app_page_is_accepted(self):
+        with OneShot(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n") as server:
+            state, why = nph.upstream_accepts(
+                {"forward": "homarr", "port": server.port,
+                 "domain": "app." + DOMAIN}, "127.0.0.1")
+        self.assertIs(state, True)
+        self.assertIn("200", why)
+
+    def test_a_server_error_is_a_finding(self):
+        # The case a completed handshake could not see: something accepted, and
+        # nothing behind it could serve. This is what a moved upstream looks like.
+        with OneShot(b"HTTP/1.1 502 Bad Gateway\r\n\r\n") as server:
+            state, why = nph.upstream_accepts(
+                {"forward": "homarr", "port": server.port,
+                 "domain": "app." + DOMAIN}, "127.0.0.1")
+        self.assertIs(state, False)
+        self.assertIn("502", why)
+
+    def test_the_probe_asks_for_the_public_name(self):
+        # Without the Host header the probe measures whatever nginx serves for a
+        # bare address, which may answer 200 while the name itself is broken.
+        with OneShot(b"HTTP/1.1 302 Found\r\n\r\n") as server:
+            nph.upstream_accepts(
+                {"forward": "homarr", "port": server.port,
+                 "domain": "app." + DOMAIN}, "127.0.0.1")
+        self.assertIn(b"Host: app." + DOMAIN.encode(), server.request)
 
     def test_closed_port_is_a_finding(self):
         # The case that was invisible: every field matched the conf.
@@ -119,6 +191,33 @@ class ReachabilityTest(unittest.TestCase):
             "cerulean-npm-sso")
         self.assertIsNone(state)
         self.assertIn("NPM host", why)
+
+
+class NoReachTest(unittest.TestCase):
+    """`--no-reach` compares the configuration without asking any upstream.
+
+    The flag's path is inside `main()`, which logs into NPM, so this pins the
+    wiring rather than a run: the probe call has to sit inside the flag's guard,
+    because that guard is the only thing between an offline host and thirteen
+    findings invented by its own lack of network access.
+    """
+
+    def test_the_probe_is_inside_the_no_reach_guard(self):
+        source = SCRIPT_PATH.read_text()
+        guard = source.index("if not args.no_reach:")
+        tail = source[guard:]
+        # The guard's block ends where the next statement at its indent begins.
+        block = tail[:tail.index("\n            if problems:")]
+        self.assertIn("upstream_accepts(host, forward_host)", block,
+                      "the probe must be skipped by --no-reach, not run beside it")
+
+    def test_the_flag_is_offered_by_the_script(self):
+        # `--help` exits inside argparse, before the NPM login, so this is offline
+        # and still proves the flag an operator is told to use exists.
+        proc = subprocess.run([sys.executable, SCRIPT, "--help"],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("--no-reach", proc.stdout)
 
 
 class ShippedConfTest(unittest.TestCase):

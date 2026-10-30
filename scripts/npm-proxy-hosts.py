@@ -756,7 +756,7 @@ def tsig_config():
 
 
 def upstream_accepts(row, forward_host, timeout=None):
-    """(True | False | None, detail): does anything answer where this row points?
+    """(True | False | None, detail): what does the vhost answer where this row points?
 
     A live host can match npm-hosts.conf field for field and still serve nothing:
     a forward to a container that was renamed, a port an app stopped publishing,
@@ -765,12 +765,21 @@ def upstream_accepts(row, forward_host, timeout=None):
     the conf and the name answered 000 — `--check` was comparing the
     configuration instead of asking the upstream for an answer.
 
+    The probe is an HTTP request for `/` with the row's **public name** in the Host
+    header, because that is what a browser asks for: a connection alone is also
+    what a listener that lost its upstream gives, and a bare address can be
+    answered by whatever nginx serves by default. The status line is the answer,
+    and it is returned as the detail so the ok line can show it — every gated row
+    on this host answers 302 to Cerulean Authentik, and that is the gateway
+    working, not the app failing. Any 5xx is a finding: `502` and `504` are
+    exactly "something accepted and nothing can serve it", which is the drift a
+    TCP probe cannot see.
+
     None means "cannot judge from here", and it is deliberately not False: a
     `docker:` upstream is a container name on the *NPM* host's network, which this
-    host cannot resolve, and calling that closed would be the check inventing a
-    finding. A TCP answer inside NPM_CHECK_TIMEOUT (default 3s) is the bar because
-    a service that does not accept a connection in three seconds is not one a
-    browser reaches either — the HTTP status is the app's business, not this one's.
+    host cannot resolve, and calling that failed would be the check inventing a
+    finding. NPM_CHECK_TIMEOUT (default 3s) bounds the whole exchange: a row that
+    cannot say who it is in three seconds is not one a browser reaches either.
     """
     if str(row.get("forward", "")).startswith(DOCKER_UPSTREAM_PREFIX):
         return None, "a container name, resolvable only on the NPM host"
@@ -779,12 +788,30 @@ def upstream_accepts(row, forward_host, timeout=None):
             timeout = float(env("NPM_CHECK_TIMEOUT", "3") or 3)
         except ValueError:
             timeout = 3.0
+    host = str(row.get("domain") or "")
+    port = int(row["port"])
+    request = (f"GET / HTTP/1.1\r\nHost: {host or forward_host}\r\n"
+               "User-Agent: monarch-npm-check\r\nAccept: */*\r\n"
+               "Connection: close\r\n\r\n").encode()
     try:
-        with socket.create_connection((forward_host, int(row["port"])),
-                                      timeout=timeout):
-            return True, ""
+        with socket.create_connection((forward_host, port), timeout=timeout) as conn:
+            conn.settimeout(timeout)
+            conn.sendall(request)
+            head = conn.recv(1024)
     except OSError as exc:
         return False, type(exc).__name__
+
+    status_line = head.split(b"\r\n", 1)[0].decode("latin-1", "replace").strip()
+    parts = status_line.split()
+    if len(parts) < 2 or not parts[0].startswith("HTTP/"):
+        return False, f"no HTTP status ({status_line[:48] or 'empty reply'})"
+    try:
+        code = int(parts[1])
+    except ValueError:
+        return False, f"unreadable status {parts[1]!r}"
+    if code >= 500:
+        return False, f"HTTP {code}"
+    return True, f"HTTP {code}"
 
 
 def is_ip_address(value):
@@ -885,10 +912,10 @@ def main():
                         help="manage proxy hosts only (no certificate work)")
     parser.add_argument("--check", action="store_true",
                         help="verify live NPM proxy hosts match npm-hosts.conf "
-                             "and that each row's upstream answers "
-                             "(read-only; exit 1 on any drift)")
+                             "and that each row's upstream answers HTTP for "
+                             "its public name (read-only; exit 1 on any drift)")
     parser.add_argument("--no-reach", action="store_true",
-                        help="--check without the TCP probe of each row's "
+                        help="--check without the HTTP probe of each row's "
                              "upstream (offline; the configuration is still "
                              "compared)")
     parser.add_argument("--prune", action="store_true",
@@ -1094,17 +1121,24 @@ def main():
             # a port nobody publishes looks like: `admin.<domain>` did exactly that
             # on 2026-10-30. A row this host cannot reach (a `docker:` name) is
             # skipped rather than failed. `--no-reach` compares offline.
+            reach = ""
             if not args.no_reach:
                 accepts, why = upstream_accepts(host, forward_host)
                 if accepts is False:
                     problems.append(
-                        f"nothing accepts on {forward_host}:{host['port']} ({why})")
+                        f"nothing answers on {forward_host}:{host['port']} ({why})")
+                elif accepts:
+                    # The status is evidence, so it is printed rather than
+                    # reduced to a tick: `ws=False, HTTP 302` says the gateway
+                    # ran, `HTTP 200` says an app answered directly.
+                    reach = why
             if problems:
                 print(f"  DRIFT: {domain_name} -> " + "; ".join(problems))
                 drifted += 1
             else:
+                detail = f", {reach}" if reach else ""
                 print(f"  ok: {domain_name} -> {got_fwd}:{got_port} "
-                      f"(ws={bool(got_ws)})")
+                      f"(ws={bool(got_ws)}{detail})")
                 matched += 1
         # A host in this domain that the conf no longer lists is drift, not a
         # footnote: that is how the retired subscribe host stayed live for

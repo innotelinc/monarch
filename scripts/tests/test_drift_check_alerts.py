@@ -162,6 +162,79 @@ class DriftCheckAlerts(unittest.TestCase):
     def alert_text(self) -> str:
         return self.alerted.read_text() if self.alerted.exists() else ""
 
+    # ── the deployment's own checkout ─────────────────────────────────────
+    def _deployment_fixture(self) -> Path:
+        """An origin, a clone that pushes to it, and a clone that deploys.
+
+        Returns the deploying clone: its HEAD is what the check compares, and the
+        pushing clone is how origin moves on without the deployment following.
+        """
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git is required to build the fixture")
+
+        def run(*args, cwd=None):
+            subprocess.run([git, *args], cwd=str(cwd) if cwd else None, check=True,
+                           capture_output=True)
+
+        origin = self.tmp / "origin.git"
+        run("-c", "init.defaultBranch=main", "init", "--bare", "-q", str(origin))
+        work = self.tmp / "work"
+        run("clone", "-q", str(origin), str(work))
+        for key, value in (("user.email", "t@example.invalid"), ("user.name", "Test"),
+                           ("commit.gpgsign", "false")):
+            run("config", key, value, cwd=work)
+        (work / "file.txt").write_text("first\n")
+        run("add", "-A", cwd=work)
+        run("commit", "-q", "-m", "first", cwd=work)
+        run("push", "-q", "origin", "main", cwd=work)
+
+        deploy = self.tmp / "deploy"
+        run("clone", "-q", str(origin), str(deploy))
+        return deploy
+
+    def test_a_current_checkout_records_ok(self):
+        deploy = self._deployment_fixture()
+        proc = self.run_check(own_manifest=True,
+                              env={"MONARCH_DEPLOY_CHECK": "1",
+                                   "MONARCH_REPO": str(deploy)})
+        verdict = (self.state / "deployment-status").read_text()
+        self.assertIn("state=ok", verdict, proc.stdout + proc.stderr)
+        self.assertIn("tree clean", verdict)
+
+    def test_a_stale_checkout_is_a_finding_and_is_recorded(self):
+        """The block cannot be deleted without this failing.
+
+        Remove it and every other check still passes - they are the checks that
+        were running while the host sat 35 commits behind - and the verdict file
+        the health service reads stops being written, so the board's tile goes
+        back to holding whatever it last saw. Both halves are asserted.
+        """
+        deploy = self._deployment_fixture()
+        work = self.tmp / "work"
+        git = shutil.which("git")
+        (work / "file.txt").write_text("second\n")
+        # origin moves on; the deployment neither pulls nor fetches, which is the
+        # state the host was found in - so the distance is genuinely unknown to it.
+        for args in (["commit", "-aqm", "second"], ["push", "-q", "origin", "main"]):
+            subprocess.run([git, *args], cwd=str(work), check=True, capture_output=True)
+
+        proc = self.run_check(own_manifest=True,
+                              env={"MONARCH_DEPLOY_CHECK": "1",
+                                   "MONARCH_REPO": str(deploy)})
+        combined = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, combined)
+        self.assertIn("deployment:", combined)
+        verdict = (self.state / "deployment-status").read_text()
+        self.assertIn("state=fail", verdict)
+        self.assertIn("pull", verdict)
+
+    def test_a_skipped_run_records_no_verdict(self):
+        # MONARCH_DEPLOY_CHECK=0 is what these tests run with, and a staged run
+        # writes no verdict either: an old verdict is a fact, a fresh skip is not.
+        self.run_check(own_manifest=True)
+        self.assertFalse((self.state / "deployment-status").exists())
+
     def seed_heal_state(self, epoch: int, count: int, standdown_alerted: int = 0) -> None:
         (self.state / "drift-heal-last").write_text(f"{epoch} {count} {standdown_alerted}\n")
 

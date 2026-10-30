@@ -12,6 +12,19 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Added
 
+- **The proxy check asks the right question, and the deployment's currency is on
+  the board.** `npm-proxy-hosts.py --check` now sends `GET /` with the row's
+  public name in the Host header and reports the status it got back: every gated
+  row on this host answers `302` to Cerulean Authentik, which the ok line prints
+  as evidence, and a `502`/`504` is drift — the case a completed handshake could
+  not see, because something *did* accept. `drift-check.sh` writes its deployment
+  verdict to `deployment-status` beside `splash-status`; `monarch-health` serves
+  `GET /deployment/health` (200 only while the checkout is `origin/main` with a
+  clean tree) and adds a section to `/status`; and the board carries a
+  **Deployment** tile whose dot reads the same verdict from inside the compose
+  network, so a stale checkout is a red tile rather than a shell prompt. A
+  *missing* verdict is attention, not health — that is precisely the state the
+  host was in while it sat 35 commits behind with every other dot green.
 - **Two silences that made a broken deployment look healthy are checks now.**
   `npm-proxy-hosts.py --check` compared configuration and never asked whether
   anything answered: `admin.monarch.innotel.us` matched its row field for field

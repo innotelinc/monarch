@@ -143,6 +143,12 @@ APPS = {
                      "Cerulean - identity provider (Authentik SSO)"),
     "Nginx Proxy": ("https://admin.monarch.innotel.us", "nginx-proxy-manager",
                     "Nginx Proxy Manager - edge admin UI"),
+    # The one question no other tile can ask, and the one that was invisible for 35
+    # commits: is the code running here the code in the branch? It answers 200 only
+    # while the checkout is origin/main with a clean tree and 503 when it is not, so
+    # a stale deployment is a red dot instead of a green board over old code.
+    "Deployment": ("https://health.innotel.us/deployment/health", "docker",
+                   "Deployment - is the running checkout origin/main, tree clean?"),
 }
 
 # Rows and tiles to REMOVE. Two kinds of nothing:
@@ -186,6 +192,10 @@ PING_OVERRIDES = {
     # looking exactly like a live one. This dot reads the monitor's report (a feed
     # has to fail twice in a row to count) instead of the page's 200.
     "IPTV (EPG)": "http://monarch-health:8003/livetv/health",
+    # Same fact asked from inside: the public name leaves the host, crosses the
+    # edge and comes back, which is a needless dependency for a dot on the board
+    # it draws (and the one dot that would go red for the wrong reason).
+    "Deployment": "http://monarch-health:8003/deployment/health",
 }
 
 # Any app still pointing at one of these names is stale by construction.
@@ -272,6 +282,7 @@ DESIGN = (
     ("Infrastructure", (
         app_tile("Cerulean SSO"),
         app_tile("Nginx Proxy"),
+        app_tile("Deployment"),
     )),
 )
 

@@ -55,6 +55,10 @@ SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "3600"))
 # files - which is the half that matters, because a unit can be active while the
 # data directory it watches has moved.
 SPLASH_STATUS_FILE = os.environ.get("SPLASH_STATUS_FILE", "/state/splash-status")
+# The same seam, one question over: whether the checkout that runs this stack is
+# the branch it deploys from. `drift-check.sh` writes it beside the splash verdict.
+DEPLOYMENT_STATUS_FILE = os.environ.get("DEPLOYMENT_STATUS_FILE",
+                                         "/state/deployment-status")
 JELLYFIN_CONFIG_DIR = os.environ.get("JELLYFIN_CONFIG_DIR", "/jellyfin")
 JELLYFIN_DATA_DIR = os.environ.get("JELLYFIN_DATA_DIR", "/jellyfin/data/data")
 # `SplashscreenLocation` is recorded as the path *Jellyfin* sees; this is the
@@ -553,6 +557,58 @@ def livetv_health_route():
     return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
 
 
+def deployment_status() -> dict:
+    """Whether the checkout that runs this stack is the branch it deploys from.
+
+    The judge is `scripts/check-deployment-current.sh`, run by `drift-check.sh`,
+    and its verdict is a file in the state directory this container mounts. There
+    is nothing to recompute here: judging it needs a git checkout and a remote,
+    and a second opinion derived from different inputs is how two green dots start
+    disagreeing about the same host.
+
+    Measured 2026-10-30, the media host sat 35 commits behind `origin/main` with
+    that work as local edits, and every dot stayed green because every check was
+    in the repository and none of them ran. So a *missing* verdict is reported as
+    attention, not as healthy: a deployment nobody has judged is that state again.
+    An explicit `skip` (drift-check could not look: no network, no git) is not a
+    failure - it is recorded in `state` and says so - for the same reason the
+    splash guard's skip is not one.
+    """
+    reasons: list[str] = []
+    result: dict = {"ok": False, "state": "unknown", "detail": None, "checked": None}
+
+    verdict = _kv_file(DEPLOYMENT_STATUS_FILE)
+    if not verdict:
+        reasons.append(f"no drift-check verdict at {DEPLOYMENT_STATUS_FILE} - this "
+                       "deployment's checkout has not been judged")
+        result["reasons"] = reasons
+        return result
+
+    result["state"] = verdict.get("state", "unknown")
+    result["detail"] = verdict.get("detail") or None
+    result["checked"] = verdict.get("checked")
+    if result["state"] == "fail":
+        reasons.append(result["detail"] or "drift-check reports this checkout is not "
+                                            "the branch it deploys from")
+    elif result["state"] not in ("ok", "skip"):
+        reasons.append(f"unreadable verdict {result['state']!r}")
+
+    result["reasons"] = reasons
+    result["ok"] = not reasons
+    return result
+
+
+@app.get("/deployment/health")
+def deployment_health_route():
+    """200 while the running checkout is origin/main with a clean tree.
+
+    The board's Deployment tile reads exactly this, so a host running code nobody
+    pushed shows up as a red dot rather than as a report about the wrong tree.
+    """
+    result = deployment_status()
+    return JSONResponse(status_code=200 if result["ok"] else 503, content=result)
+
+
 STATUS_CSS = """
 :root { color-scheme: dark; }
 body { margin: 0; padding: 32px; background: #06070a; color: #f6f1e6;
@@ -597,6 +653,7 @@ def status_page():
     """
     splash = splash_health()
     livetv = livetv_status()
+    deploy = deployment_status()
 
     down_rows = "".join(
         f"<tr><td>{escape(str(item.get('number')))}</td>"
@@ -616,7 +673,8 @@ def status_page():
 <title>Monarch status</title><style>{STATUS_CSS}</style></head>
 <body><main>
 <h1>Monarch</h1>
-<p class="sub">The splash a client falls back to, and the live-TV feeds the monitor has marked dead.</p>
+<p class="sub">The splash a client falls back to, the live-TV feeds the monitor has marked dead,
+and whether the checkout that runs this stack is the branch it deploys from.</p>
 
 <section>
 <h2>Splash {_badge(splash['ok'])}</h2>
@@ -638,10 +696,19 @@ def status_page():
 {f'<table><tr><th>Ch</th><th>Feed</th></tr>{down_rows}</table>' if down_rows else ''}
 </section>
 
-<footer>/splash/health and /livetv/health are the same facts as JSON (503 when a
-section needs attention), which is what the dashboard reads.</footer>
+<section>
+<h2>Deployment {_badge(deploy['ok'])}</h2>
+<p>Checkout: <code>{escape(str(deploy.get('state') or 'unknown'))}</code> &middot;
+   drift-check run at {escape(str(deploy.get('checked') or 'never'))}</p>
+<p>{escape(str(deploy.get('detail') or 'no detail recorded'))}</p>
+{_reasons(deploy.get('reasons') or [])}
+</section>
+
+<footer>/splash/health, /livetv/health and /deployment/health are the same facts as
+JSON (503 when a section needs attention), which is what the dashboard reads.</footer>
 </main></body></html>"""
-    return HTMLResponse(page, status_code=200 if (splash["ok"] and livetv["ok"]) else 503)
+    return HTMLResponse(page, status_code=200 if (splash["ok"] and livetv["ok"]
+                                                 and deploy["ok"]) else 503)
 
 
 threading.Thread(target=_run_scan_loop, daemon=True).start()
