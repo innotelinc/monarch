@@ -252,24 +252,26 @@ matter of adding a native indexer row per tracker and deleting the one row.
 
 ## The Jellyfin splash
 
-Jellyfin keeps playing and transcoding, so it keeps its own identity — but that
-identity is Gizmo's. `assets/gizmo/` holds the wordmark and the TV splash in both
-palettes at 1920×1080 and 3840×2160; `render.py` regenerates them from the SVG.
-On the host the **4K dark** render is installed at
-`/docker/appdata/jellyfin/data/data/gizmo-splash.png` and the branding config
-points `SplashscreenLocation` at it with `SplashscreenEnabled`, with the server
-name set to Gizmo so a TV client shows one product, not two. Verified by reading
-it back from `GET /Branding/Splashscreen` (image/png, 3840×2160).
+Jellyfin keeps playing and transcoding, but the login screen is the one page
+every identity sees before it has a session, so it wears **Monarch's** mark, not
+a second product's. `assets/monarch-splash.svg` is the design;
+`scripts/jellyfin-splash.py` renders and installs it as
+`/docker/appdata/jellyfin/data/data/monarch-splash.png` (1920×1080) and points
+`SplashscreenLocation` at that path with `SplashscreenEnabled`. The API cannot
+set the location — `BrandingOptionsDto` omits it — so the file is the only way,
+and `GET /Branding/Splashscreen` is the read-back that proves which image a
+client is actually handed.
 
-Jellyfin 12's shell paints the splash on `<div class="splashLogo">` as a
-background image and has no second splash setting, so the light theme is served
-by one `@media (prefers-color-scheme: light)` rule in the branding CSS that
-replaces that background with the light render (the 1920×1080 one, embedded as
-a data URI — a 4K one would double the branding config). The rule is fenced by
-`/* gizmo-light-splash */` … `/* /gizmo-light-splash */` so re-running the
-installer replaces it instead of stacking a second copy; the 4K light PNG sits
-next to the dark one in `assets/gizmo/` and in the Jellyfin config for anyone
-who wants it as the splash outright.
+There is no second splash setting, so the light theme is not a `@media` rule in
+the branding CSS: the whole backdrop is one stylesheet
+(`scripts/jellyfin-background.py`), and switching palettes is
+`--apply --variant light`, which installs `monarch-splash-light.png` as the
+splash outright. The Gizmo renders under `assets/gizmo/` are the previous
+identity; `render.py` still reproduces them, but nothing installs them, and the
+styling that used to swap in their light render (a fenced
+`/* gizmo-light-splash */` block appended to the branding CSS) is gone — the
+stylesheet is rebuilt from `assets/monarch-background.svg`, so re-applying the
+backdrop cannot bring it back.
 
 The image is also digest-pinned and labelled
 `com.centurylinklabs.watchtower.enable=false`: an upgrade there is a database

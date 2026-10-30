@@ -48,8 +48,13 @@ the file the server reads as `/config/branding.xml`. Paths:
     config          $APPDATA/jellyfin/branding.xml          (Jellyfin's /config)
     served          GET /Branding/Css                       (--url, the client's copy)
 
-Jellyfin watches its config directory, so a written file is picked up without a
-restart; `--url` is how that is confirmed rather than assumed.
+A written file is what the server reads at boot, but a running server does **not**
+reload it: measured on the media host, `/Branding/Css` kept serving the old
+stylesheet after `branding.xml` changed, and switched only when the same config
+was posted back through `POST /System/Configuration/branding` (that DTO carries
+`CustomCss`/`LoginDisclaimer`/`SplashscreenEnabled` and left the recorded
+`SplashscreenLocation` alone). So `--url` reports what a client is handed rather
+than assuming a reload, and a restart is the fallback.
 
 Exit codes: 0 = the branded backdrop is applied and matches the repo asset;
 1 = it is not (a finding is printed); 2 = cannot run (no appdata, no asset).

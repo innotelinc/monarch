@@ -293,6 +293,22 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **The login screen's stylesheet no longer carries Gizmo's art.** Reverting to
+  the *arr stack left `CustomCss` holding the fenced
+  `/* gizmo-light-splash */` block from the Gizmo era, so a light-mode login
+  painted Gizmo's splash over Monarch's (197,824 bytes of styling for a page that
+  needs 6,158). `scripts/jellyfin-background.py --apply` rebuilds the stylesheet
+  from `assets/monarch-background.svg`, which drops the fence, and the running
+  server was reloaded with it: `/Branding/Css` now serves 6,158 bytes with no
+  Gizmo reference, `LoginDisclaimer` and `SplashscreenLocation` untouched, and
+  `--check --url` passes. The docstring claimed Jellyfin watches its config
+  directory — measured, it does not: the file changed and `/Branding/Css` kept
+  serving the old stylesheet until the same config was posted back through
+  `POST /System/Configuration/branding` (the DTO carries `CustomCss`,
+  `LoginDisclaimer` and `SplashscreenEnabled`, and left the recorded splash path
+  alone), so the docs now say that instead of assuming a reload. `docs/unified.md`
+  also stops describing a Gizmo splash and a `@media` light rule that are no
+  longer installed.
 - **drift-check watches the *arr apps, Jellyseerr and Bazarr again.** The merge
   removed those probes with the services, and the rollback brought the containers
   back without them — the check only proved they were running. `init` writes the
