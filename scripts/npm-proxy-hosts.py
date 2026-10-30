@@ -99,15 +99,22 @@ DEFAULT_HOSTS = [
     # same line for real deployments).
     ("tv",        "iptv",                     3011, False),
     # NPM Edge's admin UI, reached through the SSO gateway (oauth2-proxy,
-    # `cerulean-npm-sso`) on the NPM container's own loopback — never the UI's
-    # :81. The gateway completes a real OIDC code flow against Cerulean
-    # Authentik and then proxies to :81, and only the identity headers it sets
-    # are trusted (npm-hosts.conf carries the same line for real deployments).
-    ("admin",     "127.0.0.1",               4180, False),
+    # `cerulean-npm-sso`) — never the UI's :81. The gateway completes a real
+    # OIDC code flow against Cerulean Authentik and then proxies to :81, and
+    # only the identity headers it sets are trusted (npm-hosts.conf carries the
+    # same line for real deployments). It is named rather than addressed: the
+    # gateway does not share the NPM container's network namespace, so the
+    # `127.0.0.1:4180` this row used to carry reached nothing.
+    ("admin",     "docker:cerulean-npm-sso", 4180, False),
     ("req",       "jellyseerr",               5055, True),
 ]
 
 HOSTS_CONF = os.path.join(SCRIPT_DIR, "npm-hosts.conf")
+
+# Forward column prefix for "a container on the NPM host's own Docker network".
+# Needed because a bare name is indistinguishable from the compose service names
+# every other row uses (see resolve_forward).
+DOCKER_UPSTREAM_PREFIX = "docker:"
 
 
 
@@ -171,11 +178,24 @@ def resolve_forward(host, forward_mode):
 
     Most rows name a compose service and follow the global NPM_FORWARD_HOST mode
     ("container" for a local NPM, or this host's IP for a REMOTE one). A row may
-    instead name its own upstream - an IP or a dotted hostname - which then
-    always wins. Container names never contain a dot, so the two forms cannot be
-    confused: `admin 127.0.0.1 4180` reaches the NPM admin UI on its own
-    loopback (where nginx runs, and the only place it believes the edge's
-    identity headers), while every other row still follows the global mode.
+    instead name its own upstream, in two spellings that always win:
+
+      * an IP or a dotted hostname (`127.0.0.1`, `192.168.1.71`), and
+      * `docker:<name>` - a container on the NPM host's own Docker network,
+        which its nginx resolves through Docker's embedded DNS.
+
+    The prefix is what disambiguates the second form: a bare `cerulean-npm-sso`
+    is indistinguishable from the compose service names every other row uses, so
+    it would be read as "follow the global mode" and forwarded to
+    NPM_FORWARD_HOST - the media host, which runs no such container.
+
+    Resolving by NAME is the point, not a convenience. Every SSO gateway is a
+    container on the NPM host, so its bridge address is handed out by Docker at
+    create time: measured 2026-10-30, `admin.<domain>` pointed at
+    `172.31.42.10:4180` - the gateway's address on its own `proxy_npm-gate`
+    bridge - and answered 302, while recreating that container would have moved
+    it and left the row serving nothing, with no drift for `--check` to see. The
+    name survives recreation; the address does not.
 
     This is why admin.<domain> needs an override at all: the admin UI does not
     run on this Docker host (the compose "npm" profile is optional and is not
@@ -183,6 +203,14 @@ def resolve_forward(host, forward_mode):
     published :2081 reaches nothing.
     """
     fwd = expand_env_refs(host["forward"])
+    if fwd.startswith(DOCKER_UPSTREAM_PREFIX):
+        name = fwd[len(DOCKER_UPSTREAM_PREFIX):].strip()
+        if not name:
+            raise SystemExit(
+                f"npm-hosts.conf: the forward for '{host['domain']}' is "
+                f"{fwd!r}, which names no container - write docker:<name>"
+            )
+        return name
     if is_ip_address(fwd) or "." in fwd:
         return fwd
     return fwd if forward_mode == "container" else forward_mode

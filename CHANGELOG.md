@@ -384,6 +384,29 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **`admin.monarch.innotel.us` names the gateway instead of addressing it.** The
+  row forwarded to `127.0.0.1:4180`, on the belief that the oauth2-proxy gateway
+  shares the NPM container's network namespace. Measured on the NPM host
+  2026-10-30, it does not: `127.0.0.1:4180` inside `cerulean-npm` answers **000**,
+  and the live row had been patched by hand to `172.31.42.10` — the gateway's
+  address on its own `proxy_npm-gate` bridge — which answers **302** until Docker
+  hands that address to something else, with no drift any check can see. The
+  forward column now takes `docker:<name>` for a container on the NPM host's own
+  network, because a bare name is indistinguishable from the compose services
+  every other row uses and would be forwarded to `NPM_FORWARD_HOST` instead;
+  `admin` names `cerulean-npm-sso`, which Docker's DNS resolves from inside nginx
+  (**302**, measured) and which survives recreation. `--check` compares against
+  that name, so the row cannot quietly drift back. Pinned by
+  `scripts/tests/test_npm_forward_resolve.py`, including an assertion on the
+  shipped row rather than a fixture.
+- **The check that judges Jellyfin's local accounts now runs on the host.** The
+  deployment's checkout was 35 commits behind `origin/main` with the same work
+  uncommitted in its tree, so every fix on this branch — the login-methods check,
+  the board-tile probe, the splash guard — was in the repository and not in the
+  thing that runs at 06:00. Fast-forwarded to `origin/main` after verifying the
+  uncommitted edits were byte-identical to what the branch carries (and taking a
+  stash first, since `.env` is ignored and therefore untouched). `drift-check`
+  on the host now judges all of it; the drift that exposed is the row above.
 - **drift-check now judges Jellyfin's local accounts instead of skipping.** The
   check ran `jellyfin-login-methods.py --check` with whatever `.env` carries, and
   `.env` carries the *container* URL (`http://jellyfin:8096`), which does not
@@ -391,11 +414,13 @@ are written by hand and describe the behaviour change, not the commits.
   resolution", exited 2, and was reported as a note — so the one posture that
   decides whether a user disabled in Authentik can still sign in with a password
   was never being judged. Measured on monarch 2026-10-30: given the published
-  port, the checker answers in full, and it finds a stray — `cola` (a migrated
-  paid profile) has local sign-in enabled and is not in `JELLYFIN_LOCAL_ACCOUNTS`.
+  port, the checker answers in full — `admin` plus the two logins the deployment
+  declares (`dhunter`, `cola`), with every other account LDAP- or OIDC-owned. (The
+  first run there called `cola` a stray and exited 1. That was not a bypass: the
+  deployed copy read `JELLYFIN_LOCAL_ACCOUNTS` from the environment only, so it
+  never saw the `.env` that declares her — see the stale-deployment entry below.)
   The check passes `--url "${JELLYFIN_CHECK_URL:-http://127.0.0.1:8097}"` now, so
-  that is a finding rather than a skip; declaring the account or running the
-  script with `--apply` is the operator's call, not this change's.
+  that posture is judged rather than skipped.
 - **The login screen's stylesheet no longer carries Gizmo's art.** Reverting to
   the *arr stack left `CustomCss` holding the fenced
   `/* gizmo-light-splash */` block from the Gizmo era, so a light-mode login

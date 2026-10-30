@@ -419,16 +419,26 @@ published `3011`). Rows naming a service outside `docker-compose.yml`
 (`authentik-server` is the shared Cerulean stack) are reported as unverified,
 not as failures.
 
-**One row may name its own upstream.** `admin` does: `admin ${NPM_HOST_IP} 81`
-forwards to the NPM admin UI *on the NPM host*, because the admin UI does not
-run on this Docker host. A dotted hostname or an IP in the forward column wins
-over `NPM_FORWARD_HOST` (compose service names never contain a dot, so the two
-forms cannot be confused). This is not cosmetic: with the old
-`nginx-proxy-manager 2081` row the request path was *SSO gate answers, then the
-upstream fails*, because this stack's own optional `npm` profile is not running
-and nothing listens on :2081 — `https://admin.monarch.innotel.us` was dead while
-every other host worked. `NPM_HOST_IP` must be set in `.env`; the row resolves
-to `192.168.1.46:81` here, the same upstream `admin.zeus.innotel.us` uses.
+**One row may name its own upstream.** `admin` is the only row that forwards to
+something other than this stack, and it does so in the second of the two
+spellings a row may use: an IP or a dotted hostname, or `docker:<container>` for
+a container on the *NPM host's* own Docker network, which its nginx resolves
+through Docker's DNS. The prefix is load-bearing — a bare `cerulean-npm-sso`
+looks exactly like the compose service names every other row uses, so it would
+be read as "follow `NPM_FORWARD_HOST`" and sent to the media host.
+
+That row has been wrong in both of the other ways it could be wrong. It used to
+carry `nginx-proxy-manager 2081`, which made the request path *SSO gate answers,
+then the upstream fails* — this stack's optional `npm` profile is not running and
+nothing listens on `:2081` — and it then carried `127.0.0.1:4180`, on the belief
+that the oauth2-proxy gateway shares the NPM container's network namespace.
+Measured on the NPM host 2026-10-30: it does not. `127.0.0.1:4180` inside
+`cerulean-npm` answers **000**; the gateway is a container on its own bridge
+(`proxy_npm-gate`, `172.31.42.10`) plus the network NPM is on, where the name
+`cerulean-npm-sso` answers **302**. The live row had in fact been patched by hand
+to that bridge address — working, but one `docker compose up` away from pointing
+at whatever the bridge hands out next, which is drift no check can see. Hence the
+name: it is the only stable handle, and it is what `--check` now compares.
 
 | Subdomain | Service | Port | WebSockets |
 |-----------|---------|------|------------|
@@ -437,7 +447,7 @@ to `192.168.1.46:81` here, the same upstream `admin.zeus.innotel.us` uses.
 | `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
 | `media.magnate.innotel.us` | Jellyfin via Magnate edge | 8097 → container 8096 | yes |
 | `tv.monarch.innotel.us` | IPTV/EPG guide | 3011 → container 3000 | - |
-| `admin.monarch.innotel.us` | Nginx Proxy Manager admin (SSO-gated) | `NPM_HOST_IP`:81 | - |
+| `admin.monarch.innotel.us` | Nginx Proxy Manager admin (SSO-gated) | `docker:cerulean-npm-sso` → 4180 → UI :81 | - |
 | `req.monarch.innotel.us` | Jellyseerr request portal | 5055 | yes |
 | `subscribe.monarch.innotel.us` | shared subscribe portal (public landing page) | 3040 | - |
 

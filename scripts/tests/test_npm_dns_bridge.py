@@ -81,7 +81,14 @@ class UpsertTest(_Base):
             self.CFG, "tv.monarch.innotel.us", "192.168.1.56"))
         self.assertEqual([m for m, *_ in calls], ["GET"])
 
-    def test_missing_name_gets_an_a_record(self):
+    def test_missing_name_to_a_private_target_becomes_a_cname_to_the_apex(self):
+        """A LAN address must never reach the public zone.
+
+        Every row here forwards to this host's LAN address, so writing the A
+        record the script used to write published a name that resolves for
+        nobody outside the LAN, plus the internal topology. The zone's own
+        convention is a CNAME to the apex, which holds the A record.
+        """
         calls = []
 
         def fake(url, token, path, params=None, method="GET", body=None):
@@ -94,9 +101,26 @@ class UpsertTest(_Base):
         posts = [c for c in calls if c[0] == "POST"]
         self.assertEqual(len(posts), 1)
         body = posts[0][3]
-        self.assertEqual(body["type"], "A")
+        self.assertEqual(body["type"], "CNAME")
+        self.assertEqual(body["value"], "innotel.us.")
         self.assertEqual(body["name"], "new.monarch.innotel.us")
-        self.assertEqual(body["value"], "192.168.1.56")
+        self.assertEqual(body["zone"], "innotel.us")
+
+    def test_missing_name_to_a_public_target_gets_an_a_record(self):
+        """A target outside the LAN is still written as the A record it is."""
+        calls = []
+
+        def fake(url, token, path, params=None, method="GET", body=None):
+            calls.append((method, path, params, body))
+            return [] if method == "GET" else {"ok": True}
+
+        nph.cerulean_api = fake
+        self.assertTrue(nph.dns_upsert_cerulean(
+            self.CFG, "new.monarch.innotel.us", "1.2.3.4"))
+        body = [c for c in calls if c[0] == "POST"][0][3]
+        self.assertEqual(body["type"], "A")
+        self.assertEqual(body["value"], "1.2.3.4")
+        self.assertEqual(body["name"], "new.monarch.innotel.us")
         self.assertEqual(body["zone"], "innotel.us")
 
     def test_dry_run_writes_nothing(self):
