@@ -115,6 +115,10 @@ class OneShot(threading.Thread):
 
     def __exit__(self, *_exc):
         self.join(5)
+        # Idempotent, and it covers the one path the thread's `finally` cannot: a
+        # probe that never connected leaves `accept` blocking, so the join times
+        # out and the socket would be collected unclosed (a ResourceWarning in CI).
+        self.sock.close()
         return False
 
 
