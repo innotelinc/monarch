@@ -414,6 +414,24 @@ are written by hand and describe the behaviour change, not the commits.
 
 ### Fixed
 
+- **A TV was told to connect to an address only the docker bridge could
+  reach.** `GET /System/Info/Public` carries a `LocalAddress`, and the native
+  clients (Android TV, Roku, iOS) keep it and re-dial it — so a Fire TV that had
+  been playing fine came back reporting **"unable to connect to server
+  media.innotel.us"** about a server that was healthy, answering that very name
+  over 443, and accepting `dhunter` on the first try. The field was
+  auto-detected, which inside the container means
+  `https://172.18.0.15:8920`: its own bridge address on an HTTPS port nothing
+  publishes. `monarch-init` now sets `EnablePublishedServerUriByRequest` with a
+  `0.0.0.0/0=https://media.innotel.us` catch-all, so a client that arrived over
+  the public name is handed the public name back (verified through the edge:
+  `"LocalAddress":"https://media.innotel.us"`). The same step prunes
+  `KnownProxies`: an address in the compose pool belongs to whichever container
+  holds it today, so every recreated gateway had added one and nothing removed
+  it — seventeen entries on this host, sixteen of them naming containers that no
+  longer existed. Names, CIDRs and addresses outside the pool are left alone;
+  that prune is what keeps the list readable rather than a history of past
+  gateways.
 - **A tile probe that got a 4xx leaked its socket.** `check-board-tiles.py` caught
   `urllib.error.HTTPError` and read `.code` without closing it — but an
   `HTTPError` *is* the response, not only an exception, so one socket stayed open

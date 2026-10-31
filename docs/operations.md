@@ -883,6 +883,31 @@ sudo docker restart jellyfin
 PASS=$(python3 scripts/verify-sso.py)   # step [2c] asserts the https start URL
 ```
 
+The same step also publishes an address a client can actually dial.
+`GET /System/Info/Public` carries a `LocalAddress`, and the native clients keep
+that field and re-dial it when they reconnect. Auto-detected in the Jellyfin
+container it is the container's own bridge address on an HTTPS port nothing
+publishes — measured on this deployment (2026-10-30) as
+`https://172.18.0.15:8920` — so a Fire TV that had been playing came back with
+**"unable to connect to server media.innotel.us"** about a server that was
+healthy on that name. `jellyfin_ensure_known_proxies` therefore also sets
+`EnablePublishedServerUriByRequest` with a `0.0.0.0/0=https://media.innotel.us`
+catch-all: a client that arrived over the public name is handed the public name
+back. Confirm it from outside, because the value differs by door:
+
+```
+curl -s https://media.innotel.us/System/Info/Public | grep -o '"LocalAddress":"[^"]*"'
+# "LocalAddress":"https://media.innotel.us"      <- a TV can dial this
+# "LocalAddress":"https://172.18.0.15:8920"      <- the defect: nothing is there
+```
+
+That function also **prunes** `KnownProxies`. An address in the compose network's
+pool belongs to whichever container holds it today, so a recreated gateway gets a
+new one and the old entry stays for ever — this host had seventeen, sixteen of
+them naming containers that no longer existed. Only addresses inside the pool
+that the gateway does not hold now are dropped; a name, a CIDR or an address
+outside it is somebody's deliberate entry and is kept as written.
+
 The app half of the flow itself is **Quick Connect**, not the login button:
 the app shows a code, you open the server's sign-in page in a browser, sign in
 with Cerulean Authentik, and enter the code. The button on the login page is for

@@ -45,6 +45,7 @@ Secrets/state written under /docker/appdata/init/:
 """
 
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -90,6 +91,25 @@ JELLYFIN_BASE = "http://jellyfin:8096"
 # this hid; a phone app opening the same URL in a webview refuses the cleartext
 # request, which is what "I cannot sign in from the app" was.
 JELLYFIN_SSO_GATEWAY = os.environ.get("JELLYFIN_SSO_GATEWAY", "jellyfin-sso")
+# The address Jellyfin publishes to every client, stated here instead of being
+# auto-detected. `GET /System/Info/Public` carries a `LocalAddress` and a native
+# client (Android TV, Roku, iOS) keeps it and re-dials it when it reconnects;
+# auto-detected inside this container it is the container's own bridge address on
+# a port nothing publishes - measured on this deployment (2026-10-30) as
+# `https://172.18.0.15:8920`. A Fire TV that reconnected to it reported "unable to
+# connect to server media.innotel.us" about a server that was healthy and
+# answering that very name over 443, which is how this was found.
+JELLYFIN_PUBLIC_URL = (os.environ.get("JELLYFIN_PUBLIC_URL", "https://media.innotel.us")
+                       .strip().rstrip("/"))
+
+# The compose network's pool. Jellyfin resolves every Known proxies entry at
+# startup, and an address in this pool belongs to whichever container holds it
+# *today* - so a recorded one is valid only while that gateway instance lives.
+# Recreating the gateway hands it a new address and the old entry stays for ever:
+# this deployment accumulated sixteen of them, one per recreation, and nothing
+# read them back.
+JELLYFIN_CONTAINER_SUBNET = ipaddress.ip_network(
+    os.environ.get("JELLYFIN_CONTAINER_SUBNET", "172.18.0.0/16"))
 JELLYSEERR_BASE = "http://jellyseerr:5055"
 TRANSMISSION_BASE = "http://transmission:9091"
 PROWLARR_BASE = "http://prowlarr:9696"
@@ -808,13 +828,54 @@ def jellyfin_gateway_entries() -> list[str]:
     return entries
 
 
-def jellyfin_ensure_known_proxies(token) -> bool:
-    """Make Jellyfin trust the SSO gateway's X-Forwarded-Proto.
+def jellyfin_prune_proxies(known: list[str], entries: list[str]) -> tuple[list[str], list[str]]:
+    """(keep, drop) for a Known proxies list that has outlived some gateways.
 
-    The list is read once, at startup, so a change here needs a Jellyfin restart
-    - which is reported rather than done (the same call this repo makes for a
-    plugin install). `scripts/verify-sso.py` is what proves the result from the
-    outside: it asserts the login page advertises an https sign-in URL.
+    Only addresses inside the container pool are ever dropped, and only when the
+    gateway does not hold them now. A name, a CIDR or an address outside the pool
+    is an operator's own entry - Jellyfin parses an entry as an IP, a subnet *or*
+    a hostname - so it is kept exactly as written. That distinction is what makes
+    the prune safe to run on every boot: the entry that has to go is the one that
+    named a container which no longer exists, and nothing else looks like it.
+    """
+    keep: list[str] = []
+    drop: list[str] = []
+    current = set(entries)
+    for entry in known:
+        text = str(entry).strip()
+        try:
+            address = ipaddress.ip_address(text)
+        except ValueError:
+            keep.append(entry)
+            continue
+        if address in JELLYFIN_CONTAINER_SUBNET and text not in current:
+            drop.append(text)
+        else:
+            keep.append(entry)
+    return keep, drop
+
+
+def jellyfin_ensure_known_proxies(token) -> bool:
+    """Wire the two network settings a proxied Jellyfin gets wrong by default.
+
+    **Known proxies.** Jellyfin honours `X-Forwarded-Proto` only from a caller in
+    this list, and with the list empty it forwards nothing at all; the OIDC
+    plugin builds its start URL from the request scheme, so the login page - and
+    `/sso/OIDC/Providers`, which is how a native client discovers the provider -
+    advertised an `http://` URL on a name that serves https only. The list is
+    read at startup, so a change is reported rather than followed by a restart
+    (the same call this repo makes for a plugin install), and
+    `scripts/verify-sso.py` is what proves the result from the outside. The list
+    also *accumulates*: every recreated gateway added an address and nothing ever
+    removed one, so it is pruned to the gateway this run actually has.
+
+    **The published address.** `GET /System/Info/Public` carries a `LocalAddress`
+    that native clients keep and re-dial. Auto-detected in this container it is
+    the bridge address on an unpublished port, so a client reconnects to nothing
+    while the server is healthy on the name it was given - which is exactly the
+    "unable to connect to server" a Fire TV reported. `JELLYFIN_PUBLIC_URL` is
+    the catch-all entry, so a client that arrived over the public name is handed
+    the public name back.
     """
     status, _, config = _http(JELLYFIN_BASE, "/System/Configuration/network",
                               headers=jellyfin_headers(token))
@@ -823,25 +884,58 @@ def jellyfin_ensure_known_proxies(token) -> bool:
                        f"(HTTP {status}) - the SSO gateway is not a known proxy, so "
                        "the login page advertises an http:// sign-in URL")
         return False
+
+    entries = jellyfin_gateway_entries()
     known = list(config.get("KnownProxies") or [])
-    missing = [entry for entry in jellyfin_gateway_entries() if entry not in known]
-    if not missing:
-        _log("Jellyfin: the SSO gateway is already a known proxy")
+    kept, dropped = jellyfin_prune_proxies(known, entries)
+    missing = [entry for entry in entries if entry not in kept]
+    config["KnownProxies"] = kept + missing
+
+    published = f"0.0.0.0/0={JELLYFIN_PUBLIC_URL}"
+    subnets = [str(entry) for entry in (config.get("PublishedServerUriBySubnet") or [])]
+    republish = config.get("EnablePublishedServerUriByRequest") is not True
+    if published not in subnets:
+        # Appended, never replaced: another subnet mapping is a deliberate entry
+        # and the catch-all is the only one this deployment adds.
+        subnets = subnets + [published]
+        republish = True
+    config["EnablePublishedServerUriByRequest"] = True
+    config["PublishedServerUriBySubnet"] = subnets
+
+    if not (missing or dropped or republish):
+        _log(f"Jellyfin: the SSO gateway is a known proxy and {JELLYFIN_PUBLIC_URL} "
+             "is the address clients are published - nothing to write")
         return True
-    config["KnownProxies"] = known + missing
+
     status, _, _ = _http(JELLYFIN_BASE, "/System/Configuration/network",
                          method="POST", body=config, headers=jellyfin_headers(token))
     if status not in (200, 204):
-        _issues.append("Jellyfin: could not record the SSO gateway as a known proxy "
-                       f"(HTTP {status}) - the login page keeps advertising an "
-                       "http:// sign-in URL that an app cannot follow")
+        _issues.append("Jellyfin: could not record the SSO gateway as a known proxy, "
+                       f"or the published address, (HTTP {status}) - the login page "
+                       "keeps advertising an http:// sign-in URL that an app cannot "
+                       "follow, and clients keep being handed an address they cannot "
+                       "dial")
         return False
-    _log(f"Jellyfin: recorded {', '.join(missing)} as a known proxy")
-    _issues.append(
-        "Jellyfin: the SSO gateway was added to Known proxies - restart the jellyfin "
-        "container, or the login page keeps advertising an http:// sign-in URL that "
-        "an app's webview cannot follow (scripts/verify-sso.py asserts the https one)"
-    )
+
+    if dropped:
+        _log(f"Jellyfin: dropped {', '.join(dropped)} from Known proxies - "
+             "container addresses from an earlier gateway, which nothing holds now")
+    if missing:
+        _log(f"Jellyfin: recorded {', '.join(missing)} as a known proxy")
+    if republish:
+        _log(f"Jellyfin: clients are published {JELLYFIN_PUBLIC_URL}")
+
+    if missing:
+        _issues.append(
+            "Jellyfin: the SSO gateway was added to Known proxies - restart the jellyfin "
+            "container, or the login page keeps advertising an http:// sign-in URL that "
+            "an app's webview cannot follow (scripts/verify-sso.py asserts the https one)"
+        )
+    elif dropped:
+        _issues.append(
+            "Jellyfin: stale gateway addresses were dropped from Known proxies - restart "
+            "the jellyfin container so it reads the list it now trusts"
+        )
     return True
 
 

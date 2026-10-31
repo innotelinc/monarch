@@ -173,10 +173,75 @@ class EnsuringTheGatewayIsTrusted(unittest.TestCase):
         self.assertIs(posted["EnableHttps"], False)
 
     def test_a_gateway_already_trusted_is_left_alone(self) -> None:
-        fake = FakeJellyfin({"KnownProxies": [init_mod.JELLYFIN_SSO_GATEWAY, "172.20.0.7"]})
+        # Both halves wired: the gateway is trusted and the published address is
+        # the public name. Nothing to write, so nothing is written - a POST here
+        # would be a config rewrite on every boot for no change.
+        fake = FakeJellyfin({"KnownProxies": [init_mod.JELLYFIN_SSO_GATEWAY, "172.20.0.7"],
+                             "EnablePublishedServerUriByRequest": True,
+                             "PublishedServerUriBySubnet": [
+                                 f"0.0.0.0/0={init_mod.JELLYFIN_PUBLIC_URL}"]})
         init_mod._http = fake
         self.assertTrue(init_mod.jellyfin_ensure_known_proxies("token"))
         self.assertEqual(fake.methods(), ["GET"])
+
+    def test_container_addresses_from_an_earlier_gateway_are_dropped(self) -> None:
+        # Measured on the media host: seventeen entries, sixteen of them the
+        # address of a gateway instance that had been recreated since. They are
+        # not a security hole, but they are the reason the list cannot be read,
+        # and the address that *is* trusted has to survive the prune.
+        # The gateway itself is trusted and the published address is already
+        # right, so the only thing that moved is the pile of dead addresses -
+        # which is the shape the live host was in.
+        fake = FakeJellyfin({"KnownProxies": ["jellyfin-sso", "172.20.0.7",
+                                              "172.18.0.15", "172.18.0.28",
+                                              "127.0.0.1", "10.0.0.0/8",
+                                              "proxy.internal"],
+                             "EnablePublishedServerUriByRequest": True,
+                             "PublishedServerUriBySubnet": [
+                                 f"0.0.0.0/0={init_mod.JELLYFIN_PUBLIC_URL}"]})
+        init_mod._http = fake
+        self.assertTrue(init_mod.jellyfin_ensure_known_proxies("token"))
+        self.assertEqual(fake.posted_known_proxies(),
+                         ["jellyfin-sso", "172.20.0.7", "127.0.0.1", "10.0.0.0/8",
+                          "proxy.internal"])
+        self.assertTrue(any("stale gateway addresses were dropped" in issue
+                            for issue in init_mod._issues))
+
+    def test_an_operator_subnet_or_name_is_never_pruned(self) -> None:
+        # The prune may only remove what a recreated container left behind: a
+        # CIDR, a hostname and an address outside the compose pool are entries
+        # somebody set on purpose, and Jellyfin accepts all three spellings.
+        keep, dropped = init_mod.jellyfin_prune_proxies(
+            ["192.168.1.0/24", "edge.example.net", "192.168.1.9", "172.18.0.4"],
+            [init_mod.JELLYFIN_SSO_GATEWAY, "172.18.0.21"])
+        self.assertEqual(keep, ["192.168.1.0/24", "edge.example.net", "192.168.1.9"])
+        self.assertEqual(dropped, ["172.18.0.4"])
+
+    def test_clients_are_published_the_name_they_can_dial(self) -> None:
+        # The defect behind "unable to connect to server media.innotel.us":
+        # /System/Info/Public advertised https://172.18.0.15:8920 - the
+        # container's own bridge address on a port nothing publishes - and a
+        # native client keeps that field and re-dials it.
+        fake = FakeJellyfin({"KnownProxies": [init_mod.JELLYFIN_SSO_GATEWAY, "172.20.0.7"]})
+        init_mod._http = fake
+        self.assertTrue(init_mod.jellyfin_ensure_known_proxies("token"))
+        posted = fake.posted_config()
+        self.assertIs(posted["EnablePublishedServerUriByRequest"], True)
+        self.assertEqual(posted["PublishedServerUriBySubnet"],
+                         [f"0.0.0.0/0={init_mod.JELLYFIN_PUBLIC_URL}"])
+
+    def test_a_published_uri_an_operator_added_is_kept(self) -> None:
+        # The catch-all is added; an existing subnet mapping is somebody's
+        # deliberate rule and replacing it would silently repoint their clients.
+        fake = FakeJellyfin({"KnownProxies": [init_mod.JELLYFIN_SSO_GATEWAY, "172.20.0.7"],
+                             "EnablePublishedServerUriByRequest": True,
+                             "PublishedServerUriBySubnet": [
+                                 "192.168.1.0/24=http://192.168.1.56:8096"]})
+        init_mod._http = fake
+        self.assertTrue(init_mod.jellyfin_ensure_known_proxies("token"))
+        self.assertEqual(fake.posted_config()["PublishedServerUriBySubnet"],
+                         ["192.168.1.0/24=http://192.168.1.56:8096",
+                          f"0.0.0.0/0={init_mod.JELLYFIN_PUBLIC_URL}"])
 
     def test_a_name_that_does_not_resolve_records_the_name_alone(self) -> None:
         init_mod.socket.getaddrinfo = unresolvable()
