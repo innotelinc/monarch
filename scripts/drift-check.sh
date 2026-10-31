@@ -57,6 +57,9 @@ set -uo pipefail
 #       PKCS#12 and readable by the container's user, the served chain verifies
 #       and still matches the material installed beside it
 #       (scripts/jellyfin-tls.py --check, read-only)
+#     - every published name (media.innotel.us, and iptv.innotel.us for the TV
+#       app) serves the app as itself, over its own certificate: a client is
+#       handed back the door it used (scripts/check-jellyfin-names.py, read-only)
 #   Cerulean Vault (SecretOps):
 #     - .env holds materialized values, with no unresolved vault:// reference
 #   Magnate (RevenueOps, when MAGNATE_URL is set):
@@ -985,6 +988,26 @@ elif [ "$tls_code" -eq 2 ]; then
 else
   fail "jellyfin: its HTTPS listener is not serving our certificate - renew media.innotel.us in Cerulean, then run scripts/jellyfin-tls.py --renew and restart Jellyfin; material the edge does not hold takes scripts/jellyfin-tls.py --apply --pem <file>; see docs/operations.md"
   printf '%s\n' "$tls_out" | indent >&2
+fi
+
+# One app, several names - and each name has to answer as itself. Jellyfin is
+# told to advertise the name a client arrived on (`EnablePublishedServerUriByRequest`),
+# so a client that dials `iptv.innotel.us` must be handed `iptv.innotel.us` back
+# and not the web name; on 2026-10-30 the TV app was handed `media.innotel.us`,
+# followed it, and could not connect while both names answered 200. The
+# certificate is the other half of the same outage, so it is checked with the
+# answer: an expired or wrong-name certificate fails exactly like this, on a
+# device and not in a browser anyone looks at. Exit 2 is "cannot look" (no
+# egress from this host) and stays a note.
+names_out=$(python3 scripts/check-jellyfin-names.py 2>&1)
+names_code=$?
+if [ "$names_code" -eq 0 ]; then
+  say "ok: every published Jellyfin name (media, iptv) serves the app as itself over its own certificate"
+elif [ "$names_code" -eq 2 ]; then
+  say "note: the published Jellyfin names could not be judged (skipped) - $(printf '%s' "$names_out" | tail -1)"
+else
+  fail "jellyfin: a published name does not serve Jellyfin as itself - the name's edge host, its certificate and the published-server-URI Jellyfin advertises must agree per name (npm-proxy-hosts.py owns the rows, monarch-init the URIs); see docs/operations.md"
+  printf '%s\n' "$names_out" | indent >&2
 fi
 
 # The LDAP outpost is Jellyfin's credential store now that the page is published,

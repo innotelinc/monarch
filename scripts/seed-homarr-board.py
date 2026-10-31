@@ -77,6 +77,13 @@ APPS = {
     # -- Playback -----------------------------------------------------------
     "Jellyfin": ("https://media.innotel.us", "jellyfin",
                  "Jellyfin - stream movies & TV"),
+    # The same server at the name the TV app is configured with. It carries its
+    # own certificate and no oauth2-proxy gate (a device cannot complete a browser
+    # sign-in), which is the only reason it exists - and the reason it is a tile:
+    # the name that broke on 2026-10-30 was this one, and a board that links only
+    # the web name cannot show whether the television's name answers at all.
+    "Jellyfin (TV)": ("https://iptv.innotel.us", "jellyfin",
+                      "Jellyfin - the TV app's name (own certificate, no sign-in gate)"),
     "Jellyseerr": ("https://req.innotel.us", "jellyseerr",
                    "Jellyseerr - request movies & TV"),
     "Requestrr": ("https://requestrr.monarch.innotel.us", "discord",
@@ -244,6 +251,7 @@ DESIGN = (
     )),
     ("Playback", (
         app_tile("Jellyfin"),
+        app_tile("Jellyfin (TV)"),
         app_tile("Jellyseerr"),
         app_tile("Requestrr"),
         app_tile("IPTV (EPG)"),
