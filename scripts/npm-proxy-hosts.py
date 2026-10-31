@@ -92,7 +92,6 @@ DEFAULT_HOSTS = [
     # "@" is the apex — the base MONARCH_DOMAIN itself, which is the main
     # interface users log into (the Homarr dashboard).
     ("@",         "homarr",                   7575, True),
-    ("app",       "homarr",                   7575, True),
     ("auth",      "authentik-server",         9000, False),
     ("media",     "jellyfin",                 8096, True),
     # Host 3011 -> container 3000: host :3001 belongs to the Zeus portal, so

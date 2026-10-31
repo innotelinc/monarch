@@ -114,7 +114,7 @@ Main entry points (full table in [docs/operations.md](docs/operations.md)):
 | Subdomain | Service | What it is |
 |---|---|---|
 | `subscribe.innotel.us` | Magnate | **Portal landing page and subscribing page** — pick a plan, Stripe Checkout, manage your account. Lives outside this domain because billing is Magnate's, not Monarch's. |
-| `monarch.<domain>` (apex) | Homarr dashboard | Main login / landing board |
+| `monarch.<domain>` (apex) | Monarch landing page | Product page; the Homarr dashboard is `home.innotel.us` |
 | `media.<domain>` | Jellyfin | Streaming — movies, TV, music, live TV |
 | `auth.<domain>` | Authentik | SSO, user management, `paid_users` access group |
 | `req.<domain>` | Jellyseerr | Request portal (connected to Radarr/Sonarr) |

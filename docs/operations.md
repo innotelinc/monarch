@@ -79,7 +79,7 @@ only touches services that are still unconfigured.
 
 | Service    | URL                   | Notes |
 |------------|-----------------------|-------|
-| Homarr (dashboard) | http://localhost:7575 | `app.monarch.innotel.us` |
+| Homarr (dashboard) | http://localhost:7575 | `home.innotel.us` (the apex is the landing page; `app.monarch.innotel.us` retired 2026-10-31) |
 | Jellyfin   | http://localhost:8097 | `https://media.magnate.innotel.us`; Authentik LDAP users; admin = your `.env` credentials |
 | Jellyseerr | http://localhost:5055 | `req.monarch.innotel.us`; requests; connected to Jellyfin + Radarr/Sonarr |
 | Prowlarr   | http://localhost:9696 | indexers; all *arr apps pre-registered |
@@ -442,8 +442,7 @@ name: it is the only stable handle, and it is what `--check` now compares.
 
 | Subdomain | Service | Port | WebSockets |
 |-----------|---------|------|------------|
-| `monarch.innotel.us` (apex, `@`) | Homarr dashboard — main login | 7575 | yes |
-| `app.monarch.innotel.us` | Homarr dashboard | 7575 | yes |
+| `monarch.innotel.us` (apex, `@`) | Monarch landing page (static) | 14014 | - |
 | `auth.monarch.innotel.us` | Authentik (SSO + user portal) | 9000 | - |
 | `media.magnate.innotel.us` | Jellyfin via Magnate edge | 8097 → container 8096 | yes |
 | `tv.monarch.innotel.us` | IPTV/EPG guide | 3011 → container 3000 | - |
