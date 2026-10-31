@@ -181,6 +181,15 @@ services:
       # address) via `jellyfin_ensure_known_proxies`, and a change needs a
       # Jellyfin restart, so init reports it rather than doing it.
       - 127.0.0.1:8097:8096
+      # A second, LAN-only door, for the television. A TV app cannot complete the
+      # oauth2-proxy cookie flow the gateway above exists for: it authenticates
+      # against Jellyfin's own API (`/Users/AuthenticateByName` answers 200) and
+      # then every call after that - Views, Items, Sessions, the `/socket`
+      # websocket - comes back 401, because the app holds a Jellyfin token and no
+      # browser session. Measured 2026-10-31 through iptv.innotel.us while the
+      # web client was perfectly healthy. So the TV's name forwards here
+      # directly, and the web names keep the gate; nothing else uses this port.
+      - "${JELLYFIN_TV_PUBLISH:-192.168.1.56:14013}:8096"
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/jellyfin:/config
