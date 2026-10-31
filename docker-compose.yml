@@ -189,7 +189,7 @@ services:
       # browser session. Measured 2026-10-31 through iptv.innotel.us while the
       # web client was perfectly healthy. So the TV's name forwards here
       # directly, and the web names keep the gate; nothing else uses this port.
-      - "${JELLYFIN_TV_PUBLISH:-192.168.1.56:14013}:8096"
+      - "${JELLYFIN_TV_PUBLISH:-192.168.1.56:14016}:8096"
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /docker/appdata/jellyfin:/config
