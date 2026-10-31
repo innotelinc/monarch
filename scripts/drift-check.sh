@@ -1542,8 +1542,24 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   while IFS= read -r cname; do
     [ -n "$cname" ] || continue
     rc=$(docker inspect -f '{{.RestartCount}}' "$cname" 2>/dev/null || echo 0)
+    # RestartCount is a *lifetime* counter - docker never resets it - so a
+    # container that crash-looped once and has served happily since still
+    # reports the old total. Failing on the number alone made this check
+    # unrecoverable: on 2026-10-31 thirteen `-sso` sidecars were flagged for
+    # 200+ restarts accumulated before a config fix, while they were serving
+    # traffic, and every heal run left them flagged. What matters is whether a
+    # container is looping *now*: a high count with the container down, or up
+    # for less than DRIFT_RESTART_WINDOW seconds. A stable one keeps its count
+    # and passes; the existing ok line prints restarts=$rc.
     if [ "$rc" -ge "$DRIFT_MAX_RESTARTS" ]; then
-      fail "infra: $cname restarted $rc times (>= ${DRIFT_MAX_RESTARTS}) - possible crash loop"
+      running=$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null || echo "true")
+      started=$(docker inspect -f '{{.State.StartedAt}}' "$cname" 2>/dev/null | cut -c1-19 | tr 'T' ' ')
+      started_epoch=$(date -u -d "$started" +%s 2>/dev/null || echo "")
+      up=-1
+      [ -n "$started_epoch" ] && up=$(( $(date +%s) - started_epoch ))
+      if [ "$running" != "true" ] || { [ "$up" -ge 0 ] && [ "$up" -lt "${DRIFT_RESTART_WINDOW:-3600}" ]; }; then
+        fail "infra: $cname restarted $rc times and is not stably up (running=${running}, up ${up}s) - crash loop"
+      fi
     fi
     # Image the container was created from vs the current image for its tag.
     cimg=$(docker inspect -f '{{.Image}}' "$cname" 2>/dev/null || echo "")
