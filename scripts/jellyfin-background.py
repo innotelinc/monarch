@@ -112,6 +112,7 @@ def build_css(uri: str, variant: str) -> str:
     accent, hover = palette["accent"], palette["hover"]
     panel, line = palette["panel"], palette["line"]
     backdrop = f'url("{uri}") center/cover no-repeat fixed'
+    crown = crown_uri()
     rules = [
         # `html body` outranks Jellyfin's own `body` rules and nothing else.
         f"html body{{background:{base} {backdrop}!important;color:{ink}!important}}",
@@ -124,7 +125,27 @@ def build_css(uri: str, variant: str) -> str:
         ".emby-button,.button-submit{border-radius:4px!important}",
         f".raised:hover{{background:{hover}!important;color:{base}!important}}",
     ]
+    # The crest, next to the app's own title. Additive on purpose: Jellyfin's
+    # login card is the splash's (scripts/jellyfin-splash.py) and hiding the
+    # wordmark by class name has broken between releases, so this only adds a
+    # mark rather than removing one.
+    if crown:
+        rules.append(
+            f"html body .headerTop .pageTitle::before{{content:'';float:left;"
+            f"width:24px;height:24px;margin:6px 10px 0 0;"
+            f'background:{crown} center/contain no-repeat}}')
     return "".join(rules)
+
+
+CROWN_ASSET = "monarch-crown-white.svg"
+
+
+def crown_uri() -> str:
+    """The crest as a data URI, for the rule that puts it in the chrome."""
+    asset = ASSET_DIR / CROWN_ASSET
+    if not asset.is_file():
+        return ""
+    return asset_uri(asset)
 
 
 def asset_uri(asset: Path) -> str:

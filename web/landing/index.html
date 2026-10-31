@@ -330,6 +330,66 @@
       *, *::before, *::after { animation: none !important; transition: none !important; }
       html { scroll-behavior: auto; }
     }
+    /* ══ Monarch brand — obsidian, champagne, velvet ═══════════════════════
+       This page shipped on the shared "operations" scheme (violet #5f3fe6),
+       which is not the platform's colour. Everything below is scoped to this
+       page and keyed off html[data-scheme] so it wins over unity-theme.css in
+       both modes — the shared file stays untouched, other products use it. */
+    html[data-scheme],
+    html[data-scheme="operations"] {
+      --canvas: #0a0b0d;
+      --surface: #14161a;
+      --surface-muted: #1a1d22;
+      --surface-sunken: #101215;
+      --line: #262a30;
+      --line-strong: #3b414a;
+      --ink: #f6f1e6;
+      --ink-soft: #d2c9b7;
+      --ink-faint: #9c9384;
+      --brand: #e3c27b;
+      --brand-soft: #241f16;
+      --brand-ink: #14110b;
+      --brand-ring: #f5dca6;
+      --ok: #8ec898;
+      --info: #93bcd9;
+      --bad: #e07a82;
+      --attention: #e3c27b;
+      --attention-soft: #241f16;
+      --shadow-card: 0 1px 2px rgb(0 0 0 / 45%), 0 18px 40px -22px rgb(0 0 0 / 75%);
+      --shadow-pop: 0 18px 44px -18px rgb(0 0 0 / 70%);
+    }
+    /* The backdrop travels with the page: one SVG, no second origin. */
+    html[data-scheme] body {
+      background:
+        linear-gradient(180deg, rgb(8 9 11 / 90%), rgb(8 9 11 / 96%)),
+        url("monarch/monarch-background.svg") center / cover no-repeat fixed,
+        #08090b;
+    }
+    /* The crest on a champagne plate, the way the app icons wear it. */
+    .brand .mark {
+      width: 30px; height: 30px; padding: 3px; border-radius: 8px;
+      background: linear-gradient(160deg, #fff6cf, #f5cc57 45%, #d69a2b);
+      box-shadow: 0 0 0 1px rgb(245 204 87 / 35%), 0 6px 18px -8px rgb(245 204 87 / 45%);
+    }
+    .topbar {
+      background: rgb(10 11 13 / 82%);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+    }
+    .hero::before {
+      background:
+        radial-gradient(620px 340px at 72% -8%, rgb(227 194 123 / 14%), transparent 70%),
+        radial-gradient(520px 320px at 12% 108%, rgb(181 16 31 / 10%), transparent 70%);
+    }
+    .btn-primary { box-shadow: 0 10px 26px -14px rgb(227 194 123 / 70%); }
+    .card, .quickstart {
+      background: rgb(20 22 26 / 78%);
+      backdrop-filter: blur(6px);
+      border-color: var(--line);
+    }
+    .card:hover { border-color: rgb(227 194 123 / 55%); }
+    .surface { background: rgb(20 22 26 / 62%); border-color: var(--line); }
+    .surface:hover { border-color: rgb(227 194 123 / 50%); }
   </style>
 </head>
 <body>

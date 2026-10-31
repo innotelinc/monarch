@@ -305,11 +305,22 @@ DESIGN = (
 # the same asset reaching the media apps.
 BOARD_TITLE = "Monarch"
 BOARD_LOGO = "https://monarch.innotel.us/monarch/monarch-crown.svg"
-BOARD_COLORS = ("#f5cc57", "#b5101f")   # primary (crown gold), secondary (velvet red)
+BOARD_COLORS = ("#e3c27b", "#b5101f")   # primary (champagne), secondary (velvet)
+# The backdrop is the same asset the landing page and Jellyfin carry, served
+# from the public apex so the board needs no second origin.
+BOARD_BACKGROUND = "https://monarch.innotel.us/monarch/monarch-background.svg"
 BOARD_CUSTOM_CSS = (
-    "/* Monarch — the dashboard wears the platform mark, not Homarr's. */\n"
-    "a { color: #e7b63f; }\n"
-    "a:hover { color: #fff0b8; }\n"
+    "/* Monarch — obsidian board, champagne ink, velvet accents. */\n"
+    "html body { background-attachment: fixed !important; }\n"
+    "a { color: #e3c27b; }\n"
+    "a:hover { color: #f5dca6; }\n"
+    '[class*="mantine-Card-root"], [class*="mantine-Paper-root"] {\n'
+    "  background: rgb(18 20 24 / 74%) !important;\n"
+    "  backdrop-filter: blur(8px);\n"
+    "  border-color: rgb(227 194 123 / 22%) !important;\n"
+    "}\n"
+    '[class*="mantine-Card-root"]:hover { border-color: rgb(227 194 123 / 55%) !important; }\n'
+    '[class*="mantine-Title-root"] { letter-spacing: .015em; }\n'
 )
 
 
@@ -612,10 +623,12 @@ def main():
         first = boards[0]["id"]
         db.execute(
             "UPDATE board SET page_title=?, meta_title=?, logo_image_url=?, "
-            "favicon_image_url=?, primary_color=?, secondary_color=?, custom_css=? "
-            "WHERE id=?",
+            "favicon_image_url=?, primary_color=?, secondary_color=?, "
+            "background_image_url=?, background_image_attachment=?, "
+            "background_image_size=?, custom_css=? WHERE id=?",
             (BOARD_TITLE, BOARD_TITLE, BOARD_LOGO, BOARD_LOGO,
-             BOARD_COLORS[0], BOARD_COLORS[1], BOARD_CUSTOM_CSS, first))
+             BOARD_COLORS[0], BOARD_COLORS[1], BOARD_BACKGROUND, "fixed", "cover",
+             BOARD_CUSTOM_CSS, first))
         db.execute("UPDATE serverSetting SET value=? WHERE setting_key='board'",
                    (json.dumps({"json": {"homeBoardId": first, "mobileHomeBoardId": first,
                                          "enableStatusByDefault": True,
