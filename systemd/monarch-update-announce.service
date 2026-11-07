@@ -1,0 +1,14 @@
+[Unit]
+Description=Announce pending Monarch media updates before the 05:00 apply run
+Documentation=https://github.com/innotelinc/monarch
+# Runs on the host that has a mail transport (the Monarch box itself has none);
+# it only asks the updater there what is pending.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Nice=10
+EnvironmentFile=-/etc/innotel/monarch-announce.env
+ExecStart=/opt/innotel/monarch-update/announce.sh

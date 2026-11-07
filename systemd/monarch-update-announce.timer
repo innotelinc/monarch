@@ -1,0 +1,15 @@
+[Unit]
+Description=Look for pending Monarch media updates at 16:00, before the 05:00 apply
+
+[Timer]
+# Afternoon, while someone can still pin an image by hand if the list shows
+# something they would rather not take overnight. It only reads: nothing is
+# pulled, recreated or pinned on this run.
+OnCalendar=*-*-* 16:00:00
+RandomizedDelaySec=5m
+AccuracySec=1m
+Persistent=true
+Unit=monarch-update-announce.service
+
+[Install]
+WantedBy=timers.target

@@ -18,7 +18,8 @@
 # seconds is left alone, because that is watchtower having just done it.
 #
 # Usage:
-#   monarch-update.sh [--dry-run] [--no-pull] [--services a,b,c]
+#   monarch-update.sh [--dry-run] [--no-pull] [--notify-only]
+#                     [--retry-quarantined] [--services a,b,c]
 #
 # Environment (/etc/innotel/monarch-update.env):
 #   MONARCH_SERVICES         comma list to manage (default jellyfin, sonarr,
@@ -28,6 +29,8 @@
 #                            jellyfin needs ~5 minutes after an image hop)
 #   MONARCH_SKIP_RECENT      leave a container started this recently alone,
 #                            which is watchtower (default 900)
+#   MONARCH_QUARANTINE_DAYS  stop retrying a service that failed to settle on an
+#                            image for this long (default 7)
 #   ALERT_EMAIL_TO           mailbox a failed update is mailed to (sendmail)
 #   ALERT_WEBHOOK_URL        JSON webhook a failed update is POSTed to
 #   MONARCH_STATE            alert/state directory
@@ -46,6 +49,7 @@ SERVICES="${MONARCH_SERVICES:-jellyfin,sonarr,radarr,lidarr,whisparr,prowlarr,ba
 JELLYFIN_TAG="${JELLYFIN_IMAGE_TAG:-latest}"
 HEALTH_TIMEOUT="${MONARCH_HEALTH_TIMEOUT:-900}"
 SKIP_RECENT="${MONARCH_SKIP_RECENT:-900}"
+QUARANTINE_DAYS="${MONARCH_QUARANTINE_DAYS:-7}"
 STATE_DIR="${MONARCH_STATE:-/var/lib/innotel/monarch-update}"
 ALERT_TO="${ALERT_EMAIL_TO:-}"
 ALERT_WEBHOOK="${ALERT_WEBHOOK_URL:-}"
@@ -53,7 +57,11 @@ LOCK="${MONARCH_LOCK:-/run/lock/monarch-update.lock}"
 
 DRY_RUN=false
 PULL=true
+NOTIFY=false
+IGNORE_QUARANTINE=false
 FAILED=()
+PENDING=()
+QUARANTINED=()
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 warn() { printf '%s WARNING: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
@@ -88,12 +96,14 @@ die() {  # code, message
   exit "$code"
 }
 
-usage() { sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=true ;;
     --no-pull) PULL=false ;;
+    --notify-only) NOTIFY=true; DRY_RUN=true ;;
+    --retry-quarantined) IGNORE_QUARANTINE=true ;;
     --services)
       [ $# -ge 2 ] || die 2 "--services needs a comma list"
       SERVICES=$2
@@ -243,8 +253,56 @@ rollback() {  # container, service, ref, old image id
 # pull_needed: after "up -d", is the container even on the new image?
 container_image() { docker inspect -f '{{.Image}}' "$1" 2>/dev/null || true; }
 
+# ── Quarantine ───────────────────────────────────────────────────────────────
+# An image that starts and then never reports healthy will not start on the next
+# run either. Remember it, so the nightly run does not take the service down for
+# the whole health timeout every night; forget it after MONARCH_QUARANTINE_DAYS,
+# or immediately with --retry-quarantined.
+quarantine_file() { printf '%s/quarantine' "$STATE_DIR"; }
+
+quarantine_get() {  # service → "<service> <image> <epoch>"
+  local f
+  f=$(quarantine_file)
+  [ -f "$f" ] || return 1
+  awk -v s="$1" '$1 == s' "$f" | tail -1
+}
+
+quarantine_set() {  # service, image
+  local f tmp
+  f=$(quarantine_file); tmp="$f.$$"
+  printf '%s %s %s\n' "$1" "$2" "$(date +%s)" >"$tmp" 2>/dev/null || return 0
+  if [ -f "$f" ]; then awk -v s="$1" '$1 != s' "$f" >>"$tmp" 2>/dev/null; fi
+  mv "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
+}
+
+quarantine_clear() {  # service
+  local f tmp
+  f=$(quarantine_file)
+  [ -f "$f" ] || return 0
+  tmp="$f.$$"
+  if awk -v s="$1" '$1 != s' "$f" >"$tmp" 2>/dev/null; then mv "$tmp" "$f"; else rm -f "$tmp"; fi
+}
+
+quarantined() {  # service, image → 0 when this exact image is held back
+  local svc=$1 image=$2 line held set_at
+  [ "$IGNORE_QUARANTINE" = true ] && return 1
+  line=$(quarantine_get "$svc") || return 1
+  held=$(printf '%s' "$line" | awk '{print $2}')
+  set_at=$(printf '%s' "$line" | awk '{print $3}')
+  [ "$held" = "$image" ] || return 1
+  case "$set_at" in ''|*[!0-9]*) return 1 ;; esac
+  if [ $(( $(date +%s) - set_at )) -lt $((QUARANTINE_DAYS * 86400)) ]; then
+    log "$svc: $image failed on $(date -u -d "@$set_at" +%Y-%m-%d); holding it back for ${QUARANTINE_DAYS} days (--retry-quarantined retries now)"
+    QUARANTINED+=("$svc")
+    return 0
+  fi
+  log "$svc: the quarantine on $image has expired; trying it again"
+  quarantine_clear "$svc"
+  return 1
+}
+
 update_one() {  # service
-  local svc=$1 c ref repo old_id cur_digest want_digest new_id old_tag=""
+  local svc=$1 c ref repo old_id cur_digest want_digest new_id old_tag="" candidate=""
   if ! c=$(container_for "$svc"); then
     log "$svc: no container on this host; skipped"
     return 0
@@ -260,7 +318,9 @@ update_one() {  # service
   ref=$(docker inspect -f '{{.Config.Image}}' "$c")
   old_id=$(docker inspect -f '{{.Image}}' "$c")
 
-  if started_recently "$c"; then
+  # The announcement reports what a run would find, so it must not be silenced by
+  # the watchtower guard.
+  if [ "$NOTIFY" = false ] && started_recently "$c"; then
     log "$svc: started less than ${SKIP_RECENT}s ago (watchtower?); leaving it alone"
     return 0
   fi
@@ -286,9 +346,15 @@ update_one() {  # service
       fi
       if [ "$want_digest" = "$cur_digest" ]; then
         log "$svc: ${old_tag} digest ${want_digest:0:19} is current"
+        quarantine_clear "$svc"
         return 0
       fi
       log "$svc: ${old_tag} digest ${cur_digest:0:19} -> ${want_digest:0:19}"
+      candidate="${repo}@${want_digest}"
+      if [ "$NOTIFY" = true ]; then
+        PENDING+=("$svc: ${old_tag} ${cur_digest:0:19} -> ${want_digest:0:19}")
+      fi
+      if quarantined "$svc" "$candidate"; then return 0; fi
       if [ "$DRY_RUN" = true ]; then
         log "$svc: dry-run, would re-pin and recreate it"
         return 0
@@ -308,6 +374,20 @@ update_one() {  # service
       ;;
     *)
       # Tag-pinned `:latest` (the *arr apps): the tag itself moves.
+      if [ "$NOTIFY" = true ]; then
+        # Ask the registry instead of pulling: the answer is the same and the
+        # announcement must not touch the host.
+        repo=${ref%:*}; old_tag=${ref##*:}
+        cur_digest=$(current_digest "$c")
+        want_digest=$(registry_digest "$repo" "$old_tag")
+        if [ -n "$cur_digest" ] && [ -n "$want_digest" ] && [ "$want_digest" != "$cur_digest" ]; then
+          PENDING+=("$svc: ${ref#*/} ${cur_digest:0:19} -> ${want_digest:0:19}")
+          log "$svc: update pending"
+        else
+          log "$svc: no update pending"
+        fi
+        return 0
+      fi
       if [ "$DRY_RUN" = true ]; then
         log "$svc: dry-run, would pull $ref and recreate it if the digest moved"
         return 0
@@ -327,9 +407,17 @@ update_one() {  # service
       fi
       if [ "$new_id" = "$old_id" ]; then
         log "$svc: running image is current"
+        quarantine_clear "$svc"
         return 0
       fi
       log "$svc: pulling moved the image ${old_id:0:19} -> ${new_id:0:19}"
+      candidate="$new_id"
+      if quarantined "$svc" "$candidate"; then
+        # Leave the checkout on the image that is actually running, so a plain
+        # `compose up` does not quietly start the one that already failed.
+        docker tag "$old_id" "$ref" >/dev/null 2>&1 || true
+        return 0
+      fi
       ;;
   esac
 
@@ -337,12 +425,14 @@ update_one() {  # service
   if ! "${COMPOSE_CMD[@]}" up -d --no-deps "$svc" >/dev/null 2>&1; then
     rollback "$c" "$svc" "$ref" "$old_id"
     FAILED+=("$svc")
+    if [ -n "$candidate" ]; then quarantine_set "$svc" "$candidate"; fi
     alert "Monarch: $svc could not be recreated on $(hostname)" "The compose recreate failed and the previous image was restored."
     return 1
   fi
   if ! wait_settled "$c"; then
     rollback "$c" "$svc" "$ref" "$old_id"
     FAILED+=("$svc")
+    if [ -n "$candidate" ]; then quarantine_set "$svc" "$candidate"; fi
     alert "Monarch: $svc did not come up on $(hostname)" "It was recreated, did not settle within ${HEALTH_TIMEOUT}s, and the previous image was restored."
     return 1
   fi
@@ -350,6 +440,7 @@ update_one() {  # service
     if [ -f "$f.jellyfin-bak" ]; then rm -f "$f.jellyfin-bak"; fi
   done
   log "$svc: updated and running"
+  quarantine_clear "$svc"
   return 0
 }
 
@@ -361,6 +452,19 @@ for svc in "${wanted[@]}"; do
   update_one "$svc" || true
 done
 
+if [ "$NOTIFY" = true ]; then
+  if [ "${#PENDING[@]}" -gt 0 ]; then
+    printf '%s\n' "monarch: ${#PENDING[@]} update(s) pending"
+    for p in "${PENDING[@]}"; do printf 'pending: %s\n' "$p"; done
+  else
+    printf 'monarch: nothing pending\n'
+  fi
+  exit 0
+fi
+
+if [ "${#QUARANTINED[@]}" -gt 0 ]; then
+  log "monarch: holding back ${QUARANTINED[*]} (state in $STATE_DIR/quarantine)"
+fi
 if [ "${#FAILED[@]}" -gt 0 ]; then
   die 1 "failed and rolled back: ${FAILED[*]}"
 fi
