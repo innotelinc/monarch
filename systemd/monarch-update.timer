@@ -1,0 +1,17 @@
+[Unit]
+Description=Check Monarch's media images once a day at 05:00
+
+[Timer]
+# Daily at 05:00, between the 04:00 Authentik announcement and the 06:00 apply:
+# the *arr apps take a nightly build, so a morning check picks it up, and the
+# media stack is quiet at that hour. Watchtower still touches `:latest` every six
+# hours; this adds the health gate, the rollback and the digest-pinned Jellyfin
+# that watchtower cannot move.
+OnCalendar=*-*-* 05:00:00
+RandomizedDelaySec=10m
+AccuracySec=1m
+Persistent=true
+Unit=monarch-update.service
+
+[Install]
+WantedBy=timers.target

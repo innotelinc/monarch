@@ -1,0 +1,16 @@
+[Unit]
+Description=Update Monarch's Jellyfin and *arr images
+Documentation=https://github.com/innotelinc/monarch
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Nice=10
+# A pull plus a health wait per service; seven services will not finish in the
+# default 90s oneshot timeout.
+TimeoutStartSec=3600
+EnvironmentFile=-/etc/innotel/monarch-update.env
+ExecStart=/opt/innotel/monarch-update/monarch-update.sh
