@@ -1114,6 +1114,23 @@ else
   printf '%s\n' "$prowlarr_idx_out" | indent >&2
 fi
 
+# The allowlist half of the same wiring. An *arr answers 400 to a Host name it
+# was not told about, which refuses Prowlarr's app test and its indexer sync
+# before authentication - and the apps still show all four registered, so it
+# reads as "Prowlarr is not registering". --check asks each app whether it
+# answers its peers: exit 0 is wired, 1 means one is unreachable from here, and
+# 2 means one refuses them.
+arr_hosts_out=$(python3 scripts/arr-allowed-hosts.py --check 2>&1)
+arr_hosts_code=$?
+if [ "$arr_hosts_code" -eq 0 ]; then
+  say "ok: $(printf '%s' "$arr_hosts_out" | head -1)"
+elif [ "$arr_hosts_code" -eq 1 ]; then
+  say "note: an *arr is not reachable from here (allowlist check skipped)"
+else
+  fail "arr: an *arr refuses its peers (arr-allowed-hosts.py exit $arr_hosts_code) - Prowlarr's app test and indexer sync are refused with HTTP 400; run scripts/arr-allowed-hosts.py to rewrite the allowlist and restart what changed"
+  printf '%s\n' "$arr_hosts_out" | indent >&2
+fi
+
 # ───────────────────────────────────────────────────────────────────────────
 # Cerulean Vault (SecretOps): does .env hold materialized values?
 # ───────────────────────────────────────────────────────────────────────────
