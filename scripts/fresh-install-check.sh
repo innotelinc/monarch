@@ -178,8 +178,12 @@ for app in board.get("apps", []):
             urls.append(value)
 
 # External hosts the board may link to that are NOT proxied by monarch's
-# own NPM (e.g. Magnate, the source billing platform at subscribe.innotel.us).
-external_hosts = {"subscribe.innotel.us", "media.magnate.innotel.us"}
+# own NPM: Magnate's billing platform (subscribe.innotel.us, media.magnate...),
+# and Cerulean Authentik, which is the estate's identity provider and runs on
+# the trust host rather than this stack's (npm-hosts.conf says the same in its
+# `auth` comment). The board draws a tile for it on purpose.
+external_hosts = {"subscribe.innotel.us", "media.magnate.innotel.us",
+                  "auth.cerulean.innotel.us", "media.innotel.us"}
 
 problems = []
 for u in sorted(set(urls)):
@@ -215,8 +219,11 @@ export NPM_ADMIN_PASSWORD="$TEST_PASSWORD"
 export NPM_DNS_PROVIDER=cloudflare
 plan="$SCRATCH/plan.txt"
 MONARCH_DOMAIN="$TEST_DOMAIN" python3 scripts/npm-proxy-hosts.py --dry-run > "$plan" 2>&1 || true
-if grep -Eq "would (create|update) $TEST_DOMAIN -> .*:7575 \(ws=True\)" "$plan"; then
-  ok "apex host ($TEST_DOMAIN -> :7575) is in the plan"
+# The apex is the landing page (npm-hosts.conf's `@` row) since the 2026-10-30
+# rollback, and the dashboard has its own `app` row below - so assert the app
+# row for the dashboard and the landing port for the apex.
+if grep -Eq "would (create|update) $TEST_DOMAIN -> .*:14014" "$plan"; then
+  ok "apex host ($TEST_DOMAIN -> landing :14014) is in the plan"
 else
   bad "apex host missing from the dry-run plan"
 fi
@@ -433,6 +440,12 @@ if [ "$FULL_STACK" = "1" ]; then
          -e 's|^JELLYFIN_HOST_URL=.*|JELLYFIN_HOST_URL=http://127.0.0.1:8097|' \
          -e 's|^REQUEST_URL=.*|REQUEST_URL=https://req.monarch-check.test|' \
          "$SCRATCH/.env"
+  # Jellyfin publishes on the media host's LAN address by default
+  # (`192.168.1.56:14016` in docker-compose.yml), which a runner or any other
+  # machine does not own: bind it to loopback so the probe-able stack starts
+  # wherever this check runs. The sample .env has no line for it, so append one.
+  grep -q '^JELLYFIN_TV_PUBLISH=' "$SCRATCH/.env" \
+    || echo 'JELLYFIN_TV_PUBLISH=127.0.0.1:14016' >> "$SCRATCH/.env"
   cat > "$SCRATCH/no-authentik.yml" <<EOF
 services:
   monarch-init:

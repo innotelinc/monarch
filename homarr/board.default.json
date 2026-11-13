@@ -162,10 +162,10 @@
     {
       "id": "1a2b3c4d-0003-4a03-8003-000000000003",
       "name": "Media",
-      "url": "https://media.monarch.innotel.us",
+      "url": "https://media.innotel.us",
       "behaviour": {
-        "onClickUrl": "https://media.monarch.innotel.us",
-        "externalUrl": "https://media.monarch.innotel.us",
+        "onClickUrl": "https://media.innotel.us",
+        "externalUrl": "https://media.innotel.us",
         "isOpeningNewTab": true,
         "tooltipDescription": "Jellyfin - stream movies & TV"
       },
