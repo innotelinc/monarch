@@ -446,6 +446,12 @@ if [ "$FULL_STACK" = "1" ]; then
   # wherever this check runs. The sample .env has no line for it, so append one.
   grep -q '^JELLYFIN_TV_PUBLISH=' "$SCRATCH/.env" \
     || echo 'JELLYFIN_TV_PUBLISH=127.0.0.1:14016' >> "$SCRATCH/.env"
+  # The bundled NPM in this compose publishes its admin UI on host 2081, not
+  # :81 (the shared :80/:81/:443 belong to Zeus FreePBX and the external NPM),
+  # while npm-proxy-hosts.py and drift-check.sh default to http://localhost:81.
+  # Both talk to the API, so both need the port this stack actually opens.
+  grep -q '^NPM_BASE_URL=' "$SCRATCH/.env" \
+    || echo 'NPM_BASE_URL=http://localhost:2081' >> "$SCRATCH/.env"
   cat > "$SCRATCH/no-authentik.yml" <<EOF
 services:
   monarch-init:
