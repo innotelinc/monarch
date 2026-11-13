@@ -1131,6 +1131,35 @@ else
   printf '%s\n' "$arr_hosts_out" | indent >&2
 fi
 
+# Filling Prowlarr does not fill the apps: only an application sync delivers an
+# indexer, so Prowlarr can hold seventy and every *arr hold none while all four
+# app tests are green. Zero from Prowlarr is the finding; "delivered only what
+# applied" is normal and is not a failure.
+arr_sync_out=$(python3 scripts/arr-sync.py --check 2>&1)
+arr_sync_code=$?
+if [ "$arr_sync_code" -eq 0 ]; then
+  say "ok: $(printf '%s' "$arr_sync_out" | head -1)"
+elif [ "$arr_sync_code" -eq 1 ]; then
+  say "note: Prowlarr or an *arr is not reachable from here (app sync check skipped)"
+else
+  fail "arr: an *arr received nothing from Prowlarr (arr-sync.py exit $arr_sync_code) - Prowlarr is full and the app holds no indexer, so its searches return nothing; run scripts/arr-sync.py to sync and report what arrived"
+  printf '%s\n' "$arr_sync_out" | indent >&2
+fi
+
+# The download categories: a client saving into the library root files an
+# import where the *arr cannot see it, and the title looks downloaded but never
+# arrives. --check reads each client's category against the layout init set up.
+arr_cat_out=$(python3 scripts/arr-download-categories.py --check 2>&1)
+arr_cat_code=$?
+if [ "$arr_cat_code" -eq 0 ]; then
+  say "ok: $(printf '%s' "$arr_cat_out" | head -1)"
+elif [ "$arr_cat_code" -eq 1 ]; then
+  say "note: a download client is not reachable from here (category check skipped)"
+else
+  fail "arr: a download client does not save into its media category (arr-download-categories.py exit $arr_cat_code) - the title downloads but the *arr never imports it; run scripts/arr-download-categories.py to set the categories"
+  printf '%s\n' "$arr_cat_out" | indent >&2
+fi
+
 # ───────────────────────────────────────────────────────────────────────────
 # Cerulean Vault (SecretOps): does .env hold materialized values?
 # ───────────────────────────────────────────────────────────────────────────
