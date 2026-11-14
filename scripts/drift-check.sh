@@ -1634,7 +1634,13 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   #    from this container: what is read here is the Incus host's (i1). See
   #    docs/operations.md.
   oc=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo "")
-  if [ "$oc" = "1" ]; then
+  # Only judged where redis actually runs. The value is host-global, and a
+  # disposable host - a CI runner, a rehearsal - has no redis asking for it, so
+  # demanding it there reported drift about a machine this deployment does not
+  # own.
+  if ! docker ps --format '{{.Image}}' 2>/dev/null | grep -qi redis; then
+    say "ok: infra vm.overcommit_memory not judged (no redis container on this host)"
+  elif [ "$oc" = "1" ]; then
     say "ok: infra host vm.overcommit_memory=1 (redis background saves)"
   else
     fail "infra: host vm.overcommit_memory=${oc:-unknown} - redis cannot bgsave; set it on i1 (docs/operations.md)"

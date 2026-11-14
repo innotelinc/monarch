@@ -524,9 +524,37 @@ EOF
   fi
   ok "NPM proxy hosts provisioned from npm-hosts.conf"
 
+  # The rehearsal blanks Authentik, and monarch-init stops before the steps that
+  # need it: the OIDC plugin binary and the branded splash are only placed when
+  # there is a client secret to write beside them. Both are steps a real install
+  # performs, and the drift check judges the *result* - so finish the install
+  # here, the same way the operator's repair would, and then assert on it.
+  echo "  Installing the pinned Jellyfin plugins and the branded splash..."
+  if ! python3 scripts/jellyfin-plugin-pin.py --install > "$SCRATCH/plugins.log" 2>&1; then
+    bad "jellyfin-plugin-pin.py --install failed:"
+    tail -20 "$SCRATCH/plugins.log" | sed 's/^/    /'
+    exit 1
+  fi
+  if ! python3 scripts/jellyfin-splash.py --apply > "$SCRATCH/splash.log" 2>&1; then
+    bad "jellyfin-splash.py --apply failed:"
+    tail -20 "$SCRATCH/splash.log" | sed 's/^/    /'
+    exit 1
+  fi
+  # Jellyfin reads plugins and branding.xml only at startup.
+  docker restart jellyfin > /dev/null 2>&1
+  n=0
+  while [ "$n" -lt 36 ]; do
+    if curl -sf -o /dev/null http://127.0.0.1:8096/System/Info/Public 2>/dev/null; then break; fi
+    n=$((n + 1)); sleep 5
+  done
+
   echo "  Running the real drift check..."
   sleep 10
-  if MONARCH_ENV="$SCRATCH/.env" bash scripts/drift-check.sh --quiet; then
+  # Same domain the stack was started and the proxy hosts provisioned with: the
+  # check reads npm-hosts.conf and probes the published names, so a run under a
+  # different domain judges this host against another deployment's rows.
+  if MONARCH_ENV="$SCRATCH/.env" MONARCH_DOMAIN="$TEST_DOMAIN" \
+       bash scripts/drift-check.sh --quiet; then
     ok "real drift check passed against the booted stack (exit 0)"
   else
     bad "real drift check FAILED against the booted stack"
