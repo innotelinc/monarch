@@ -2268,13 +2268,21 @@ def ensure_transmission_client(base, api, key, category):
     # No username/password: the daemon keeps no local login (docker-compose.yml),
     # so the apps reach it unauthenticated on the compose network. `category` is
     # Servarr's name for the download subfolder under Transmission's download dir.
+    #
+    # urlBase is deliberately NOT overridden. Servarr builds the RPC URL from its
+    # own field, and its default is `/transmission/` - the path LinuxServer's
+    # Transmission serves the API on. Setting it empty made every app ask for the
+    # site root, which answers 301 to /transmission/web/, and Servarr refused with
+    # `Unknown exception: Remote site redirected to /transmission/web/` - a 400
+    # that named neither Transmission nor the field. Measured against
+    # lscr.io/linuxserver/transmission and sonarr: empty -> 400, /transmission/ ->
+    # 201, and every *arr holds the client afterwards.
     values = {
         "host": "transmission",
         "port": 9091,
         "useSsl": False,
         "username": "",
         "password": "",
-        "urlBase": "",
     }
     for field in payload.get("fields", []):
         name = field.get("name")
@@ -2449,8 +2457,10 @@ def configure_prowlarr():
                 # No credentials: the daemon keeps no local login. Prowlarr
                 # itself only searches, but the client must exist here so every
                 # indexer can hand Prowlarr's download URLs to it.
+                # urlBase left at the schema's default for the same reason as
+                # the *arr apps above (an empty one redirects to the web UI).
                 values = {"host": "transmission", "port": 9091, "useSsl": False,
-                          "username": "", "password": "", "category": "", "urlBase": ""}
+                          "username": "", "password": "", "category": ""}
                 for field in payload.get("fields", []):
                     if field.get("name") in values:
                         field["value"] = values[field["name"]]
