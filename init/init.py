@@ -2897,6 +2897,13 @@ def configure_jellyseerr():
             st, _, langs = _http(base, f"/api/{api}/languageprofile", headers={"X-Api-Key": key})
             if st == 200 and isinstance(langs, list) and langs:
                 body["activeLanguageProfileId"] = langs[0]["id"]
+        # Jellyseerr validates these against its own schema and refuses the
+        # connection without them - a bare 400 that named nothing until its body
+        # was kept: radarr wants `isDefault`, sonarr wants `enableSeasonFolders`
+        # too, and `isDefault` is the service Jellyseerr routes new requests to.
+        body["isDefault"] = True
+        if impl == "sonarr":
+            body["enableSeasonFolders"] = True
         st, _, body_out = _http(JELLYSEERR_BASE, f"/api/v1/settings/{impl}",
                                 method="POST", body=body, opener=opener)
         if st in (200, 201, 204):
