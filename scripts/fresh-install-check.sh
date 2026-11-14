@@ -452,6 +452,13 @@ if [ "$FULL_STACK" = "1" ]; then
   # Both talk to the API, so both need the port this stack actually opens.
   grep -q '^NPM_BASE_URL=' "$SCRATCH/.env" \
     || echo 'NPM_BASE_URL=http://localhost:2081' >> "$SCRATCH/.env"
+  # Tell the drift check this is a throwaway deployment: it boots the apps but
+  # deliberately not Authentik (blanked above), so the SSO-fronted published
+  # names, the Let's Encrypt rows and the public indexers cannot be judged here.
+  # Those three print a note instead of a finding; everything else is judged in
+  # full, which is what caught the Transmission base URL. Never set on a host.
+  grep -q '^MONARCH_REHEARSAL=' "$SCRATCH/.env" \
+    || echo 'MONARCH_REHEARSAL=1' >> "$SCRATCH/.env"
   cat > "$SCRATCH/no-authentik.yml" <<EOF
 services:
   monarch-init:
@@ -507,6 +514,11 @@ EOF
     if curl -sf -o /dev/null http://127.0.0.1:8096/System/Info/Public 2>/dev/null; then break; fi
     n=$((n + 1)); sleep 5
   done
+  # monarch-init runs as root in its container and leaves its state directory
+  # owned by root; the drift check writes its verdict there and runs as this
+  # user, so it could not record one ("Permission denied" on every run).
+  $SUDO chown -R "$(id -u):$(id -g)" /docker/appdata/init 2>/dev/null || true
+
   echo "  Provisioning NPM proxy hosts for the test domain..."
   # The drift check verifies the live hosts, so create them first (no cert -
   # a Let's Encrypt wildcard can't be issued for the throwaway test domain).

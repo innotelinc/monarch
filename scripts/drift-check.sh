@@ -1001,7 +1001,13 @@ fi
 # egress from this host) and stays a note.
 names_out=$(python3 scripts/check-jellyfin-names.py 2>&1)
 names_code=$?
-if [ "$names_code" -eq 0 ]; then
+if [ "${MONARCH_REHEARSAL:-0}" = "1" ]; then
+  # Both published names are fronted by an oauth2-proxy gateway (jellyfin-sso),
+  # and the gateways are clients of Cerulean Authentik - which a rehearsal
+  # blanks on purpose, so it cannot boot them and the edge answers 502 for a
+  # reason that is the absence of Authentik, not drift in this stack.
+  say "note: the published Jellyfin names were not judged (rehearsal: their gateways need Authentik, which this deployment runs without)"
+elif [ "$names_code" -eq 0 ]; then
   say "ok: every published Jellyfin name (media, iptv) serves the app as itself over its own certificate"
 elif [ "$names_code" -eq 2 ]; then
   say "note: the published Jellyfin names could not be judged (skipped) - $(printf '%s' "$names_out" | tail -1)"
@@ -1105,7 +1111,12 @@ fi
 # them, which reads like "Prowlarr is not registering" and is not what was wrong.
 prowlarr_idx_out=$(python3 scripts/prowlarr-indexers.py --check --offline 2>&1)
 prowlarr_idx_code=$?
-if [ "$prowlarr_idx_code" -eq 0 ]; then
+if [ "${MONARCH_REHEARSAL:-0}" = "1" ]; then
+  # Indexers are added from the public trackers and half of them need
+  # FlareSolverr's browser session; a rehearsal boots neither, and an empty
+  # indexer list here says nothing about the deployment's searches.
+  say "note: Prowlarr's indexers were not judged (rehearsal: adding them needs tracker egress and FlareSolverr)"
+elif [ "$prowlarr_idx_code" -eq 0 ]; then
   say "ok: $(printf '%s' "$prowlarr_idx_out" | head -1)"
 elif [ "$prowlarr_idx_code" -eq 1 ]; then
   say "note: Prowlarr is not reachable from here (skipped)"
@@ -1502,7 +1513,14 @@ if [ "$npm_container" -eq 1 ] \
   if [ -z "${NPM_ADMIN_EMAIL:-}" ] || [ -z "${NPM_ADMIN_PASSWORD:-}" ]; then
     say "ok: npm (skipped - NPM_ADMIN_EMAIL/PASSWORD not set)"
   else
-    if npm_out=$(python3 scripts/npm-proxy-hosts.py --check 2>&1); then
+    # A rehearsal provisions its rows with --skip-ssl (throwaway DNS cannot get a
+    # Let's Encrypt cert) and forwards them to container names, which this shell
+    # cannot resolve - npm-proxy-hosts.py documents `--skip-ssl --no-reach` for
+    # exactly that host: it still compares every row against npm-hosts.conf,
+    # which is the part that can be judged here.
+    npm_check_args=()
+    [ "${MONARCH_REHEARSAL:-0}" = "1" ] && npm_check_args+=(--skip-ssl --no-reach)
+    if npm_out=$(python3 scripts/npm-proxy-hosts.py --check "${npm_check_args[@]}" 2>&1); then
       say "ok: npm proxy hosts match npm-hosts.conf"
       [ "$QUIET" -eq 0 ] && printf '%s\n' "$npm_out" | indent
     else
