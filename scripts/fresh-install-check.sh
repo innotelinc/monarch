@@ -530,12 +530,16 @@ EOF
   # performs, and the drift check judges the *result* - so finish the install
   # here, the same way the operator's repair would, and then assert on it.
   echo "  Installing the pinned Jellyfin plugins and the branded splash..."
-  if ! python3 scripts/jellyfin-plugin-pin.py --install > "$SCRATCH/plugins.log" 2>&1; then
+  # As root: the appdata belongs to the uid Jellyfin runs as (1000), and these
+  # two scripts hand what they write to that uid - which they can only do when
+  # they run as root. A non-root run left the plugins owned by the CI user and
+  # Jellyfin could not have read them anyway.
+  if ! $SUDO python3 scripts/jellyfin-plugin-pin.py --install > "$SCRATCH/plugins.log" 2>&1; then
     bad "jellyfin-plugin-pin.py --install failed:"
     tail -20 "$SCRATCH/plugins.log" | sed 's/^/    /'
     exit 1
   fi
-  if ! python3 scripts/jellyfin-splash.py --apply > "$SCRATCH/splash.log" 2>&1; then
+  if ! $SUDO python3 scripts/jellyfin-splash.py --apply > "$SCRATCH/splash.log" 2>&1; then
     bad "jellyfin-splash.py --apply failed:"
     tail -20 "$SCRATCH/splash.log" | sed 's/^/    /'
     exit 1
