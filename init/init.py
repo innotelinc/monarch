@@ -2286,11 +2286,22 @@ def ensure_transmission_client(base, api, key, category):
     field["value"] = category
     payload["name"] = "Transmission"
     payload["enable"] = True
-    status, _, _ = _http(base, f"/api/{api}/downloadclient", method="POST",
-                         body=payload, headers={"X-Api-Key": key})
+    status, _, err = _http(base, f"/api/{api}/downloadclient", method="POST",
+                           body=payload, headers={"X-Api-Key": key})
     if status in (200, 201):
         return True, "added"
-    return False, f"could not add (HTTP {status})"
+    # The body is what says WHY: Servarr answers 400 with the validation errors
+    # from its own connection test ("Unable to connect to Transmission", a bad
+    # base path, a missing field), and dropping it left the operator with a
+    # number that named neither the field nor the cause.
+    detail = ""
+    if err:
+        try:
+            import json as _json
+            detail = ": " + _json.dumps(err)[:400]
+        except (TypeError, ValueError):
+            detail = ": " + str(err)[:400]
+    return False, f"could not add (HTTP {status}{detail})"
 
 
 def ensure_media_mgmt(base, api, key):
