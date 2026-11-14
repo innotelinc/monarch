@@ -348,6 +348,10 @@ LDAP_HOST_DRIFT=0
 # thing for the heal to react to. It is reported, it counts as a failure, and it
 # keeps failing until somebody re-keys the connection or switches it off.
 say()  { [ "$QUIET" -eq 0 ] && echo "$@"; }
+# A "not judged" line records something this run deliberately did not check.
+# It prints even under --quiet: a green summary that skipped three checks has to
+# say which three, or the green is not a claim anyone can audit.
+note() { echo "$@"; }
 indent() { sed 's/^/  /'; }   # prefix each line of stdin with two spaces
 fail() { echo "DRIFT-FAIL: $*" >&2; FAIL_LINES+=("$*"); FAILS=$((FAILS + 1)); }
 
@@ -1006,7 +1010,7 @@ if [ "${MONARCH_REHEARSAL:-0}" = "1" ]; then
   # and the gateways are clients of Cerulean Authentik - which a rehearsal
   # blanks on purpose, so it cannot boot them and the edge answers 502 for a
   # reason that is the absence of Authentik, not drift in this stack.
-  say "note: the published Jellyfin names were not judged (rehearsal: their gateways need Authentik, which this deployment runs without)"
+  note "note: the published Jellyfin names were not judged (rehearsal: their gateways need Authentik, which this deployment runs without)"
 elif [ "$names_code" -eq 0 ]; then
   say "ok: every published Jellyfin name (media, iptv) serves the app as itself over its own certificate"
 elif [ "$names_code" -eq 2 ]; then
@@ -1115,7 +1119,7 @@ if [ "${MONARCH_REHEARSAL:-0}" = "1" ]; then
   # Indexers are added from the public trackers and half of them need
   # FlareSolverr's browser session; a rehearsal boots neither, and an empty
   # indexer list here says nothing about the deployment's searches.
-  say "note: Prowlarr's indexers were not judged (rehearsal: adding them needs tracker egress and FlareSolverr)"
+  note "note: Prowlarr's indexers were not judged (rehearsal: adding them needs tracker egress and FlareSolverr)"
 elif [ "$prowlarr_idx_code" -eq 0 ]; then
   say "ok: $(printf '%s' "$prowlarr_idx_out" | head -1)"
 elif [ "$prowlarr_idx_code" -eq 1 ]; then

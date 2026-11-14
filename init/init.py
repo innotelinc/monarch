@@ -2897,12 +2897,19 @@ def configure_jellyseerr():
             st, _, langs = _http(base, f"/api/{api}/languageprofile", headers={"X-Api-Key": key})
             if st == 200 and isinstance(langs, list) and langs:
                 body["activeLanguageProfileId"] = langs[0]["id"]
-        st, _, _ = _http(JELLYSEERR_BASE, f"/api/v1/settings/{impl}",
-                         method="POST", body=body, opener=opener)
+        st, _, body_out = _http(JELLYSEERR_BASE, f"/api/v1/settings/{impl}",
+                                method="POST", body=body, opener=opener)
         if st in (200, 201, 204):
             _log(f"Jellyseerr: {impl} connected (profile '{profile['name']}' -> {root_dir}).")
         else:
-            _issues.append(f"jellyseerr: connecting {impl} failed (HTTP {st})")
+            # Jellyseerr relays the app's own refusal in this body. Without it the
+            # line named neither which side refused nor why - the same bare 400
+            # that hid the Transmission base URL for weeks.
+            detail = ""
+            if isinstance(body_out, dict):
+                detail = str(body_out.get("message") or body_out.get("error") or "").strip()
+            _issues.append(f"jellyseerr: connecting {impl} failed (HTTP {st}"
+                           + (f": {detail[:300]}" if detail else "") + ")")
 
     _jellyseerr_enable_jellyfin_login(opener)
     _results["jellyseerr"] = "configured"
