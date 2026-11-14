@@ -478,12 +478,16 @@ EOF
        --profile npm \
        --env-file "$SCRATCH/.env" up -d nginx-proxy-manager jellyfin sonarr \
        radarr lidarr whisparr prowlarr transmission bazarr jellyseerr \
+       iptv \
        > "$SCRATCH/up.log" 2>&1; then
     bad "docker compose up -d (probe-able services) failed:"
     tail -20 "$SCRATCH/up.log" | sed 's/^/    /'
     exit 1
   fi
-  ok "stack started (jellyfin, *arrs, prowlarr, Transmission, bazarr, jellyseerr, NPM)"
+  # iptv serves the dial Jellyfin is pointed at (LIVETV_TUNER_URL is
+  # http://iptv:3000/...), so init's "add the M3U tuner" step answers 500 for the
+  # absence of the container, not for a bad tuner. Boot it with the rest.
+  ok "stack started (jellyfin, *arrs, prowlarr, Transmission, bazarr, jellyseerr, NPM, iptv)"
 
   echo "  Running monarch-init to wire the stack..."
   # `< /dev/null`: `docker compose run` attaches and forwards the caller's stdin
@@ -575,7 +579,7 @@ EOF
   else
     bad "real drift check FAILED against the booted stack"
     echo "  Diagnosing the failing services (logs below):"
-    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr transmission bazarr nginx-proxy-manager; do
+    for c in jellyfin jellyseerr sonarr radarr lidarr whisparr prowlarr transmission bazarr iptv nginx-proxy-manager; do
       st="$(docker inspect -f '{{.State.Status}} (restarts={{.RestartCount}})' "$c" 2>/dev/null || echo down)"
       echo "    $c: $st"
     done
