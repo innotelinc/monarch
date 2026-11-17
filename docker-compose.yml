@@ -120,15 +120,15 @@ services:
   jellyfin:
     <<: *common-keys
     container_name: jellyfin
-    # Pinned to Jellyfin 12.2. hotio publishes no version tags for this
+    # Pinned to Jellyfin 12.4. hotio publishes no version tags for this
     # image (only `latest`/`release`, which track the stable channel and
     # silently rolled 11 -> 12 — that jump crash-looped on migration
     # 20260815063607_RemoveOrphanedUserPermissionsAndPreferences). The digest
     # below is the exact build verified running after the v12 DB repair
-    # (`release-12.2`; its own label reports org.opencontainers.image.version
-    # 12.2); set JELLYFIN_IMAGE to move off it deliberately instead of by
+    # (`release-12.4`; its own label reports org.opencontainers.image.version
+    # 12.4); set JELLYFIN_IMAGE to move off it deliberately instead of by
     # surprise.
-    image: ${JELLYFIN_IMAGE:-ghcr.io/hotio/jellyfin@sha256:048001357ab34f032f757c72aff22d7256f7ee96e63005ba451cc3265fc99797}
+    image: ${JELLYFIN_IMAGE:-ghcr.io/hotio/jellyfin@sha256:81c911932b8a2c2b2a591349eaafdc0d15aa5eb49df06334b2970add62cd4918}
     labels:
       # The digest above is what makes the watch door predictable: Watchtower can
       # only update a container whose reference is a tag it can re-pull, and an
