@@ -26,3 +26,49 @@ def serve(*args, **kwargs):
 
 
 waitress.serve = serve
+
+# --- abandoned chromedriver sessions -----------------------------------------------
+# Every /v1 request starts its own chromedriver. When the browser dies mid-solve
+# ("tab crashed"), selenium's Service._terminate_process() raises PermissionError from
+# os.kill() — the pid it is holding is no longer this process's to signal — and because
+# the raise happens before Popen.wait(), the exited chromedriver is never reaped. On
+# 2026-11-16 that left 15 `chromedriver` zombies in monarch's cgroup in under an hour,
+# one per FlareSolverr request, and check-zombie-processes.py warned on i2.
+#
+# Swallow the failed signal and always wait: a child that cannot be terminated is still
+# a child that can be reaped. Image updates stay safe — this is still PYTHONPATH=/patch,
+# not a patched upstream file.
+from selenium.webdriver.common import service as _selenium_service
+
+_terminate_process = _selenium_service.Service._terminate_process
+
+
+def _terminate_process_and_reap(self):
+    try:
+        _terminate_process(self)
+    except Exception:  # gone already, or the pid now belongs to someone else
+        try:
+            self.process.wait(timeout=10)
+        except Exception:
+            pass
+
+
+_selenium_service.Service._terminate_process = _terminate_process_and_reap
+
+# Selenium retries the termination and then calls process.kill(); both paths go through
+# Popen.send_signal, which raises PermissionError for a pid this process no longer owns
+# before Popen.wait() can run. Swallowing the failed signal lets selenium's own wait()
+# reap the child, which is the only thing that clears a zombie.
+import subprocess as _subprocess
+
+_send_signal = _subprocess.Popen.send_signal
+
+
+def _send_signal_if_ours(self, sig):
+    try:
+        _send_signal(self, sig)
+    except PermissionError:
+        pass
+
+
+_subprocess.Popen.send_signal = _send_signal_if_ours
