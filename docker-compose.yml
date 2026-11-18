@@ -205,8 +205,6 @@ services:
     <<: *common-keys
     container_name: jellyseerr
     image: ghcr.io/seerr-team/seerr@sha256:aadee014b40e28cf9aa4928bc9d1183a6eb08f8c44d543cddc9efdcb16549be2
-    security_opt:
-      - apparmor=unconfined
     init: true
     ports:
       # Loopback only: the <service>-sso gateway reaches the app over the
@@ -228,8 +226,6 @@ services:
     <<: *common-keys
     container_name: sonarr
     image: ghcr.io/hotio/sonarr@sha256:4b7d2569dcae81bd29c558c2db68f3de46db3422f93f56645b1f4068084e1aa9
-    security_opt:
-      - apparmor=unconfined
     ports:
       - 127.0.0.1:8989:8989
     volumes:
@@ -244,8 +240,6 @@ services:
     <<: *common-keys
     container_name: radarr
     image: ghcr.io/hotio/radarr@sha256:2d53019fa4a9da7aaff372fa477a666eaecf7a1370b2231ccf1db02b8a0ca305
-    security_opt:
-      - apparmor=unconfined
     ports:
       - 127.0.0.1:7878:7878
     volumes:
@@ -260,8 +254,6 @@ services:
     <<: *common-keys
     container_name: lidarr
     image: ghcr.io/hotio/lidarr@sha256:181da2b52a021587d6bde0da60bdafd3f8c25a8e7f80582410645c469bb6e857
-    security_opt:
-      - apparmor=unconfined
     ports:
       - 127.0.0.1:8686:8686
     volumes:
@@ -280,8 +272,6 @@ services:
     # 5.2.x support; qBittorrent was replaced by Transmission on 2026-10-01,
     # but a frozen image is still a reason to stay on v2-develop.)
     image: ghcr.io/hotio/whisparr@sha256:113cd077e0761a3e732f372f06357c8dc1d332d5b124935bb585b1a8185e2d6b
-    security_opt:
-      - apparmor=unconfined
     ports:
       - 127.0.0.1:6969:6969
     volumes:
@@ -299,8 +289,6 @@ services:
     <<: *common-keys
     container_name: prowlarr
     image: ghcr.io/hotio/prowlarr@sha256:275c075cf2eb31d97fb1dec650872be0fd0deedd3fd32dd1dc2ee526f53d9225
-    security_opt:
-      - apparmor=unconfined
     ports:
       - 127.0.0.1:9696:9696
     volumes:
@@ -314,8 +302,6 @@ services:
     <<: *common-keys
     container_name: bazarr
     image: ghcr.io/hotio/bazarr@sha256:7ca6a2f9c891151c2da8fbe37cc0267cdb8bc5907be0ef595ac374d439da1ce8
-    security_opt:
-      - apparmor=unconfined
     ports:
       - 127.0.0.1:6767:6767
     volumes:
@@ -450,8 +436,6 @@ services:
     <<: *common-keys
     container_name: sabnzbd
     image: ghcr.io/hotio/sabnzbd@sha256:8a29a7f565a611c1f470f8d5dbf0fb2a3b7be8551856685d37ce64f25ef7149f
-    security_opt:
-      - apparmor=unconfined
     ports:
       # 8082 is the default because scripts/npm-hosts.conf forwards
       # sabnzbd.<domain> to ${SABNZBD_PORT:-8082} - the same variable, so the
