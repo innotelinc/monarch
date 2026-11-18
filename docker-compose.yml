@@ -6,14 +6,19 @@
 # repo is checked out (the mesh puts it in 3-media/monarch).
 name: monarch
 
+# The shared environment every media container gets; its own anchor so a service
+# can extend it without dropping PUID/PGID/TZ (a service-level `environment:`
+# replaces the merged map instead of adding to it).
+x-common-env: &common-env
+  PUID: 1000
+  PGID: 1000
+  TZ: ${TZ:-America/New_York}
+
 x-common-keys: &common-keys
   restart: unless-stopped
   logging:
     driver: json-file
-  environment:
-    PUID: 1000
-    PGID: 1000
-    TZ: ${TZ:-America/New_York}
+  environment: *common-env
   dns:
     - 1.1.1.1
     - 1.0.0.1
@@ -120,6 +125,16 @@ services:
   jellyfin:
     <<: *common-keys
     container_name: jellyfin
+    # hotio starts the app from its s6 servicedir, so .NET's content root is
+    # /run/s6-rc.../servicedirs/service-jellyfin and every start logs "The
+    # WebRootPath was not found: .../wwwroot". The web client really lives in
+    # /usr/share/jellyfin/web; the image's run script exports this variable.
+    environment:
+      <<: *common-env
+      JELLYFIN_WEB_DIR: /usr/share/jellyfin/web
+      # ASP.NET's static-file middleware takes its root from this variable;
+      # unset it resolves to <content root>/wwwroot, i.e. the s6 servicedir.
+      ASPNETCORE_WEBROOT: /usr/share/jellyfin/web
     # Pinned to Jellyfin 12.4. hotio publishes no version tags for this
     # image (only `latest`/`release`, which track the stable channel and
     # silently rolled 11 -> 12 — that jump crash-looped on migration
@@ -708,11 +723,14 @@ services:
     container_name: authentik-ldap
     image: ghcr.io/goauthentik/ldap:2026.8.5
     environment:
-      AUTHENTIK_HOST: http://${AUTHENTIK_LDAP_AUTHORITY:-auth.cerulean.innotel.us}:${AUTHENTIK_LDAP_AUTHORITY_PORT:-9000}
-      AUTHENTIK_INSECURE: "true"          # the authority is plain http on the LAN
+      # The public door: NPM terminates TLS for auth.innotel.us on 443 and fronts
+      # the core on :9000. Pinning the name to the edge keeps the outpost off a
+      # WAN hairpin and uses the certificate the name is actually issued for.
+      AUTHENTIK_HOST: https://${AUTHENTIK_LDAP_AUTHORITY:-auth.innotel.us}
+      AUTHENTIK_INSECURE: "false"
       AUTHENTIK_TOKEN: ${AUTHENTIK_LDAP_TOKEN:-ak-ldap-outpost-2026}
     extra_hosts:
-      - "${AUTHENTIK_LDAP_AUTHORITY:-auth.cerulean.innotel.us}:${AUTHENTIK_LDAP_AUTHORITY_IP:-192.168.1.71}"
+      - "${AUTHENTIK_LDAP_AUTHORITY:-auth.innotel.us}:${AUTHENTIK_LDAP_AUTHORITY_IP:-192.168.1.71}"
     depends_on:
       - jellyfin
 
