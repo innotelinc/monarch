@@ -137,8 +137,8 @@ services:
       com.centurylinklabs.watchtower.enable: "false"
     # Memory posture (docs/service-audit.md): transcode bursts are the media
     # stack's biggest consumer; cap and keep swap off.
-    mem_limit: 4g
-    memswap_limit: 4g
+    mem_limit: 3g
+    memswap_limit: 3g
     healthcheck:
       # The image's first start after a recreate can stall in its own init: the
       # container reports Up while the app service never starts, and nothing that
@@ -204,7 +204,9 @@ services:
   jellyseerr:
     <<: *common-keys
     container_name: jellyseerr
-    image: ghcr.io/seerr-team/seerr:latest
+    image: ghcr.io/seerr-team/seerr@sha256:aadee014b40e28cf9aa4928bc9d1183a6eb08f8c44d543cddc9efdcb16549be2
+    security_opt:
+      - apparmor=unconfined
     init: true
     ports:
       # Loopback only: the <service>-sso gateway reaches the app over the
@@ -225,7 +227,9 @@ services:
   sonarr:
     <<: *common-keys
     container_name: sonarr
-    image: ghcr.io/hotio/sonarr:latest
+    image: ghcr.io/hotio/sonarr@sha256:4b7d2569dcae81bd29c558c2db68f3de46db3422f93f56645b1f4068084e1aa9
+    security_opt:
+      - apparmor=unconfined
     ports:
       - 127.0.0.1:8989:8989
     volumes:
@@ -239,7 +243,9 @@ services:
   radarr:
     <<: *common-keys
     container_name: radarr
-    image: ghcr.io/hotio/radarr:latest
+    image: ghcr.io/hotio/radarr@sha256:2d53019fa4a9da7aaff372fa477a666eaecf7a1370b2231ccf1db02b8a0ca305
+    security_opt:
+      - apparmor=unconfined
     ports:
       - 127.0.0.1:7878:7878
     volumes:
@@ -253,7 +259,9 @@ services:
   lidarr:
     <<: *common-keys
     container_name: lidarr
-    image: ghcr.io/hotio/lidarr:latest
+    image: ghcr.io/hotio/lidarr@sha256:181da2b52a021587d6bde0da60bdafd3f8c25a8e7f80582410645c469bb6e857
+    security_opt:
+      - apparmor=unconfined
     ports:
       - 127.0.0.1:8686:8686
     volumes:
@@ -271,7 +279,9 @@ services:
     # which predates current Whisparr. (The original reason was qBittorrent
     # 5.2.x support; qBittorrent was replaced by Transmission on 2026-10-01,
     # but a frozen image is still a reason to stay on v2-develop.)
-    image: ghcr.io/hotio/whisparr:v2-develop
+    image: ghcr.io/hotio/whisparr@sha256:113cd077e0761a3e732f372f06357c8dc1d332d5b124935bb585b1a8185e2d6b
+    security_opt:
+      - apparmor=unconfined
     ports:
       - 127.0.0.1:6969:6969
     volumes:
@@ -288,7 +298,9 @@ services:
   prowlarr:
     <<: *common-keys
     container_name: prowlarr
-    image: ghcr.io/hotio/prowlarr:latest
+    image: ghcr.io/hotio/prowlarr@sha256:275c075cf2eb31d97fb1dec650872be0fd0deedd3fd32dd1dc2ee526f53d9225
+    security_opt:
+      - apparmor=unconfined
     ports:
       - 127.0.0.1:9696:9696
     volumes:
@@ -301,7 +313,9 @@ services:
   bazarr:
     <<: *common-keys
     container_name: bazarr
-    image: ghcr.io/hotio/bazarr:latest
+    image: ghcr.io/hotio/bazarr@sha256:7ca6a2f9c891151c2da8fbe37cc0267cdb8bc5907be0ef595ac374d439da1ce8
+    security_opt:
+      - apparmor=unconfined
     ports:
       - 127.0.0.1:6767:6767
     volumes:
@@ -393,7 +407,7 @@ services:
   transmission:
     <<: *common-keys
     container_name: transmission
-    image: lscr.io/linuxserver/transmission:latest
+    image: lscr.io/linuxserver/transmission@sha256:aaf349cd859ca9d5f34f394c56b8097c267a513283698adc4d07ee61d7cb1a85
     stop_grace_period: 30m
     depends_on:
       monarch-seed:
@@ -435,7 +449,9 @@ services:
   sabnzbd:
     <<: *common-keys
     container_name: sabnzbd
-    image: ghcr.io/hotio/sabnzbd:latest
+    image: ghcr.io/hotio/sabnzbd@sha256:8a29a7f565a611c1f470f8d5dbf0fb2a3b7be8551856685d37ce64f25ef7149f
+    security_opt:
+      - apparmor=unconfined
     ports:
       # 8082 is the default because scripts/npm-hosts.conf forwards
       # sabnzbd.<domain> to ${SABNZBD_PORT:-8082} - the same variable, so the
@@ -483,7 +499,7 @@ services:
     # anonymous Docker Hub pull shares its small per-address budget with every
     # image digest check, which is what made Ontrak Sync's updates fail with
     # `429`. The image is unchanged - it is a mirror.
-    image: ${REQUESTRR_IMAGE:-ghcr.io/innotelinc/monarch/requestrr:latest}
+    image: ${REQUESTRR_IMAGE:-ghcr.io/innotelinc/monarch/requestrr@sha256:74392e2e633b8c574aa93a93945e5ed481df5059441cc31d120796a72e3a7ff2}
     ports:
       - 127.0.0.1:4545:4545
     volumes:
@@ -503,10 +519,10 @@ services:
     <<: *common-keys
     container_name: flaresolverr
     # Caps this service so a pile-up of headless Chromium instances can only
-    # OOM-kill itself, not the rest of the 8 GiB monarch cgroup (62 of 89
+    # OOM-kill itself, not the rest of the 10 GiB monarch cgroup (62 of 89
     # kernel OOM kills in one boot were in this scope).
-    mem_limit: 2g
-    image: ghcr.io/flaresolverr/flaresolverr:latest
+    mem_limit: 3g
+    image: ghcr.io/flaresolverr/flaresolverr@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
     # waitress (the server FlareSolverr switched to for FlareSolverr#680) runs
     # four worker threads, and every /v1 request starts its own headless
     # Chromium, so four solves could be live at once inside the 8 GiB monarch
@@ -523,6 +539,7 @@ services:
       TZ: ${TZ:-America/New_York}
       LOG_LEVEL: info
       PYTHONPATH: /patch
+    shm_size: 1g
 
   ###############################################
   # AUTOBRR - Indexer Automation
@@ -602,7 +619,7 @@ services:
   iptv:
     <<: *common-keys
     container_name: iptv
-    image: ghcr.io/iptv-org/epg:master
+    image: ghcr.io/iptv-org/epg@sha256:59484164d8effbf5a404a172ee070f35553168aa28ac416d14645b8a5fcd32a8
     ports:
       # Host 3011 (container 3000): :3001 is the Zeus portal. Loopback only, for
       # the reason on Jellyfin above: the public name is the SSO gateway's, and
@@ -621,7 +638,7 @@ services:
       # for a part with room to spare, and the container limit is still the boundary a
       # runaway dies at - inside its own cgroup, not as the host's OOM killer.
       NODE_OPTIONS: "--max-old-space-size=3072"
-    mem_limit: 4g
+    mem_limit: 2g
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # Host /opt/epg holds channels.xml (EPG channel list, written by
@@ -705,7 +722,7 @@ services:
   authentik-ldap:
     <<: *common-keys
     container_name: authentik-ldap
-    image: ghcr.io/goauthentik/ldap:2026.8.4
+    image: ghcr.io/goauthentik/ldap:2026.8.5
     environment:
       AUTHENTIK_HOST: http://${AUTHENTIK_LDAP_AUTHORITY:-auth.cerulean.innotel.us}:${AUTHENTIK_LDAP_AUTHORITY_PORT:-9000}
       AUTHENTIK_INSECURE: "true"          # the authority is plain http on the LAN
@@ -726,7 +743,7 @@ services:
   monarch-recs:
     <<: *common-keys
     container_name: monarch-recs
-    image: ghcr.io/innotelinc/monarch-recs:latest
+    image: ghcr.io/innotelinc/monarch-recs@sha256:c8aa29f3b078efcc23296be53d5cb28e4562b06bbc1a2f69cd6dfd7f94c64425
     build: ./ai-recs
     working_dir: /app
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
@@ -759,7 +776,7 @@ services:
   monarch-health:
     <<: *common-keys
     container_name: monarch-health
-    image: ghcr.io/innotelinc/monarch-health:latest
+    image: ghcr.io/innotelinc/monarch-health@sha256:fadf56c00d62e349e1b734ee98a77d4476a9141abc9a4d6040486eae89d4097d
     build: ./health-analytics
     working_dir: /app
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"]
@@ -947,7 +964,7 @@ services:
     # per-address budget that is SHARED with every digest check, and pulling
     # watchtower from the Hub exhausted it and made Ontrak Sync's other image
     # updates fail with `429 Too Many Requests`. GHCR has no such limit.
-    image: ${WATCHTOWER_IMAGE:-ghcr.io/innotelinc/monarch/watchtower:latest}
+    image: ${WATCHTOWER_IMAGE:-ghcr.io/innotelinc/monarch/watchtower@sha256:e96976bcbeaf0a9adeddc9016a539c27a2245ef6bb7d3ca97ed106783350d387}
     restart: unless-stopped
     command: --cleanup --interval 21600
     volumes:
